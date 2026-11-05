@@ -2591,7 +2591,9 @@ fn run_edit_body(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx
             };
             let shape = Shape::CustomStamp { rect, name: name.clone(), picture: src.xobject, image: src.image, size: (sw, sh) };
             let style = pdfcraft_annot::Style::default_for(&shape);
-            let new = NewAnnotation { page: *page, shape, style, contents: name.clone(), author: author.clone() };
+            // A host-placed stamp (`extra` set) keeps its name out of /Contents: viewers show that as a note.
+            let contents = if extra.is_some() { String::new() } else { name.clone() };
+            let new = NewAnnotation { page: *page, shape, style, contents, author: author.clone() };
             let index = pdfcraft_annot::add_annotation(doc, &new, &cx.meta())?;
             pdfcraft_annot::orient_image_stamp(doc, *page, index, rotation)?;
             if let Some((key, value)) = extra {
