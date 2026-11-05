@@ -11,6 +11,8 @@ use crate::{PdfCraftApp, QuickTool, stamps_ui::MAX_STAMP_BYTES};
 const MAX_SIDE_PT: f64 = 5000.0;
 const MAX_META_BYTES: usize = 64 << 10;
 const MAX_ID_BYTES: usize = 200;
+/// Longest side of a stamp without a given size, in PDF points (the engine's natural size).
+const NATURAL_MAX_PT: f64 = 200.0;
 /// PNG pixel limits. The server draws at most 3 px per point, so a 14400 pt page side is 43200 px
 /// at the very most, but a stamp is a signature or a label: 8192 px a side and 16 Mpx in all
 /// (64 MB decoded as RGBA) stop a small file that expands to gigabytes without limiting real stamps.
@@ -37,6 +39,19 @@ pub enum StampCommand {
         id: String,
         role: String,
         label: String,
+    },
+    /// A stamp put at given coordinates at once (`pdfcraft:stamp-place`), with no click. `x`, `y`
+    /// are the stamp's top-left corner in PDF points on page `page` (0-based) as shown; `size` is
+    /// width and height together, or `None` for the PNG's natural size.
+    Place {
+        id: String,
+        page: usize,
+        x: f64,
+        y: f64,
+        size: Option<(f64, f64)>,
+        name: String,
+        bytes: Vec<u8>,
+        meta: String,
     },
     /// The screen watermark (`pdfcraft:watermark`): `None` or blank takes it away.
     Watermark {
@@ -95,9 +110,34 @@ pub(crate) fn validate_sign_box(id: &str, role: &str, label: &str) -> Result<(),
 pub(crate) fn sign_box_rect(page: &pdfcraft_render::PageInfo) -> [f64; 4] {
     let (w, h) = SIGN_BOX_SIZE;
     let (x, y) = (((f64::from(page.width) - w) / 2.0).max(0.0), ((f64::from(page.height) - h) / 2.0).max(0.0));
+    view_rect_to_user(page, x, y, w, h)
+}
+
+/// A rectangle given by its top-left corner and size on the page as shown (upright whatever the
+/// page's `/Rotate`) as `[x0, y0, x1, y1]` in user space.
+pub(crate) fn view_rect_to_user(page: &pdfcraft_render::PageInfo, x: f64, y: f64, w: f64, h: f64) -> [f64; 4] {
     let corners = [(x, y), (x + w, y + h)].map(|(x, y)| page.view_to_user(x as f32, y as f32));
     [corners[0][0].min(corners[1][0]), corners[0][1].min(corners[1][1]), corners[0][0].max(corners[1][0]), corners[0][1].max(corners[1][1])]
         .map(f64::from)
+}
+
+/// A stamp's natural size: one PNG pixel is one point, the longer side kept to 200 pt (never enlarged).
+pub(crate) fn natural_size(px_w: u32, px_h: u32) -> (f64, f64) {
+    let (w, h) = (f64::from(px_w), f64::from(px_h));
+    let scale = (NATURAL_MAX_PT / w.max(h)).min(1.0);
+    (w * scale, h * scale)
+}
+
+/// Check where a `pdfcraft:stamp-place` puts the stamp: finite numbers, the top-left corner on the page.
+pub(crate) fn validate_place(page: &pdfcraft_render::PageInfo, x: f64, y: f64, size: Option<(f64, f64)>) -> Result<(), String> {
+    let (w, h) = size.unwrap_or((1.0, 1.0));
+    if !(x.is_finite() && y.is_finite() && w.is_finite() && h.is_finite()) {
+        return Err("x, y, width and height must be finite numbers".into());
+    }
+    if x < 0.0 || y < 0.0 || x >= f64::from(page.width) || y >= f64::from(page.height) {
+        return Err("the stamp must start inside the page".into());
+    }
+    Ok(())
 }
 
 /// Check a request before arming it: a readable PNG, a sane size, bounded text.
@@ -161,6 +201,53 @@ impl PdfCraftApp {
         }
     }
 
+    /// Stamp a PNG at the given place at once (the same edit as a click, so undo and saving are
+    /// the usual). Returns the page, or why it was refused.
+    #[allow(clippy::too_many_arguments)]
+    fn place_stamp(
+        &mut self,
+        id: &str,
+        page: usize,
+        x: f64,
+        y: f64,
+        size: Option<(f64, f64)>,
+        name: &str,
+        bytes: Vec<u8>,
+        meta: &str,
+    ) -> Result<usize, String> {
+        let (_, doc) = self.active_ids().ok_or("no document is open")?;
+        let state = self.session.get(doc).ok_or("no document is open")?;
+        if !state.allows_annotation() {
+            return Err("the document doesn't allow comments".into());
+        }
+        let info = state.info.pages.get(page).ok_or("the page is out of range")?;
+        // Cheap checks first: the size and the place are known before the PNG is read.
+        validate_place(info, x, y, size)?;
+        let (w, h) = match size {
+            Some(size) => size,
+            None => {
+                let reader = png::Decoder::new(std::io::Cursor::new(&bytes)).read_info().map_err(|e| format!("not a readable PNG: {e}"))?;
+                natural_size(reader.info().width, reader.info().height)
+            }
+        };
+        let armed = validate(id, name, bytes, w, h, meta)?;
+        let rect = view_rect_to_user(info, x, y, w, h);
+        let author = self.comment_prefs.author.clone();
+        let edit = pdfcraft_engine::Edit::AddCustomStamp {
+            page,
+            rect,
+            name: armed.name,
+            file: pdfcraft_engine::MarkFile { name: "stamp.png".into(), bytes: armed.png, page: 0 },
+            author,
+            extra: Some(("PpmStamp".into(), armed.meta)),
+        };
+        if self.apply_edit(edit) {
+            Ok(page)
+        } else {
+            Err(self.toast.as_ref().map(|(m, _)| m.clone()).unwrap_or_else(|| "the stamp could not be placed".to_string()))
+        }
+    }
+
     /// Give every open document the watermark the host set (or none), redrawing those that differ.
     /// A document opened after the message gets it here, in the frame it appears.
     fn sync_watermark(&mut self) {
@@ -218,6 +305,13 @@ impl PdfCraftApp {
                 StampCommand::AddSignBox { id, role, label } => {
                     self.disarm_stamp();
                     match self.place_sign_box(&id, role, label) {
+                        Ok(page) => self.emit_stamp(StampEvent::Placed { id, page }),
+                        Err(error) => self.emit_stamp(StampEvent::Failed { id, error }),
+                    }
+                }
+                StampCommand::Place { id, page, x, y, size, name, bytes, meta } => {
+                    self.disarm_stamp();
+                    match self.place_stamp(&id, page, x, y, size, &name, bytes, &meta) {
                         Ok(page) => self.emit_stamp(StampEvent::Placed { id, page }),
                         Err(error) => self.emit_stamp(StampEvent::Failed { id, error }),
                     }
@@ -295,6 +389,50 @@ mod tests {
         assert_eq!(sign_box_rect(&page(100.0, 100.0, 0, [0.0, 0.0, 100.0, 100.0])), [0.0, 20.0, 180.0, 80.0]);
     }
 
+    /// Page transforms run in f32, so rectangles match to a hundredth of a point.
+    pub(super) fn assert_rect(got: [f64; 4], want: [f64; 4]) {
+        assert!(got.iter().zip(want).all(|(g, w)| (g - w).abs() < 0.01), "{got:?} != {want:?}");
+    }
+
+    #[test]
+    fn a_placed_stamp_rect_is_its_top_left_corner_and_size_as_shown() {
+        let p0 = page(200.0, 300.0, 0, [0.0, 0.0, 200.0, 300.0]);
+        // Top-left (10, 20), 50 x 30 as shown: user space has y up from the bottom.
+        assert_rect(view_rect_to_user(&p0, 10.0, 20.0, 50.0, 30.0), [10.0, 250.0, 60.0, 280.0]);
+        // Shown turned 90 degrees (300 x 200): the same box is 30 wide and 50 tall in the file.
+        let p90 = page(300.0, 200.0, 90, [0.0, 0.0, 200.0, 300.0]);
+        let r = view_rect_to_user(&p90, 10.0, 20.0, 50.0, 30.0);
+        assert_rect([r[2] - r[0], r[3] - r[1], 0.0, 0.0], [30.0, 50.0, 0.0, 0.0]);
+        assert_rect(r, [20.0, 10.0, 50.0, 60.0]);
+    }
+
+    #[test]
+    fn a_stamp_without_a_size_is_natural_and_at_most_200_pt() {
+        assert_eq!(natural_size(120, 40), (120.0, 40.0), "small stays 1 px = 1 pt");
+        assert_eq!(natural_size(400, 100), (200.0, 50.0), "long side cut to 200, ratio kept");
+        assert_eq!(natural_size(100, 800), (25.0, 200.0));
+        assert_eq!(natural_size(200, 200), (200.0, 200.0));
+    }
+
+    #[test]
+    fn bad_places_are_refused() {
+        let p = page(200.0, 300.0, 0, [0.0, 0.0, 200.0, 300.0]);
+        assert!(validate_place(&p, 0.0, 0.0, None).is_ok());
+        assert!(validate_place(&p, 199.9, 299.9, Some((50.0, 50.0))).is_ok(), "may reach past the far edge");
+        assert!(validate_place(&p, -1.0, 0.0, None).is_err(), "left of the page");
+        assert!(validate_place(&p, 0.0, -0.1, None).is_err(), "above the page");
+        assert!(validate_place(&p, 200.0, 10.0, None).is_err(), "at the right edge");
+        assert!(validate_place(&p, 10.0, 300.0, None).is_err(), "at the bottom edge");
+        assert!(validate_place(&p, f64::NAN, 0.0, None).is_err());
+        assert!(validate_place(&p, 0.0, f64::INFINITY, None).is_err());
+        assert!(validate_place(&p, 0.0, 0.0, Some((f64::NAN, 5.0))).is_err());
+        assert!(validate_place(&p, 0.0, 0.0, Some((5.0, f64::INFINITY))).is_err());
+        // Turned pages are checked against the page as shown (300 wide, 200 tall).
+        let turned = page(300.0, 200.0, 90, [0.0, 0.0, 200.0, 300.0]);
+        assert!(validate_place(&turned, 250.0, 150.0, None).is_ok());
+        assert!(validate_place(&turned, 150.0, 250.0, None).is_err());
+    }
+
     #[test]
     fn bad_requests_are_refused() {
         let good = png_bytes();
@@ -315,6 +453,8 @@ mod flow_tests {
     use std::rc::Rc;
 
     use egui_kittest::Harness;
+
+    use super::tests::assert_rect;
 
     use super::*;
 
@@ -473,6 +613,74 @@ mod flow_tests {
         assert!(h.state_mut().session.undo(doc).is_ok());
         let saved = h.state().session.save_bytes(doc).unwrap();
         assert!(!saved.windows(11).any(|w| w == b"PpmSignRole"));
+    }
+
+    fn place(id: &str, page: usize, x: f64, y: f64, size: Option<(f64, f64)>, bytes: Vec<u8>) -> StampCommand {
+        StampCommand::Place { id: id.into(), page, x, y, size, name: "Approved".into(), bytes, meta: "{\"sig\":1}".into() }
+    }
+
+    #[test]
+    fn a_place_request_stamps_at_once_without_arming_and_undo_takes_it_away() {
+        let (mut h, ev) = app(true);
+        send(&mut h, add("armed", png()));
+        send(&mut h, place("p", 0, 10.0, 20.0, Some((50.0, 30.0)), png()));
+        // The waiting armed stamp is cancelled first; then the stamp is placed with no click.
+        assert_eq!(
+            *ev.borrow(),
+            vec![
+                StampEvent::Armed { id: "armed".into() },
+                StampEvent::Cancelled { id: "armed".into() },
+                StampEvent::Placed { id: "p".into(), page: 0 }
+            ]
+        );
+        assert!(h.state().armed_stamp.is_none());
+        let (_, doc) = h.state().active_ids().unwrap();
+        let note = h.state().session.get(doc).unwrap().info.annotations.iter().find(|a| a.page == 0).cloned().expect("the stamp");
+        assert_rect(note.rect.map(f64::from), [10.0, 250.0, 60.0, 280.0]);
+        let saved = h.state().session.save_bytes(doc).unwrap();
+        assert!(saved.windows(8).any(|w| w == b"PpmStamp"));
+        assert!(h.state_mut().session.undo(doc).is_ok());
+        assert!(!h.state().session.save_bytes(doc).unwrap().windows(8).any(|w| w == b"PpmStamp"));
+    }
+
+    #[test]
+    fn a_place_request_without_a_size_uses_the_natural_one() {
+        let (mut h, ev) = app(true);
+        send(&mut h, place("n", 0, 0.0, 0.0, None, png()));
+        assert_eq!(*ev.borrow(), vec![StampEvent::Placed { id: "n".into(), page: 0 }]);
+        let (_, doc) = h.state().active_ids().unwrap();
+        let note = h.state().session.get(doc).unwrap().info.annotations.iter().find(|a| a.page == 0).cloned().expect("the stamp");
+        // The 2 x 2 px PNG is 2 x 2 pt, top-left at the page's top-left.
+        assert_rect(note.rect.map(f64::from), [0.0, 298.0, 2.0, 300.0]);
+    }
+
+    #[test]
+    fn a_bad_place_request_fails_and_adds_nothing() {
+        let (mut h, ev) = app(true);
+        send(&mut h, place("page", 1, 0.0, 0.0, None, png()));
+        send(&mut h, place("out", 0, 200.0, 0.0, None, png()));
+        send(&mut h, place("nan", 0, f64::NAN, 0.0, None, png()));
+        send(&mut h, place("png", 0, 0.0, 0.0, None, b"nope".to_vec()));
+        send(&mut h, place("size", 0, 0.0, 0.0, Some((0.0, 10.0)), png()));
+        send(&mut h, place("", 0, 0.0, 0.0, None, png()));
+        let events = ev.borrow();
+        assert_eq!(events.len(), 6, "{events:?}");
+        assert!(events.iter().all(|e| matches!(e, StampEvent::Failed { .. })), "{events:?}");
+        let (_, doc) = h.state().active_ids().unwrap();
+        assert!(h.state().session.get(doc).unwrap().info.annotations.is_empty());
+        let (mut h, ev) = app(false);
+        send(&mut h, place("x", 0, 0.0, 0.0, None, png()));
+        assert!(matches!(ev.borrow().as_slice(), [StampEvent::Failed { error, .. }] if error.contains("no document")));
+    }
+
+    #[test]
+    fn a_place_request_is_refused_when_the_engine_refuses_the_picture() {
+        let (mut h, ev) = app(true);
+        // The header is fine, the data is cut off: the checks pass, the engine refuses.
+        let mut broken = png();
+        broken.truncate(broken.len() - 25);
+        send(&mut h, place("broken", 0, 5.0, 5.0, Some((20.0, 20.0)), broken));
+        assert!(matches!(ev.borrow().as_slice(), [StampEvent::Failed { id, .. }] if id == "broken"), "{:?}", ev.borrow());
     }
 
     #[test]

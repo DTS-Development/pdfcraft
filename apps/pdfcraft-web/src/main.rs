@@ -196,6 +196,15 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 /// - `pdfcraft:stamp-add` (from the parent): `{ id, name, bytes, width, height, meta }` arms one
 ///   placement of a PNG stamp, `width` and `height` in PDF points, `meta` the text stored as the
 ///   stamp's `/PpmStamp`. `pdfcraft:stamp-cancel` `{ id }` withdraws it.
+/// - `pdfcraft:stamp-place` (from the parent): `{ id, page, x, y, width?, height?, name, bytes, meta }`
+///   stamps a PNG at once, with no click and nothing armed (an armed stamp still waiting is
+///   cancelled first). `page` counts from 0; `x`, `y` are the stamp's top-left corner in PDF points on
+///   the page as shown (turned by its `/Rotate`, origin top-left) and must lie inside the page.
+///   `width` and `height` come together or not at all; without them the PNG's pixels are points
+///   and the longer side is cut to 200 pt, the ratio kept. `meta` is stored as `/PpmStamp`. The
+///   stamp is one undoable edit. Reported with `pdfcraft:stamp-placed` `{ id, page }`, or
+///   `pdfcraft:stamp-failed` `{ id, error }` when it is refused (no document, comments not
+///   allowed, page out of range, bad numbers, start outside the page, or the `stamp-add` checks).
 /// - `pdfcraft:sign-box-add` (from the parent): `{ id, role, label }` puts a 180 x 60 pt FreeText
 ///   sign box (text `label`, dashed black border, `/PpmSignRole` = `role`) in the middle of the
 ///   page being read at once, selected; reported with `pdfcraft:stamp-placed` `{ id, page }`, or
@@ -346,6 +355,19 @@ mod host {
                                 ctx.request_repaint();
                             }
                             Err(error) => bridge.post_compare(&pdfcraft_ui_egui::CompareEvent::Failed { id: id.chars().take(128).collect(), error }),
+                        }
+                        return;
+                    }
+                    Some("pdfcraft:stamp-place") => {
+                        let id = string(&data, "id").unwrap_or_default();
+                        match stamp_place(&data) {
+                            Ok(command) => {
+                                if let Ok(mut q) = stamps.lock() {
+                                    q.push(command);
+                                }
+                                ctx.request_repaint();
+                            }
+                            Err(error) => bridge.post_stamp(&pdfcraft_ui_egui::StampEvent::Failed { id, error }),
                         }
                         return;
                     }
@@ -617,6 +639,46 @@ mod host {
             bytes,
             width: number("width")?,
             height: number("height")?,
+            meta: text("meta")?,
+        })
+    }
+
+    /// Read a `pdfcraft:stamp-place` message; the error is what the parent is told.
+    fn stamp_place(data: &JsValue) -> Result<pdfcraft_ui_egui::StampCommand, String> {
+        let get = |key: &str| js_sys::Reflect::get(data, &JsValue::from_str(key)).unwrap_or(JsValue::UNDEFINED);
+        let text = |key: &str| get(key).as_string().ok_or_else(|| format!("{key} must be a string"));
+        let number = |key: &str| get(key).as_f64().ok_or_else(|| format!("{key} must be a number"));
+        let given = |key: &str| !get(key).is_undefined() && !get(key).is_null();
+        // A size is both sides or neither.
+        let size = match (given("width"), given("height")) {
+            (true, true) => Some((number("width")?, number("height")?)),
+            (false, false) => None,
+            _ => return Err("width and height must be given together".into()),
+        };
+        let page = number("page")?;
+        if !(page.is_finite() && page >= 0.0 && page.fract() == 0.0 && page <= f64::from(u32::MAX)) {
+            return Err("page must be a whole number from 0".into());
+        }
+        let bytes = get("bytes");
+        let array = if let Some(array) = bytes.dyn_ref::<js_sys::Uint8Array>() {
+            array.clone()
+        } else if bytes.is_instance_of::<js_sys::ArrayBuffer>() {
+            js_sys::Uint8Array::new(&bytes)
+        } else {
+            return Err("bytes must be a Uint8Array or ArrayBuffer".into());
+        };
+        // Look at the length before copying anything into wasm memory.
+        if array.length() as usize > pdfcraft_ui_egui::MAX_PNG_BYTES {
+            return Err(format!("the stamp is too large (at most {} MB)", pdfcraft_ui_egui::MAX_PNG_BYTES >> 20));
+        }
+        Ok(pdfcraft_ui_egui::StampCommand::Place {
+            id: text("id")?,
+            page: page as usize,
+            x: number("x")?,
+            y: number("y")?,
+            size,
+            name: text("name")?,
+            bytes: array.to_vec(),
             meta: text("meta")?,
         })
     }
