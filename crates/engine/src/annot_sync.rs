@@ -546,10 +546,35 @@ impl Document {
         nm_of(&editor.cos, &dict_at(&editor.cos, page, index)?)
     }
 
+    /// The role and the rectangle (user space, `[x0, y0, x1, y1]` with x0 <= x1 and y0 <= y1) of the
+    /// sign box at `(page, index)`; `None` for any other annotation.
+    pub fn sign_box_at(&self, page: usize, index: usize) -> Option<(String, [f64; 4])> {
+        let editor = self.editor.as_ref()?;
+        sign_box_of(&editor.cos, &dict_at(&editor.cos, page, index)?)
+    }
+
     /// Is the annotation at `(page, index)` a reply to another annotation?
     pub fn annot_is_reply(&self, page: usize, index: usize) -> bool {
         self.editor.as_ref().is_some_and(|e| is_reply_at(&e.cos, page, index))
     }
+}
+
+/// A sign box is a FreeText annotation with a non-empty `/PpmSignRole`; its role and normalized `/Rect`.
+pub(crate) fn sign_box_of(cos: &Cos, d: &Dict) -> Option<(String, [f64; 4])> {
+    if d.name(b"Subtype") != Some(&b"FreeText"[..]) {
+        return None;
+    }
+    let role = cos.resolve(d.get(pdfcraft_annot::SIGN_ROLE_KEY.as_bytes())?).as_string()?.to_text();
+    let role = role.trim_matches('\0').trim().to_string();
+    if role.is_empty() {
+        return None;
+    }
+    let rect = cos.resolve(d.get(b"Rect")?);
+    let n: Vec<f64> = rect.as_array()?.iter().map(|o| cos.resolve(o).as_f64()).collect::<Option<_>>()?;
+    if n.len() != 4 || n.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+    Some((role, [n[0].min(n[2]), n[1].min(n[3]), n[0].max(n[2]), n[1].max(n[3])]))
 }
 
 /// Is the annotation at `(page, index)` of `cos` a reply to another?
@@ -943,5 +968,30 @@ pub(crate) fn is_annotation_work(edit: &Edit) -> bool {
         Edit::Batch { edits, .. } => edits.iter().all(is_annotation_work),
         Edit::ImportData { .. } => true,
         other => crate::scope_of(other) == Scope::Comments,
+    }
+}
+
+#[cfg(test)]
+mod sign_box_tests {
+    use super::*;
+    use pdfcraft_cos::PdfString;
+
+    fn annot(subtype: &str, role: Option<&str>, rect: [i64; 4]) -> Dict {
+        let mut d = Dict::new();
+        d.set(b"Subtype".to_vec(), Object::name(subtype));
+        d.set(b"Rect".to_vec(), Object::Array(rect.iter().map(|v| Object::Int(*v)).collect()));
+        if let Some(r) = role {
+            d.set(b"PpmSignRole".to_vec(), PdfString::text(r));
+        }
+        d
+    }
+
+    #[test]
+    fn only_a_freetext_with_a_role_is_a_sign_box_and_its_rect_is_normalized() {
+        let cos = Cos::new_empty();
+        assert_eq!(sign_box_of(&cos, &annot("FreeText", Some("reviewer"), [50, 90, 10, 30])), Some(("reviewer".into(), [10.0, 30.0, 50.0, 90.0])));
+        assert_eq!(sign_box_of(&cos, &annot("FreeText", None, [0, 0, 1, 1])), None);
+        assert_eq!(sign_box_of(&cos, &annot("FreeText", Some(" "), [0, 0, 1, 1])), None);
+        assert_eq!(sign_box_of(&cos, &annot("Stamp", Some("reviewer"), [0, 0, 1, 1])), None);
     }
 }
