@@ -364,7 +364,7 @@ mod flow_tests {
             }
             app.host_stamp = Some(Box::new(move |e| sink.borrow_mut().push(e.clone())));
             // A host-lock build shows nothing and opens nothing until a host takes saves.
-            app.host_save = Some(Box::new(|_, _, _| Ok(())));
+            app.host_save = Some(Box::new(|_, _, _, _| Ok(())));
             app
         });
         harness.run_steps(3);

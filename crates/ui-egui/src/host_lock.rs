@@ -193,9 +193,6 @@ pub(crate) const BUILDER_ONLY: &[&str] = &[
     "redact.clear",
     "protect.remove_hidden",
     "redact.sanitize",
-    "sign.digital",
-    "sign.certify",
-    "sign.certify_invisible",
     "optimize.reduce",
     "optimize.advanced",
     "ocr.recognize",
@@ -211,17 +208,13 @@ pub(crate) const BUILDER_ONLY: &[&str] = &[
     "edit.background",
     "edit.background.update",
     "edit.background.remove",
-    "protect.password",
-    "protect.remove",
-    "protect.unlock",
-    "protect.properties",
     "bookmark.add",
     "bookmark.from_structure",
 ];
 
 /// Commands no policy can turn on: they open the user's files, start a new document, close or
 /// revert the one the host gave (the parent's file could be overwritten with an empty or old
-/// one), keep a document in the browser, or run scripts.
+/// one), keep a document in the browser, run scripts, or change its security or signatures.
 // Read by the drift test only: a command in no list is locked anyway.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const LOCKED: &[&str] = &[
@@ -240,7 +233,20 @@ pub(crate) const LOCKED: &[&str] = &[
     "create.clipboard",
     "tools.js_console",
     "tools.document_js",
+    // A document's security and digital signatures are not the builder's to change either:
+    // PPM keeps the file as the author made it. Fill & Sign stays on.
+    "protect.password",
+    "protect.remove",
+    "protect.unlock",
+    "protect.properties",
+    "sign.digital",
+    "sign.certify",
+    "sign.certify_invisible",
 ];
+
+/// The commands behind a digital signature (a signing rectangle, a signature field, an
+/// invisible signature). Signing is no edit, so the work itself checks them.
+pub(crate) const SIGN_CMDS: &[&str] = &["sign.digital", "sign.certify", "sign.certify_invisible"];
 
 /// Commands that are off in every host build until the host's policy turns them on: they save
 /// or export to the user's disk, print, or reach the web.
@@ -347,6 +353,8 @@ pub(crate) fn edit_commands(edit: &pdfcraft_engine::Edit) -> Option<&'static [&'
         E::SetPageBox { .. } => &["page.crop", "page.boxes"],
         E::InsertPagesFrom { .. } => &["page.insert", "page.paste", "page.combine"],
         E::NumberPages { .. } => &["page.number"],
+        E::Protect(_) => &["protect.password"],
+        E::RemoveProtection => &["protect.remove"],
         // Text, pictures and links each have their own commands: turning one on opens its own edits only.
         E::EditTextLine { .. } | E::EditTextBlock { .. } | E::AddText { .. } | E::RegisterTextFont { .. } => &["edit.text", "edit.edit_text"],
         E::EditPageImage { .. } => &["edit.image"],
@@ -1332,6 +1340,37 @@ mod tests {
         assert!(app.host_allows("file.open"));
     }
 
+    /// Protection and digital signing stay shut in a builder's document, whichever way they are
+    /// started: a command (menu, shortcut, palette), the edit behind it, or the signing flow.
+    #[test]
+    fn a_builder_cannot_protect_or_digitally_sign() {
+        const SHUT: &[&str] = &[
+            "protect.password",
+            "protect.remove",
+            "protect.unlock",
+            "protect.properties",
+            "sign.digital",
+            "sign.certify",
+            "sign.certify_invisible",
+        ];
+        let mut app = locked();
+        app.session.set_open_ownership(Ownership { scope: EditScope::All, ..Default::default() });
+        app.open_bytes("b.pdf", None, pdf()).unwrap();
+        for id in SHUT {
+            assert_eq!(grade(id, EditScope::All), Grade::Locked, "{id}");
+            assert!(!app.host_allows(id) && !app.execute(id), "{id}");
+            let overrides = [(id.to_string(), true)];
+            assert!(!enabled(id, EditScope::All, &overrides), "{id}: no policy opens it");
+        }
+        assert!(app.dialog.is_none() && app.quick_tool == crate::QuickTool::Select && app.sign_draft.is_none());
+        assert!(app.host_allows("sign.fill.signature") && app.host_allows("sign.fill.text") && app.host_allows("comment.stamp"));
+        // The edits and the signing flow check too, for a start that isn't a command (a click on a signature field).
+        assert!(!app.apply_edit(pdfcraft_engine::Edit::RemoveProtection));
+        app.start_signing(0, None, Some("Sig1".into()), None);
+        assert!(app.dialog.is_none() && app.sign_draft.is_none(), "the signing dialog doesn't open");
+        assert!(app.finish_signing().is_err());
+    }
+
     #[test]
     fn a_locked_build_shows_no_blocked_command_in_the_palette_or_menus() {
         let app = locked();
@@ -1381,7 +1420,7 @@ mod tests {
         assert!(h.state().views.is_empty(), "no host: nothing opens");
         assert_eq!(h.state().startup_inbox.lock().unwrap().len(), 1, "the file stays where it was, unread");
         // With a host connected the same file opens, as a viewer's.
-        h.state_mut().host_save = Some(Box::new(|_, _, _| Ok(())));
+        h.state_mut().host_save = Some(Box::new(|_, _, _, _| Ok(())));
         h.run_steps(4);
         let state = h.state();
         assert_eq!(state.views.len(), 1);
@@ -1395,7 +1434,7 @@ mod tests {
         app.startup_inbox.lock().unwrap().push(("doc.pdf".into(), pdf()));
         app.ownership_inbox.lock().unwrap().push(Ownership { scope: open_scope_for_test("builder"), ..Default::default() });
         let mut app = app;
-        app.host_save = Some(Box::new(|_, _, _| Ok(())));
+        app.host_save = Some(Box::new(|_, _, _, _| Ok(())));
         let mut h = egui_kittest::Harness::builder().build_eframe(move |_| app);
         h.run_steps(4);
         let state = h.state();
@@ -1406,7 +1445,7 @@ mod tests {
     /// A locked app showing a one-page document opened with `own`, its quick bar drawn.
     fn quick_bar_harness(own: Ownership) -> egui_kittest::Harness<'static, PdfCraftApp> {
         let mut app = locked();
-        app.host_save = Some(Box::new(|_, _, _| Ok(())));
+        app.host_save = Some(Box::new(|_, _, _, _| Ok(())));
         app.set_option("language", "en").unwrap();
         app.session.set_open_ownership(own);
         app.open_bytes("a.pdf", None, pdf()).unwrap();

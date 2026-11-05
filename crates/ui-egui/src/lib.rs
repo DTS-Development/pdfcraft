@@ -54,6 +54,7 @@ mod crop;
 mod drag_pointer;
 mod export_ui;
 mod host_annots;
+mod host_bytes;
 mod host_compare;
 mod host_lock;
 mod host_stamp;
@@ -66,6 +67,7 @@ mod search_ui;
 mod sign_ui;
 mod stamps_ui;
 pub use host_annots::{AnnotCommand, AnnotEvent, AnnotInbox, HostAnnotFn};
+pub use host_bytes::{BytesInbox, BytesPurpose, BytesReply, BytesRequest, HostBytesFn};
 pub use host_compare::{CompareCommand, CompareEvent, CompareInbox, HostCompareFn, MAX_COMPARE_BYTES};
 pub use host_lock::{HOST_LOCK, commands_manifest, open_scope, parse_mode, policy_overrides, with_policy};
 pub use host_stamp::{HostStampFn, MAX_PNG_BYTES, SIGN_BOX_SIZE, StampCommand, StampEvent, StampInbox};
@@ -421,10 +423,11 @@ pub enum OsEvent {
 /// Returns the [`OsEvent`]s that arrived since it was last called (set by the desktop app).
 pub type OsEventsFn = Box<dyn FnMut() -> Vec<OsEvent>>;
 
-/// Hands a saved PDF to the page embedding PdfCraft (web): `(name, bytes, save_as)`. `save_as`
-/// is `true` for Save As. Set by the web app when a host page (such as a Nextcloud app) asked
-/// for saves; without it the browser downloads the file.
-pub type HostSaveFn = Box<dyn Fn(&str, &[u8], bool) -> Result<(), String>>;
+/// Hands a saved PDF to the page embedding PdfCraft (web): `(name, bytes, save_as, pages_changed)`.
+/// `save_as` is `true` for Save As. `pages_changed` is `true` when the pages differ from the file
+/// as opened (see `Session::pages_changed`). Set by the web app when a host page (such as a
+/// Nextcloud app) asked for saves; without it the browser downloads the file.
+pub type HostSaveFn = Box<dyn Fn(&str, &[u8], bool, bool) -> Result<(), String>>;
 
 /// Told every frame whether any tab has unsaved work, so a host page can warn before leaving.
 pub type HostDirtyFn = Box<dyn FnMut(bool)>;
@@ -652,6 +655,9 @@ pub struct PdfCraftApp {
     stored_author: Option<String>,
     /// Reports unsaved work to the embedding page (web, see [`HostDirtyFn`]).
     pub host_dirty: Option<HostDirtyFn>,
+    /// The embedding page's requests for the document's bytes, and where to answer (web, see [`BytesRequest`]).
+    pub bytes_inbox: BytesInbox,
+    pub host_bytes: Option<HostBytesFn>,
     /// Stamp requests from the embedding page, and where to report them (web, see [`StampCommand`]).
     pub stamp_inbox: StampInbox,
     pub host_stamp: Option<HostStampFn>,
@@ -1038,6 +1044,8 @@ impl PdfCraftApp {
             host_lock: HOST_LOCK,
             stored_author: None,
             host_dirty: None,
+            bytes_inbox: Default::default(),
+            host_bytes: None,
             stamp_inbox: Default::default(),
             compare_inbox: Default::default(),
             host_compare: None,
@@ -3300,6 +3308,7 @@ impl eframe::App for PdfCraftApp {
         }
         self.host_stamp_tick(ctx);
         self.host_compare_tick();
+        self.host_bytes_tick();
         // The host hid this interface's comments panel: nothing opens it again.
         if self.right == Some(RightPanel::Comments) && self.comments_panel_hidden() {
             self.right = None;

@@ -175,7 +175,7 @@ mod tests {
             app.set_option("language", "en").unwrap();
             app.host_compare = Some(Box::new(move |e| sink.borrow_mut().push(e.clone())));
             if hosted {
-                app.host_save = Some(Box::new(|_, _, _| Ok(())));
+                app.host_save = Some(Box::new(|_, _, _, _| Ok(())));
             }
             app
         });
@@ -353,7 +353,7 @@ mod tests {
             let mut app = PdfCraftApp::new();
             app.set_option("language", "en").unwrap();
             app.host_lock = true;
-            app.host_save = Some(Box::new(|_, _, _| Ok(())));
+            app.host_save = Some(Box::new(|_, _, _, _| Ok(())));
             app
         });
         h.run_steps(3);
@@ -504,7 +504,7 @@ mod tests {
             let mut app = PdfCraftApp::new();
             app.set_option("language", "en").unwrap();
             app.host_lock = true;
-            app.host_save = Some(Box::new(|_, _, _| Ok(())));
+            app.host_save = Some(Box::new(|_, _, _, _| Ok(())));
             app.host_compare = Some(Box::new(move |e| sink.borrow_mut().push(e.clone())));
             app
         });

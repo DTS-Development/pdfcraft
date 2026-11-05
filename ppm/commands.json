@@ -1315,7 +1315,7 @@
     },
     {
       "grades": {
-        "builder": "on",
+        "builder": "locked",
         "viewer": "locked"
       },
       "id": "sign.digital",
@@ -1325,7 +1325,7 @@
     },
     {
       "grades": {
-        "builder": "on",
+        "builder": "locked",
         "viewer": "locked"
       },
       "id": "sign.certify",
@@ -1335,7 +1335,7 @@
     },
     {
       "grades": {
-        "builder": "on",
+        "builder": "locked",
         "viewer": "locked"
       },
       "id": "sign.certify_invisible",
@@ -1827,7 +1827,7 @@
     },
     {
       "grades": {
-        "builder": "on",
+        "builder": "locked",
         "viewer": "locked"
       },
       "id": "protect.password",
@@ -1839,7 +1839,7 @@
     },
     {
       "grades": {
-        "builder": "on",
+        "builder": "locked",
         "viewer": "locked"
       },
       "id": "protect.remove",
@@ -1851,7 +1851,7 @@
     },
     {
       "grades": {
-        "builder": "on",
+        "builder": "locked",
         "viewer": "locked"
       },
       "id": "protect.unlock",
@@ -1861,7 +1861,7 @@
     },
     {
       "grades": {
-        "builder": "on",
+        "builder": "locked",
         "viewer": "locked"
       },
       "id": "protect.properties",

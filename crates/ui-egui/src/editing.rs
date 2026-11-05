@@ -623,7 +623,7 @@ impl PdfCraftApp {
 
     /// When the preference is on, bake Fill & Sign marks before the bytes are written.
     /// Returns false when the document is not allowed to change (nothing is written).
-    fn flatten_fill_sign_for_save(&mut self, id: pdfcraft_engine::DocId) -> bool {
+    pub(crate) fn flatten_fill_sign_for_save(&mut self, id: pdfcraft_engine::DocId) -> bool {
         if !self.flatten_fill_sign_on_save {
             return true;
         }
@@ -652,6 +652,30 @@ impl PdfCraftApp {
             || v.forms.focus.as_ref().is_some_and(|f| crate::forms_ui::draft_edit(f, &doc.form).is_some())
             || v.fill_text.as_ref().is_some_and(|t| !t.text.trim().is_empty())
             || v.line_editor.as_ref().map_or_else(|| false, |ed| ed.has_unsaved_text())
+    }
+
+    /// Hands saved bytes to the embedding page with whether the pages differ from the file as
+    /// opened; `None` when no page asked for saves.
+    // Called by the web build's save and by tests.
+    #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+    pub(crate) fn deliver_to_host(&self, id: pdfcraft_engine::DocId, name: &str, bytes: &[u8], save_as: bool) -> Option<Result<(), String>> {
+        self.host_save.as_ref().map(|save| save(name, bytes, save_as, self.pages_changed_for_host(id)))
+    }
+
+    /// The `pagesChanged` the host is told: only a builder's document reports it (a viewer's pages
+    /// stay as they are), for both `pdfcraft:save` and `pdfcraft:bytes`.
+    pub(crate) fn pages_changed_for_host(&self, id: pdfcraft_engine::DocId) -> bool {
+        self.session.get(id).is_some_and(|d| d.ownership().scope == pdfcraft_engine::EditScope::All) && self.session.pages_changed(id)
+    }
+
+    /// The bytes of a save handed to the host. A builder's document gets an `/NM` on every comment
+    /// that has none (the host keeps comments by it); a viewer's stays exactly as it is.
+    pub(crate) fn save_bytes_for_host(&self, id: pdfcraft_engine::DocId) -> Result<std::sync::Arc<Vec<u8>>, pdfcraft_engine::EditError> {
+        if self.session.get(id).is_some_and(|d| d.ownership().scope == pdfcraft_engine::EditScope::All) {
+            self.session.save_bytes_named(id)
+        } else {
+            self.session.save_bytes(id)
+        }
     }
 
     /// Save the active document. Returns `true` if it was written.
@@ -709,7 +733,8 @@ impl PdfCraftApp {
             if !self.flatten_fill_sign_for_save(id) {
                 return false;
             }
-            let bytes = match self.session.save_bytes(id) {
+            let saved = if self.host_save.is_some() { self.save_bytes_for_host(id) } else { self.session.save_bytes(id) };
+            let bytes = match saved {
                 Ok(b) => b,
                 Err(e) => {
                     self.notify_fmt("Couldn't save {name}: {e}", &[("name", &name), ("e", &e.to_string())]);
@@ -719,8 +744,8 @@ impl PdfCraftApp {
             // An embedding page that asked for saves (`?host=parent`) gets the bytes; otherwise
             // the browser downloads them.
             let to_host = self.host_save.is_some();
-            let delivered = match &self.host_save {
-                Some(save) => save(&name, &bytes, matches!(target, SaveTarget::As)),
+            let delivered = match self.deliver_to_host(id, &name, &bytes, matches!(target, SaveTarget::As)) {
+                Some(result) => result,
                 None => download(&["file.save_as"], &name, &bytes),
             };
             match delivered {

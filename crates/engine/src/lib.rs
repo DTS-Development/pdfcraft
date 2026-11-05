@@ -386,8 +386,70 @@ struct Editor {
     /// runs (content edits leave every annotation dictionary alone). Cleared on any refresh
     /// that may change annotations; see [`AppearanceCache`].
     appearances: AppearanceCache,
+    /// The page tree as opened or last stored ([`page_layout`], reset by [`Session::mark_saved`]);
+    /// [`Session::pages_changed`] compares with it.
+    stored_pages: Vec<PageLayout>,
     /// The text blocks last computed for one page, reused while the document is unchanged.
     text_blocks: TextBlocksCache,
+}
+
+/// A page as far as comments kept by page number care: which page it is, how it is turned and
+/// the area that shows (crop box clipped to the media box).
+#[derive(Clone, Debug, PartialEq)]
+struct PageLayout {
+    obj: pdfcraft_cos::ObjRef,
+    rotation: i64,
+    visible: [f64; 4],
+}
+
+/// Every page in order: what a deleted, moved, inserted, copied, replaced, rotated or cropped page
+/// changes, and a comment's page number and place with it.
+fn page_layout(cos: &pdfcraft_cos::Document) -> Vec<PageLayout> {
+    let rotation = |p: &pdfcraft_model::Page| p.dict.get(b"Rotate").and_then(|r| cos.resolve(r).as_f64()).map_or(0, |r| (r as i64).rem_euclid(360));
+    pdfcraft_model::pages(cos).iter().map(|p| PageLayout { obj: p.obj, rotation: rotation(p), visible: p.crop(cos) }).collect()
+}
+
+/// A copy of `cos` in which every comment without an `/NM` has one that no other comment of the
+/// document has, or `None` when all have one. Popups, widgets and links are not comments in
+/// that sense and stay as they are.
+fn name_unnamed_annots(cos: &pdfcraft_cos::Document, cx: &mut EditCtx) -> Option<pdfcraft_cos::Document> {
+    let nm = |d: &pdfcraft_cos::Dict| d.get(b"NM").map(|o| cos.resolve(o)).and_then(|o| o.as_string().map(|s| s.to_text())).filter(|s| !s.is_empty());
+    let mut taken = std::collections::HashSet::new();
+    let mut missing = Vec::new();
+    for page in pdfcraft_model::pages(cos) {
+        let list = page.dict.get(b"Annots").map(|a| cos.resolve(a)).and_then(|a| a.as_array().cloned()).unwrap_or_default();
+        for r in list.iter().filter_map(|o| o.as_ref()) {
+            let obj = cos.get(r);
+            let Some(d) = obj.as_dict() else { continue };
+            match nm(d) {
+                Some(name) => {
+                    taken.insert(name);
+                }
+                None if !matches!(d.name(b"Subtype"), Some(b"Popup" | b"Widget" | b"Link")) => missing.push(r),
+                None => {}
+            }
+        }
+    }
+    // Every comment of the document, also the ones on no page, keeps its name out of the way.
+    for (_, obj) in cos.scan_objects() {
+        if let Some(name) = obj.as_dict().filter(|d| d.name(b"Subtype").is_some()).and_then(nm) {
+            taken.insert(name);
+        }
+    }
+    if missing.is_empty() {
+        return None;
+    }
+    let mut out = cos.clone();
+    for r in missing {
+        let name = loop {
+            let id = cx.meta().id;
+            if taken.insert(id.clone()) {
+                break id;
+            }
+        };
+        out.update_dict(r, |d| d.set(b"NM".to_vec(), pdfcraft_cos::PdfString::text(&name))).ok()?;
+    }
+    Some(out)
 }
 
 /// One page's text blocks ([`pdfcraft_edit::text_blocks`]) and the document state they were read
@@ -3761,6 +3823,7 @@ impl Session {
                 let saved = cos.bytes().clone();
                 (
                     Some(Editor {
+                        stored_pages: page_layout(&cos),
                         cos,
                         saved,
                         saved_keys: keys.clone(),
@@ -4314,6 +4377,14 @@ impl Session {
         Ok(())
     }
 
+    /// Whether the pages differ from the file as opened or as last stored ([`Self::mark_saved`]):
+    /// one was deleted, moved, inserted, copied, replaced, rotated or cropped, and not put back.
+    /// Comments kept elsewhere by page number no longer match then.
+    pub fn pages_changed(&self, id: DocId) -> bool {
+        let Some(editor) = self.get(id).and_then(|d| d.editor.as_ref()) else { return false };
+        page_layout(&editor.cos) != editor.stored_pages
+    }
+
     /// The bytes to write for Save: an incremental update of the file as opened/last saved,
     /// with `/ModDate` stamped. Call `mark_saved` after writing them successfully.
     ///
@@ -4322,23 +4393,43 @@ impl Session {
     /// user was told about reaches the disk (#1937). Not a signed one: a full rewrite would
     /// break its signatures, so with no edits it keeps its bytes, damage and all.
     pub fn save_bytes(&self, id: DocId) -> Result<Arc<Vec<u8>>, EditError> {
+        self.save_bytes_inner(id, false)
+    }
+
+    /// [`Self::save_bytes`] for a host that keeps comments by `/NM`: every comment without one
+    /// gets a name no other comment of the document has. The names go into the returned bytes
+    /// only, not into the working document: nothing becomes an unsaved edit and a save that is not
+    /// delivered leaves no trace. Once stored ([`Self::mark_saved`]) the names are the file's own
+    /// and the next save keeps them. Replies point at their comment by object, so they need nothing.
+    pub fn save_bytes_named(&self, id: DocId) -> Result<Arc<Vec<u8>>, EditError> {
+        self.save_bytes_inner(id, true)
+    }
+
+    fn save_bytes_inner(&self, id: DocId, name_annots: bool) -> Result<Arc<Vec<u8>>, EditError> {
         let doc = self.get(id).ok_or(EditError::NoDocument)?;
         let Some(editor) = doc.editor.as_ref() else { return Ok(doc.bytes.clone()) };
-        let on_saved = Arc::ptr_eq(editor.cos.bytes(), &editor.saved);
-        if !editor.cos.is_modified() && on_saved && (!editor.cos.reconstructed() || doc.is_signed()) {
+        let named = if name_annots {
+            let mut cx = EditCtx::new(self.now(), doc.generation ^ (id.0 << 48) ^ self.entropy.map_or(0, |f| f().rotate_left(7)));
+            name_unnamed_annots(&editor.cos, &mut cx)
+        } else {
+            None
+        };
+        let cos = named.as_ref().unwrap_or(&editor.cos);
+        let on_saved = Arc::ptr_eq(cos.bytes(), &editor.saved);
+        if !cos.is_modified() && on_saved && (!cos.reconstructed() || doc.is_signed()) {
             return Ok(editor.saved.clone());
         }
         let opts = SaveOptions { mod_date: self.now().map(pdfcraft_cos::pdf_date), ..SaveOptions::default() };
         // A restored snapshot can be based on an earlier revision. Append to the last saved
         // file so that revision stays in the chain. A full rewrite (redaction, new encryption,
         // a reconstructed file) still writes the current graph on its own.
-        let rewrite = editor.cos.full_save_required() || editor.cos.encryption_changed() || editor.cos.revisions().is_empty();
+        let rewrite = cos.full_save_required() || cos.encryption_changed() || cos.revisions().is_empty();
         guard(|| {
             if on_saved || rewrite {
-                write_incremental(&editor.cos, &opts)
+                write_incremental(cos, &opts)
             } else {
                 let mut base = pdfcraft_cos::Document::open_with_password(editor.saved.clone(), editor.saved_keys.reopen.as_deref())?;
-                base.overlay_changes_from(&editor.cos)?;
+                base.overlay_changes_from(cos)?;
                 write_incremental(&base, &opts)
             }
         })
@@ -4381,6 +4472,8 @@ impl Session {
             editor.saved = bytes;
             editor.saved_keys = keys;
             editor.unsaved_file = false;
+            // What was stored is the new reference for the pages.
+            editor.stored_pages = page_layout(&editor.cos);
         }
         if let Some(p) = path {
             doc.name = std::path::Path::new(&p).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.clone());

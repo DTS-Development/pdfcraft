@@ -274,6 +274,11 @@ impl PdfCraftApp {
 
     /// Start signing: the rectangle (or field) is known; show Sign with a Digital ID.
     pub fn start_signing(&mut self, page: usize, rect: Option<[f64; 4]>, field: Option<String>, certify: Option<u8>) {
+        // A locked build may leave digital signing off while the engine allows it (a builder's).
+        if !self.host_any(crate::host_lock::SIGN_CMDS) {
+            self.notify_host_off();
+            return;
+        }
         self.refresh_os_key_store_ids();
         let mut draft = SignDraft::new(page, rect, field, certify, &self.digital_ids);
         draft.graphic = match &self.sign_graphic {
@@ -407,7 +412,10 @@ impl PdfCraftApp {
     }
 
     /// Sign as …: open the ID, sign, save the signed file (Save As), and show it.
-    fn finish_signing(&mut self) -> Result<(), String> {
+    pub(crate) fn finish_signing(&mut self) -> Result<(), String> {
+        if !self.host_any(crate::host_lock::SIGN_CMDS) {
+            return Err(crate::host_lock::host_off_text().to_string());
+        }
         // What's typed in a form field is signed with the document (#166). A rejected value keeps
         // the dialog open; the notice says why.
         if !self.commit_form_typing() {

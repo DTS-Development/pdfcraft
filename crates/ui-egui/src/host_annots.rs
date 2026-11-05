@@ -791,7 +791,7 @@ mod tests {
         for host_lock in [false, true] {
             let mut app = PdfCraftApp::new();
             app.host_lock = host_lock;
-            app.host_save = Some(Box::new(|_, _, _| Ok(())));
+            app.host_save = Some(Box::new(|_, _, _, _| Ok(())));
             {
                 let mut o = app.ownership_inbox.lock().unwrap();
                 o.push(pdfcraft_engine::Ownership { read_only: true, ..share() });

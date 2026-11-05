@@ -81,6 +81,7 @@ fn main() {
                             app.compare_inbox.clone(),
                             app.ownership_inbox.clone(),
                             app.annot_inbox.clone(),
+                            app.bytes_inbox.clone(),
                             cc.egui_ctx.clone(),
                         );
                         app.host_stamp = Some(bridge.stamp_fn());
@@ -88,6 +89,7 @@ fn main() {
                         app.host_compare = Some(bridge.compare_fn());
                         app.host_save = Some(bridge.save_fn());
                         app.host_dirty = Some(bridge.dirty_fn());
+                        app.host_bytes = Some(bridge.bytes_fn());
                         bridge.post_ready();
                     } else if query_param("host").as_deref() == Some("parent") {
                         eframe::web_sys::console::warn_1(
@@ -179,8 +181,18 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   after the user applies, undoes or redoes an edit: the difference, by `/NM`, of the annotations
 ///   the `actor` owns (`seq` counts the messages from 1 for each document opened; `page` counts from 1 like the server's, `type` is the annotation's subject or XFDF tag, at most 100 characters). Stamps count too.
 ///   `pdfcraft:annots-selected` `{ annotId | null }` when the selection on the canvas changes.
-/// - `pdfcraft:save` (to the parent): `{ name, saveAs, bytes }` when the user saves; `bytes` is
-///   a transferred `ArrayBuffer`. The parent stores the file (and reports its own errors).
+/// - `pdfcraft:save` (to the parent): `{ name, saveAs, pagesChanged, bytes }` when the user saves;
+///   `bytes` is a transferred `ArrayBuffer`. `pagesChanged` is `true` when the pages differ from
+///   the file as `pdfcraft:open` gave it (a page was deleted, moved, inserted, copied, replaced or
+///   rotated and not put back; saving doesn't reset it), so comments the parent keeps by page
+///   number may no longer fit. The parent stores the file (and reports its own errors).
+/// - `pdfcraft:request-bytes` (from the parent): `{ id, purpose }`, `purpose` one of `save`, `check`,
+///   `preview`: the active document as it is now (unsaved edits included). `pdfcraft:bytes` (to the
+///   parent) answers `{ id, purpose, name, bytes[, pagesChanged: true] }`, `bytes` a transferred
+///   `ArrayBuffer`; `pagesChanged` is there only when true and only for `mode: "builder"`, with
+///   the meaning it has in `pdfcraft:save`. With `save` the document counts as saved. `pdfcraft:bytes-failed`
+///   `{ id, purpose, reason }`, `reason` `not-ready` (no document is open), `edit-pending` or an
+///   error text. A request with a wrong `id` or `purpose` gets no answer.
 /// - `pdfcraft:stamp-add` (from the parent): `{ id, name, bytes, width, height, meta }` arms one
 ///   placement of a PNG stamp, `width` and `height` in PDF points, `meta` the text stored as the
 ///   stamp's `/PpmStamp`. `pdfcraft:stamp-cancel` `{ id }` withdraws it.
@@ -266,6 +278,7 @@ mod host {
             compares: pdfcraft_ui_egui::CompareInbox,
             ownership: pdfcraft_ui_egui::OwnershipInbox,
             annots: pdfcraft_ui_egui::AnnotInbox,
+            bytes: pdfcraft_ui_egui::BytesInbox,
             ctx: egui::Context,
         ) {
             let bridge = self.clone();
@@ -292,6 +305,21 @@ mod host {
                                 ctx.request_repaint();
                             }
                             Err(error) => eframe::web_sys::console::warn_1(&format!("PdfCraft: {kind} refused: {error}").into()),
+                        }
+                        return;
+                    }
+                    Some("pdfcraft:request-bytes") => {
+                        // A request with a missing or odd id or purpose gets no answer, as with the other apps.
+                        let id = string(&data, "id").filter(|id| !id.is_empty() && id.chars().count() <= 128);
+                        let purpose = string(&data, "purpose").and_then(|p| pdfcraft_ui_egui::BytesPurpose::parse(&p));
+                        match (id, purpose) {
+                            (Some(id), Some(purpose)) => {
+                                if let Ok(mut q) = bytes.lock() {
+                                    q.push(pdfcraft_ui_egui::BytesRequest { id, purpose });
+                                }
+                                ctx.request_repaint();
+                            }
+                            _ => eframe::web_sys::console::warn_1(&"PdfCraft: pdfcraft:request-bytes refused: bad id or purpose".into()),
                         }
                         return;
                     }
@@ -464,12 +492,51 @@ mod host {
 
         pub fn save_fn(&self) -> pdfcraft_ui_egui::HostSaveFn {
             let bridge = self.clone();
-            Box::new(move |name: &str, bytes: &[u8], save_as: bool| {
+            Box::new(move |name: &str, bytes: &[u8], save_as: bool, pages_changed: bool| {
                 let buffer = js_sys::Uint8Array::from(bytes).buffer();
-                let m =
-                    message(&[("type", "pdfcraft:save".into()), ("name", name.into()), ("saveAs", save_as.into()), ("bytes", buffer.clone().into())])
-                        .ok_or_else(|| "couldn't build the message".to_string())?;
+                let m = message(&[
+                    ("type", "pdfcraft:save".into()),
+                    ("name", name.into()),
+                    ("saveAs", save_as.into()),
+                    ("pagesChanged", pages_changed.into()),
+                    ("bytes", buffer.clone().into()),
+                ])
+                .ok_or_else(|| "couldn't build the message".to_string())?;
                 bridge.post(&m, Some(&buffer))
+            })
+        }
+
+        /// Answers `pdfcraft:request-bytes`: `pdfcraft:bytes` (`bytes` a transferred `ArrayBuffer`;
+        /// `pagesChanged: true` only when it is true) or `pdfcraft:bytes-failed`.
+        pub fn bytes_fn(&self) -> pdfcraft_ui_egui::HostBytesFn {
+            use pdfcraft_ui_egui::BytesReply as R;
+            let bridge = self.clone();
+            Box::new(move |reply: &R| match reply {
+                R::Bytes { id, purpose, name, bytes, pages_changed } => {
+                    let buffer = js_sys::Uint8Array::from(bytes.as_slice()).buffer();
+                    let mut fields = vec![
+                        ("type", "pdfcraft:bytes".into()),
+                        ("id", id.as_str().into()),
+                        ("purpose", purpose.as_str().into()),
+                        ("name", name.as_str().into()),
+                        ("bytes", buffer.clone().into()),
+                    ];
+                    if *pages_changed {
+                        fields.push(("pagesChanged", true.into()));
+                    }
+                    let m = message(&fields).ok_or_else(|| "couldn't build the message".to_string())?;
+                    bridge.post(&m, Some(&buffer))
+                }
+                R::Failed { id, purpose, reason } => {
+                    let m = message(&[
+                        ("type", "pdfcraft:bytes-failed".into()),
+                        ("id", id.as_str().into()),
+                        ("purpose", purpose.as_str().into()),
+                        ("reason", reason.as_str().into()),
+                    ])
+                    .ok_or_else(|| "couldn't build the message".to_string())?;
+                    bridge.post(&m, None)
+                }
             })
         }
 
