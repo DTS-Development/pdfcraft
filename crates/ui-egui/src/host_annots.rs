@@ -222,6 +222,11 @@ impl PdfCraftApp {
             && let Some(changes) = self.session.take_annot_changes(doc)
             && !changes.is_empty()
         {
+            // A changed selected annotation (a sign box moved or put back by undo) is reported again, so the page
+            // learns its new place: the bridge drops what it knew of it when the change goes by.
+            if selection_needs_resend(self.annot_selected_sent.as_ref(), changes.upserts.iter().map(|u| u.annot_id.as_str())) {
+                self.annot_selected_sent = None;
+            }
             for part in split_changes(changes) {
                 self.annot_seq += 1;
                 // A reset the page fetched before it had this message must not undo it.
@@ -426,6 +431,11 @@ impl PdfCraftApp {
     }
 }
 
+/// Does a change to one of `upserted` hit the annotation last reported as selected?
+fn selection_needs_resend<'a>(sent: Option<&Option<String>>, upserted: impl IntoIterator<Item = &'a str>) -> bool {
+    matches!(sent, Some(Some(selected)) if upserted.into_iter().any(|id| id == selected))
+}
+
 /// A user-space rectangle as `[x, y, width, height]` on the page as shown (top-left origin, points,
 /// after `/Rotate`): the inverse of what `stamp-place` does.
 pub(crate) fn user_rect_to_view(page: &pdfcraft_render::PageInfo, r: [f64; 4]) -> [f64; 4] {
@@ -502,6 +512,14 @@ mod tests {
                 assert!((got - want).abs() < 1e-3, "rotation {rotation}: {back:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_change_of_the_selected_annotation_makes_the_selection_be_reported_again() {
+        assert!(selection_needs_resend(Some(&Some("a".to_string())), ["a", "b"]));
+        assert!(!selection_needs_resend(Some(&Some("a".to_string())), ["b"]));
+        assert!(!selection_needs_resend(Some(&None), ["a"]));
+        assert!(!selection_needs_resend(None, ["a"]));
     }
 
     #[test]
