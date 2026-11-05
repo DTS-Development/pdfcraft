@@ -39,6 +39,8 @@ pub enum AnnotEvent {
         changes: AnnotChanges,
     },
     Selected(Option<String>),
+    /// The selected annotation is a sign box: its role and its place on the page as shown (`page` from 0).
+    SignBoxSelected { annot_id: String, role: String, page: usize, rect: [f64; 4] },
 }
 
 /// Requests from the host, drained every frame once the shared document is open.
@@ -146,6 +148,10 @@ impl AnnotEvent {
                 vec![("pdfcraft:annots-changed", json!({ "seq": seq, "upserts": upserts, "deletes": c.deletes }))]
             }
             Self::Selected(id) => vec![("pdfcraft:annots-selected", json!({ "annotId": id }))],
+            Self::SignBoxSelected { annot_id, role, page, rect } => vec![(
+                "pdfcraft:sign-box-selected",
+                json!({ "annotId": annot_id, "role": role, "page": page, "x": rect[0], "y": rect[1], "width": rect[2], "height": rect[3] }),
+            )],
         }
     }
 }
@@ -216,6 +222,11 @@ impl PdfCraftApp {
             && let Some(changes) = self.session.take_annot_changes(doc)
             && !changes.is_empty()
         {
+            // A changed selected annotation: if it is a sign box (moved, or put back by undo) the page is told its
+            // place again; the bridge drops what it knew of it when the change goes by. Nothing else is repeated.
+            if selection_needs_resend(self.annot_selected_sent.as_ref(), changes.upserts.iter().map(|u| u.annot_id.as_str())) {
+                self.annot_selected_changed = true;
+            }
             for part in split_changes(changes) {
                 self.annot_seq += 1;
                 // A reset the page fetched before it had this message must not undo it.
@@ -239,6 +250,7 @@ impl PdfCraftApp {
             self.annot_target = newest;
             self.annot_open_waiting = false;
             self.annot_selected_sent = None;
+            self.annot_selected_changed = false;
             self.annot_seq = 0;
         }
     }
@@ -392,17 +404,55 @@ impl PdfCraftApp {
         }
     }
 
+    /// The selected annotation as a sign box: its rectangle is turned from user space into the page
+    /// as shown (origin top-left, after `/Rotate`), the space `stamp-place` takes.
+    fn sign_box_selected(&self, doc: DocId, name: Option<&str>) -> Option<AnnotEvent> {
+        let annot_id = name?;
+        let (page, index) = self.view_of(doc)?.comments.selected?;
+        let state = self.session.get(doc)?;
+        let (role, rect) = state.sign_box_at(page, index)?;
+        let info = state.info.pages.get(page)?;
+        Some(AnnotEvent::SignBoxSelected { annot_id: annot_id.into(), role, page, rect: user_rect_to_view(info, rect) })
+    }
+
     /// Tell the page when the canvas selection changed (once per change).
     fn report_annot_selection(&mut self, doc: DocId) {
         let selected = self.view_of(doc).and_then(|v| v.comments.selected).and_then(|(p, i)| self.annot_name(doc, p, i));
         if self.annot_selected_sent.as_ref() == Some(&selected) {
+            // Same selection: only a changed sign box is reported again, and `annots-selected` is not.
+            if std::mem::take(&mut self.annot_selected_changed)
+                && let Some(event) = self.sign_box_selected(doc, selected.as_deref())
+                && let Some(report) = self.host_annots.as_ref()
+            {
+                report(&event);
+            }
             return;
         }
+        self.annot_selected_changed = false;
+        let sign_box = self.sign_box_selected(doc, selected.as_deref());
         if let Some(report) = self.host_annots.as_ref() {
             report(&AnnotEvent::Selected(selected.clone()));
+            if let Some(event) = sign_box {
+                report(&event);
+            }
         }
         self.annot_selected_sent = Some(selected);
     }
+}
+
+/// Does a change to one of `upserted` hit the annotation last reported as selected?
+fn selection_needs_resend<'a>(sent: Option<&Option<String>>, upserted: impl IntoIterator<Item = &'a str>) -> bool {
+    matches!(sent, Some(Some(selected)) if upserted.into_iter().any(|id| id == selected))
+}
+
+/// A user-space rectangle as `[x, y, width, height]` on the page as shown (top-left origin, points,
+/// after `/Rotate`): the inverse of what `stamp-place` does.
+pub(crate) fn user_rect_to_view(page: &pdfcraft_render::PageInfo, r: [f64; 4]) -> [f64; 4] {
+    let a = page.user_to_view(r[0] as f32, r[1] as f32);
+    let b = page.user_to_view(r[2] as f32, r[3] as f32);
+    let (x0, x1) = (f64::from(a[0].min(b[0])), f64::from(a[0].max(b[0])));
+    let (y0, y1) = (f64::from(a[1].min(b[1])), f64::from(a[1].max(b[1])));
+    [x0, y0, x1 - x0, y1 - y0]
 }
 
 #[cfg(test)]
@@ -456,6 +506,38 @@ mod tests {
             panic!("not a reject")
         };
         assert_eq!(items.iter().map(|i| i.annot_id.as_str()).collect::<Vec<_>>(), ["d"]);
+    }
+
+    #[test]
+    fn a_sign_box_rect_goes_back_to_the_view_space_stamp_place_uses() {
+        // A page with a crop box whose origin is not 0, in every /Rotate.
+        for rotation in [0u16, 90, 180, 270] {
+            let (w, h) = if rotation % 180 == 0 { (200.0, 300.0) } else { (300.0, 200.0) };
+            let page = pdfcraft_render::PageInfo { width: w, height: h, label: String::new(), crop: [10.0, 20.0, 210.0, 320.0], rotation };
+            let (x, y, bw, bh) = (30.0, 40.0, 60.0, 25.0);
+            let user = crate::host_stamp::view_rect_to_user(&page, x, y, bw, bh);
+            let back = user_rect_to_view(&page, user);
+            for (got, want) in back.iter().zip([x, y, bw, bh]) {
+                assert!((got - want).abs() < 1e-3, "rotation {rotation}: {back:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_change_of_the_selected_annotation_is_noticed_by_its_id() {
+        assert!(selection_needs_resend(Some(&Some("a".to_string())), ["a", "b"]));
+        assert!(!selection_needs_resend(Some(&Some("a".to_string())), ["b"]));
+        assert!(!selection_needs_resend(Some(&None), ["a"]));
+        assert!(!selection_needs_resend(None, ["a"]));
+    }
+
+    #[test]
+    fn a_sign_box_selection_becomes_a_message() {
+        let e = AnnotEvent::SignBoxSelected { annot_id: "a".into(), role: "reviewer".into(), page: 1, rect: [1.0, 2.0, 3.0, 4.0] };
+        assert_eq!(
+            e.to_messages(),
+            vec![("pdfcraft:sign-box-selected", json!({"annotId": "a", "role": "reviewer", "page": 1, "x": 1.0, "y": 2.0, "width": 3.0, "height": 4.0}))]
+        );
     }
 
     #[test]

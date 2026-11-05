@@ -181,6 +181,12 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   after the user applies, undoes or redoes an edit: the difference, by `/NM`, of the annotations
 ///   the `actor` owns (`seq` counts the messages from 1 for each document opened; `page` counts from 1 like the server's, `type` is the annotation's subject or XFDF tag, at most 100 characters). Stamps count too.
 ///   `pdfcraft:annots-selected` `{ annotId | null }` when the selection on the canvas changes.
+///   `pdfcraft:sign-box-selected` `{ annotId, role, page, x, y, width, height }` follows it when the
+///   selected annotation is a sign box (a FreeText with `/PpmSignRole`): `page` counts from 0 and the
+///   rectangle is in PDF points on the page as shown (turned by its `/Rotate`, origin top-left), the
+///   space `stamp-place` takes. Not sent when the selection is cleared or is anything else; like
+///   `annots-selected` it needs `annotSync`. When the user changes the selected sign box (moves it, undoes) it is sent
+///   again alone, without `annots-selected`.
 /// - `pdfcraft:save` (to the parent): `{ name, saveAs, pagesChanged, bytes }` when the user saves;
 ///   `bytes` is a transferred `ArrayBuffer`. `pagesChanged` is `true` when the pages differ from
 ///   the file as `pdfcraft:open` gave it (a page was deleted, moved, inserted, copied, replaced or

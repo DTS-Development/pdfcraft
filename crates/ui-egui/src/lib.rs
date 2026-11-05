@@ -666,6 +666,8 @@ pub struct PdfCraftApp {
     pub host_annots: Option<HostAnnotFn>,
     /// The selection last reported to the page (`None`: nothing reported yet).
     annot_selected_sent: Option<Option<String>>,
+    /// The selected annotation was changed by the user: a sign box is told again (its place may have moved).
+    annot_selected_changed: bool,
     /// The document the page's `annots-*` messages belong to: the last one opened with `annotSync`.
     annot_target: Option<pdfcraft_engine::DocId>,
     /// An `annotSync` file was taken but its document isn't here yet (a password is asked for).
@@ -1055,6 +1057,7 @@ impl PdfCraftApp {
             annot_inbox: Default::default(),
             host_annots: None,
             annot_selected_sent: None,
+            annot_selected_changed: false,
             annot_target: None,
             annot_open_waiting: false,
             annot_seq: 0,
