@@ -6142,6 +6142,24 @@ fn add_ppm_stamp(page: usize) -> Edit {
     }
 }
 
+/// A host-placed stamp keeps its name out of `/Contents` (viewers show it as a note); one placed
+/// without `extra` keeps the name there.
+#[test]
+fn host_placed_stamp_has_no_contents_but_others_keep_the_name() {
+    let (mut s, id) = session_with(1);
+    s.apply(id, add_ppm_stamp(0)).unwrap();
+    let mut plain = add_ppm_stamp(0);
+    if let Edit::AddCustomStamp { extra, .. } = &mut plain {
+        *extra = None;
+    }
+    s.apply(id, plain).unwrap();
+    let cos = &s.get(id).unwrap().editor.as_ref().unwrap().cos;
+    let all = pdfcraft_annot::summaries(cos);
+    assert_eq!(all.len(), 2);
+    assert!(all[0].contents.as_deref().unwrap_or("").is_empty(), "{:?}", all[0].contents);
+    assert_eq!(all[1].contents.as_deref(), Some("PPM stamp"));
+}
+
 /// The host's `/PpmStamp` text goes in with the stamp as one undo step and survives the saves the
 /// web build makes (`Session::save_bytes`, incremental), a full rewrite, and later edits.
 #[test]
