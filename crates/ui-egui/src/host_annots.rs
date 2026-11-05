@@ -222,10 +222,10 @@ impl PdfCraftApp {
             && let Some(changes) = self.session.take_annot_changes(doc)
             && !changes.is_empty()
         {
-            // A changed selected annotation (a sign box moved or put back by undo) is reported again, so the page
-            // learns its new place: the bridge drops what it knew of it when the change goes by.
+            // A changed selected annotation: if it is a sign box (moved, or put back by undo) the page is told its
+            // place again; the bridge drops what it knew of it when the change goes by. Nothing else is repeated.
             if selection_needs_resend(self.annot_selected_sent.as_ref(), changes.upserts.iter().map(|u| u.annot_id.as_str())) {
-                self.annot_selected_sent = None;
+                self.annot_selected_changed = true;
             }
             for part in split_changes(changes) {
                 self.annot_seq += 1;
@@ -250,6 +250,7 @@ impl PdfCraftApp {
             self.annot_target = newest;
             self.annot_open_waiting = false;
             self.annot_selected_sent = None;
+            self.annot_selected_changed = false;
             self.annot_seq = 0;
         }
     }
@@ -418,8 +419,16 @@ impl PdfCraftApp {
     fn report_annot_selection(&mut self, doc: DocId) {
         let selected = self.view_of(doc).and_then(|v| v.comments.selected).and_then(|(p, i)| self.annot_name(doc, p, i));
         if self.annot_selected_sent.as_ref() == Some(&selected) {
+            // Same selection: only a changed sign box is reported again, and `annots-selected` is not.
+            if std::mem::take(&mut self.annot_selected_changed)
+                && let Some(event) = self.sign_box_selected(doc, selected.as_deref())
+                && let Some(report) = self.host_annots.as_ref()
+            {
+                report(&event);
+            }
             return;
         }
+        self.annot_selected_changed = false;
         let sign_box = self.sign_box_selected(doc, selected.as_deref());
         if let Some(report) = self.host_annots.as_ref() {
             report(&AnnotEvent::Selected(selected.clone()));
@@ -515,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn a_change_of_the_selected_annotation_makes_the_selection_be_reported_again() {
+    fn a_change_of_the_selected_annotation_is_noticed_by_its_id() {
         assert!(selection_needs_resend(Some(&Some("a".to_string())), ["a", "b"]));
         assert!(!selection_needs_resend(Some(&Some("a".to_string())), ["b"]));
         assert!(!selection_needs_resend(Some(&None), ["a"]));

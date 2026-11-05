@@ -185,7 +185,8 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   selected annotation is a sign box (a FreeText with `/PpmSignRole`): `page` counts from 0 and the
 ///   rectangle is in PDF points on the page as shown (turned by its `/Rotate`, origin top-left), the
 ///   space `stamp-place` takes. Not sent when the selection is cleared or is anything else; like
-///   `annots-selected` it needs `annotSync`.
+///   `annots-selected` it needs `annotSync`. When the user changes the selected sign box (moves it, undoes) it is sent
+///   again alone, without `annots-selected`.
 /// - `pdfcraft:save` (to the parent): `{ name, saveAs, pagesChanged, bytes }` when the user saves;
 ///   `bytes` is a transferred `ArrayBuffer`. `pagesChanged` is `true` when the pages differ from
 ///   the file as `pdfcraft:open` gave it (a page was deleted, moved, inserted, copied, replaced or
