@@ -589,7 +589,13 @@ fn apply_custom(d: &mut Dict, custom: &Map<String, Value>) -> Option<String> {
         match k.as_str() {
             "ppm-stamp" | "ppm-signature" => d.set(STAMP_KEY.as_bytes().to_vec(), PdfString::text(&text(v))),
             "ppmSignRole" => d.set(SIGN_ROLE_KEY.as_bytes().to_vec(), PdfString::text(&text(v))),
-            "ppmSigner" => d.set(SIGNER_KEY.as_bytes().to_vec(), PdfString::text(&text(v))),
+            // Only a string is a signer (kept as given); anything else is ignored. Whether it is a
+            // valid one is for the server to check.
+            "ppmSigner" => {
+                if let Value::String(s) = v {
+                    d.set(SIGNER_KEY.as_bytes().to_vec(), PdfString::text(s));
+                }
+            }
             "ppmIrt" => parent = Some(text(v)),
             "ppmFork" => {
                 if let Ok(Value::Object(fork)) = serde_json::from_str::<Value>(&text(v)) {

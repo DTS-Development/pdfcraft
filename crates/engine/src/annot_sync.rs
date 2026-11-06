@@ -564,7 +564,8 @@ impl Document {
 pub type SignBox = (String, Option<String>, [f64; 4]);
 
 /// A sign box is a FreeText annotation with a non-empty `/PpmSignRole`; its role, its `/PpmSigner`
-/// (only when non-empty) and normalized `/Rect`.
+/// (as stored, never trimmed or dropped, so a blank one can't turn the box back into a role box;
+/// the bridge refuses an invalid one) and normalized `/Rect`.
 pub(crate) fn sign_box_of(cos: &Cos, d: &Dict) -> Option<SignBox> {
     if d.name(b"Subtype") != Some(&b"FreeText"[..]) {
         return None;
@@ -576,9 +577,7 @@ pub(crate) fn sign_box_of(cos: &Cos, d: &Dict) -> Option<SignBox> {
     }
     let signer = d
         .get(pdfcraft_annot::SIGNER_KEY.as_bytes())
-        .and_then(|o| cos.resolve(o).as_string().map(|s| s.to_text()))
-        .map(|s| s.trim_matches('\0').trim().to_string())
-        .filter(|s| !s.is_empty());
+        .and_then(|o| cos.resolve(o).as_string().map(|s| s.to_text()));
     let rect = cos.resolve(d.get(b"Rect")?);
     let n: Vec<f64> = rect.as_array()?.iter().map(|o| cos.resolve(o).as_f64()).collect::<Option<_>>()?;
     if n.len() != 4 || n.iter().any(|v| !v.is_finite()) {
@@ -1011,8 +1010,9 @@ mod sign_box_tests {
             sign_box_of(&cos, &annot_with("FreeText", Some("reviewer"), Some("u-kim"), [0, 0, 4, 2])),
             Some(("reviewer".into(), Some("u-kim".into()), [0.0, 0.0, 4.0, 2.0]))
         );
-        // A blank signer counts as none; a signer without a role is no sign box.
-        assert_eq!(sign_box_of(&cos, &annot_with("FreeText", Some("reviewer"), Some(" "), [0, 0, 4, 2])).unwrap().1, None);
+        // The signer is passed on as stored, blank or padded too; a signer without a role is no sign box.
+        assert_eq!(sign_box_of(&cos, &annot_with("FreeText", Some("reviewer"), Some(" "), [0, 0, 4, 2])).unwrap().1, Some(" ".into()));
+        assert_eq!(sign_box_of(&cos, &annot_with("FreeText", Some("reviewer"), Some(" kim "), [0, 0, 4, 2])).unwrap().1, Some(" kim ".into()));
         assert_eq!(sign_box_of(&cos, &annot_with("FreeText", None, Some("u-kim"), [0, 0, 1, 1])), None);
         assert_eq!(sign_box_of(&cos, &annot("FreeText", None, [0, 0, 1, 1])), None);
         assert_eq!(sign_box_of(&cos, &annot("FreeText", Some(" "), [0, 0, 1, 1])), None);

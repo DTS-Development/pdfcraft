@@ -863,3 +863,25 @@ fn a_sign_box_signer_round_trips_through_ppm_signer() {
     let again = round_trip(&src, &mut dst, "sb");
     assert!(again.xfdf.contains("ppmSigner") && again.xfdf.contains("u-kim"), "{}", again.xfdf);
 }
+
+fn import_item(dst: &mut Document, xfdf: &str) -> String {
+    let report = apply_remote(dst, &[RemoteItem { annot_id: "sb", author_id: "u-a", xfdf }], &[]);
+    assert_eq!(report.failed, vec![], "{xfdf}");
+    export_annotation(dst, "sb").unwrap().xfdf
+}
+
+#[test]
+fn a_ppm_signer_that_is_not_a_string_is_ignored_and_a_padded_one_is_kept() {
+    let mut src = blank();
+    pdfcraft_annot::add_sign_box(&mut src, 0, [20.0, 200.0, 200.0, 260.0], "reviewer", None, "x", "Ada", &meta("sb")).unwrap();
+    let item = export_annotation(&src, "sb").unwrap();
+    let with = |v: &str| item.xfdf.replace("&quot;ppmSignRole&quot;:", &format!("&quot;ppmSigner&quot;:{v},&quot;ppmSignRole&quot;:"));
+    let mut dst = blank();
+    let n = with("3");
+    assert!(n.contains("ppmSigner"), "{n}");
+    let got = import_item(&mut dst, &n);
+    assert!(!got.contains("ppmSigner"), "a number is no signer: {got}");
+    let mut dst = blank();
+    let got = import_item(&mut dst, &with("&quot; kim &quot;"));
+    assert!(got.contains("ppmSigner") && got.contains(" kim "), "kept as given: {got}");
+}

@@ -182,7 +182,8 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   the `actor` owns (`seq` counts the messages from 1 for each document opened; `page` counts from 1 like the server's, `type` is the annotation's subject or XFDF tag, at most 100 characters). Stamps count too.
 ///   `pdfcraft:annots-selected` `{ annotId | null }` when the selection on the canvas changes.
 ///   `pdfcraft:sign-box-selected` `{ annotId, role, page, x, y, width, height, signer? }` (`signer` only when
-///   the box has a `/PpmSigner`; XFDF carries it as `ppmSigner`) follows it when the
+///   the box has a `/PpmSigner`, sent as stored, never trimmed or left out; XFDF carries it as `ppmSigner`, and an
+///   imported `ppmSigner` that is not a string is ignored. Whether an XFDF signer is valid is for the server to check) follows it when the
 ///   selected annotation is a sign box (a FreeText with `/PpmSignRole`): `page` counts from 0 and the
 ///   rectangle is in PDF points on the page as shown (turned by its `/Rotate`, origin top-left), the
 ///   space `stamp-place` takes. Not sent when the selection is cleared or is anything else; like
@@ -214,7 +215,9 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   allowed, page out of range, bad numbers, start outside the page, or the `stamp-add` checks).
 /// - `pdfcraft:sign-box-add` (from the parent): `{ id, role, label, signer? }` puts a 180 x 60 pt FreeText
 ///   sign box (text `label`, dashed black border, `/PpmSignRole` = `role`, and `/PpmSigner` = `signer`
-///   when it is a non-empty string of at most 200 characters; without it the box is as before) in the middle of the
+///   when it is a string of 1 to 200 characters (UTF-16) with no space at either end and no control, bidi or
+///   zero-width character, kept exactly as given; an invalid one is refused with `stamp-failed`, an empty string or
+///   null means none; without it the box is as before) in the middle of the
 ///   page being read at once, selected; reported with `pdfcraft:stamp-placed` `{ id, page }`, or
 ///   `pdfcraft:stamp-failed` when it is refused. It is never armed, so there is nothing to cancel.
 /// - `pdfcraft:watermark` (from the parent): `{ text }` shows a diagonal watermark on each page

@@ -103,11 +103,19 @@ pub(crate) fn validate_sign_box(id: &str, role: &str, signer: Option<&str>, labe
     if role.trim().is_empty() || role.len() > MAX_ID_BYTES || label.trim().is_empty() || label.len() > MAX_META_BYTES {
         return Err("the sign box needs a role and a label of reasonable length".into());
     }
-    // The same 1 to 200 characters the actor of `pdfcraft:open` has (UTF-16 units, as the page counts).
-    if signer.is_some_and(|s| s.trim().is_empty() || s.encode_utf16().count() > MAX_ID_BYTES) {
-        return Err("the signer must be 1 to 200 characters".into());
+    // The signer is kept and compared as given: 1 to 200 characters (UTF-16 units, as the page
+    // counts), no space at either end, none of the characters a role may not have.
+    if let Some(s) = signer
+        && (s.is_empty() || s.encode_utf16().count() > MAX_ID_BYTES || s != s.trim() || s.chars().any(is_bad_signer_char))
+    {
+        return Err("the signer must be 1 to 200 characters, without spaces at either end or control, bidi or zero-width characters".into());
     }
     Ok(())
+}
+
+/// The control, bidi and zero-width characters the bridge refuses in a role or signer (its `ROLE_BAD_CHARS`).
+fn is_bad_signer_char(c: char) -> bool {
+    matches!(c, '\u{0}'..='\u{1f}' | '\u{7f}'..='\u{9f}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}')
 }
 
 /// The sign box's rectangle in user space: [`SIGN_BOX_SIZE`] in the middle of the page as shown
@@ -380,6 +388,13 @@ mod tests {
         assert!(validate_sign_box("s", "r", None, &"x".repeat(MAX_META_BYTES + 1)).is_err(), "huge label");
         assert!(validate_sign_box("s", "r", Some("u-kim"), "x").is_ok());
         assert!(validate_sign_box("s", "r", Some(" "), "x").is_err(), "blank signer");
+        assert!(validate_sign_box("s", "r", Some(""), "x").is_err(), "empty signer");
+        assert!(validate_sign_box("s", "r", Some("kim "), "x").is_err(), "space at the end");
+        assert!(validate_sign_box("s", "r", Some(" kim"), "x").is_err(), "space at the start");
+        assert!(validate_sign_box("s", "r", Some("\u{202e}kim"), "x").is_err(), "bidi");
+        assert!(validate_sign_box("s", "r", Some("kim\u{200b}"), "x").is_err(), "zero width");
+        assert!(validate_sign_box("s", "r", Some("ki\tm"), "x").is_err(), "control");
+        assert!(validate_sign_box("s", "r", Some("김 철수"), "x").is_ok(), "inner space is fine");
         assert!(validate_sign_box("s", "r", Some(&"x".repeat(MAX_ID_BYTES + 1)), "x").is_err(), "long signer");
     }
 
