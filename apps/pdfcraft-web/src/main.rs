@@ -150,8 +150,11 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 /// `type`:
 ///
 /// - `pdfcraft:ready` (to the parent): the app is listening; send files now.
-/// - `pdfcraft:open` (from the parent): `{ name, bytes, actor?, readOnly?, mode?, policy? }`, where `bytes` is an
-///   `ArrayBuffer` or `Uint8Array` holding a PDF. It opens in a tab, like a `?file=` URL.
+/// - `pdfcraft:open` (from the parent): `{ name, bytes, actor?, readOnly?, mode?, policy?, replace? }`, where `bytes` is an
+///   `ArrayBuffer` or `Uint8Array` holding a PDF. It opens in a tab, like a `?file=` URL; a second
+///   open adds a tab, and the one showing may stay the earlier document. `replace: true` (a boolean,
+///   a wrong type refuses the open) first closes every open document without asking about unsaved
+///   changes and shows this one; without it nothing changes.
 ///   `actor` (a string of 1 to 200 characters, the user's id) makes every comment the app creates
 ///   the user's, and lets only that user change or delete comments; comments without an owner are
 ///   locked. `readOnly` (a boolean) refuses every edit that changes the document. Both default
@@ -738,6 +741,8 @@ mod host {
             if v.is_undefined() || v.is_null() { Ok(false) } else { v.as_bool().ok_or_else(|| format!("{key} must be a boolean")) }
         };
         let annot_sync = flag("annotSync")?;
+        // `replace: true` closes every open document (no questions) before this one opens.
+        let replace = flag("replace")?;
         if annot_sync && actor.is_none() {
             return Err("annotSync needs an actor".into());
         }
@@ -748,7 +753,7 @@ mod host {
         } else {
             !get_panel.as_bool().ok_or_else(|| "commentsPanel must be a boolean".to_string())?
         };
-        let own = pdfcraft_ui_egui::Ownership { actor, read_only, scope, annot_sync, hide_comments_panel, ..Default::default() };
+        let own = pdfcraft_ui_egui::Ownership { actor, read_only, scope, annot_sync, hide_comments_panel, replace, ..Default::default() };
         Ok(pdfcraft_ui_egui::with_policy(own, policy_overrides(data)))
     }
 

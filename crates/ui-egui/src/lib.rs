@@ -3253,8 +3253,10 @@ impl eframe::App for PdfCraftApp {
             let mut queue = startup.into_iter();
             while let Some((name, bytes)) = queue.next() {
                 let mut shares = false;
+                let mut replace = false;
                 if let Some(ownership) = rules.pop_front() {
                     shares = ownership.annot_sync;
+                    replace = ownership.replace;
                     self.session.set_open_ownership(ownership);
                 } else if self.host_lock {
                     self.session.set_open_ownership(host_lock::viewer_ownership());
@@ -3262,7 +3264,13 @@ impl eframe::App for PdfCraftApp {
                     // Not the rules the file before it came with.
                     self.session.set_open_ownership(Default::default());
                 }
-                let activate = !self.startup_superseded;
+                // `replace`: the open documents go without asking and the new one is shown.
+                if replace {
+                    for i in (0..self.views.len()).rev() {
+                        self.close_tab(i);
+                    }
+                }
+                let activate = replace || !self.startup_superseded;
                 let opened = self.open_bytes_with_focus(&name, None, bytes, activate);
                 if shares {
                     self.annot_open_finished(opened.is_ok());

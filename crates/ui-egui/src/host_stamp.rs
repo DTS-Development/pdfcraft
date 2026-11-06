@@ -803,6 +803,25 @@ mod flow_tests {
         assert_eq!(*ev.borrow(), vec![StampEvent::Armed { id: "a".into() }, StampEvent::Cancelled { id: "a".into() }]);
     }
 
+    /// The names of the open documents, in tab order.
+    fn tab_names(h: &Harness<'static, PdfCraftApp>) -> Vec<String> {
+        let state = h.state();
+        state.views.iter().filter_map(|v| state.session.get(v.id)).map(|d| d.name.clone()).collect()
+    }
+
+    #[test]
+    fn an_open_without_replace_adds_a_tab_and_one_with_replace_closes_the_others() {
+        let (mut h, _) = app(true);
+        h.state().startup_inbox.lock().unwrap().push(("b.pdf".into(), pdf()));
+        h.run_steps(3);
+        assert_eq!(tab_names(&h), vec!["a.pdf", "b.pdf"], "no replace: a tab is added as before");
+        h.state().startup_inbox.lock().unwrap().push(("c.pdf".into(), pdf()));
+        h.state().ownership_inbox.lock().unwrap().push(pdfcraft_engine::Ownership { replace: true, ..Default::default() });
+        h.run_steps(3);
+        assert_eq!(tab_names(&h), vec!["c.pdf"], "replace: the others are closed");
+        assert_eq!(h.state().active, Some(0));
+    }
+
     #[test]
     fn huge_pixel_dimensions_are_refused_from_the_header_alone() {
         let mut out = Vec::new();

@@ -224,6 +224,9 @@ pub struct Ownership {
     pub annot_sync: bool,
     /// `commentsPanel: false`: the interface hides its own comments panel (the page has its own).
     pub hide_comments_panel: bool,
+    /// `pdfcraft:open` `replace`: this file takes the place of every document open (they close
+    /// without asking) and is shown. Read when the file arrives; it is no rule of the document.
+    pub replace: bool,
 }
 
 /// How far the embedding page lets editing go (`pdfcraft:open` `mode`).
