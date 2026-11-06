@@ -224,6 +224,9 @@ pub struct Ownership {
     pub annot_sync: bool,
     /// `commentsPanel: false`: the interface hides its own comments panel (the page has its own).
     pub hide_comments_panel: bool,
+    /// `pdfcraft:open` `replace`: this file takes the place of every document open (they close
+    /// without asking) and is shown. Read when the file arrives; it is no rule of the document.
+    pub replace: bool,
 }
 
 /// How far the embedding page lets editing go (`pdfcraft:open` `mode`).
@@ -1541,6 +1544,8 @@ pub enum Edit {
         page: usize,
         rect: [f64; 4],
         role: String,
+        /// The user the box is assigned to (`/PpmSigner`), if any.
+        signer: Option<String>,
         label: String,
         author: String,
     },
@@ -2605,8 +2610,8 @@ fn run_edit_body(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx
                 pdfcraft_annot::set_picture_source(doc, *page, index, &file.bytes)?;
             }
         }
-        Edit::AddSignBox { page, rect, role, label, author } => {
-            pdfcraft_annot::add_sign_box(doc, *page, *rect, role, label, author, &cx.meta())?;
+        Edit::AddSignBox { page, rect, role, signer, label, author } => {
+            pdfcraft_annot::add_sign_box(doc, *page, *rect, role, signer.as_deref(), label, author, &cx.meta())?;
         }
         Edit::DeleteAnnotation { page, index } => pdfcraft_annot::delete_annotation(doc, *page, *index)?,
         Edit::SetAnnotationContents { page, index, text } => pdfcraft_annot::set_contents(doc, *page, *index, text, &cx.meta())?,

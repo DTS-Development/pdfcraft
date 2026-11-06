@@ -150,8 +150,11 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 /// `type`:
 ///
 /// - `pdfcraft:ready` (to the parent): the app is listening; send files now.
-/// - `pdfcraft:open` (from the parent): `{ name, bytes, actor?, readOnly?, mode?, policy? }`, where `bytes` is an
-///   `ArrayBuffer` or `Uint8Array` holding a PDF. It opens in a tab, like a `?file=` URL.
+/// - `pdfcraft:open` (from the parent): `{ name, bytes, actor?, readOnly?, mode?, policy?, replace? }`, where `bytes` is an
+///   `ArrayBuffer` or `Uint8Array` holding a PDF. It opens in a tab, like a `?file=` URL; a second
+///   open adds a tab, and the one showing may stay the earlier document. `replace: true` (a boolean,
+///   a wrong type refuses the open) first closes every open document without asking about unsaved
+///   changes and shows this one; without it nothing changes.
 ///   `actor` (a string of 1 to 200 characters, the user's id) makes every comment the app creates
 ///   the user's, and lets only that user change or delete comments; comments without an owner are
 ///   locked. `readOnly` (a boolean) refuses every edit that changes the document. Both default
@@ -181,7 +184,9 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   after the user applies, undoes or redoes an edit: the difference, by `/NM`, of the annotations
 ///   the `actor` owns (`seq` counts the messages from 1 for each document opened; `page` counts from 1 like the server's, `type` is the annotation's subject or XFDF tag, at most 100 characters). Stamps count too.
 ///   `pdfcraft:annots-selected` `{ annotId | null }` when the selection on the canvas changes.
-///   `pdfcraft:sign-box-selected` `{ annotId, role, page, x, y, width, height }` follows it when the
+///   `pdfcraft:sign-box-selected` `{ annotId, role, page, x, y, width, height, signer? }` (`signer` only when
+///   the box has a `/PpmSigner`, sent as stored, never trimmed or left out; XFDF carries it as `ppmSigner`, and an
+///   imported `ppmSigner` that is not a string is ignored. Whether an XFDF signer is valid is for the server to check) follows it when the
 ///   selected annotation is a sign box (a FreeText with `/PpmSignRole`): `page` counts from 0 and the
 ///   rectangle is in PDF points on the page as shown (turned by its `/Rotate`, origin top-left), the
 ///   space `stamp-place` takes. Not sent when the selection is cleared or is anything else; like
@@ -211,8 +216,11 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   stamp is one undoable edit. Reported with `pdfcraft:stamp-placed` `{ id, page }`, or
 ///   `pdfcraft:stamp-failed` `{ id, error }` when it is refused (no document, comments not
 ///   allowed, page out of range, bad numbers, start outside the page, or the `stamp-add` checks).
-/// - `pdfcraft:sign-box-add` (from the parent): `{ id, role, label }` puts a 180 x 60 pt FreeText
-///   sign box (text `label`, dashed black border, `/PpmSignRole` = `role`) in the middle of the
+/// - `pdfcraft:sign-box-add` (from the parent): `{ id, role, label, signer? }` puts a 180 x 60 pt FreeText
+///   sign box (text `label`, dashed black border, `/PpmSignRole` = `role`, and `/PpmSigner` = `signer`
+///   when it is a string of 1 to 200 characters (UTF-16) with no space at either end and no control, bidi or
+///   zero-width character, kept exactly as given; an invalid one is refused with `stamp-failed`, an empty string or
+///   null means none; without it the box is as before) in the middle of the
 ///   page being read at once, selected; reported with `pdfcraft:stamp-placed` `{ id, page }`, or
 ///   `pdfcraft:stamp-failed` when it is refused. It is never armed, so there is nothing to cancel.
 /// - `pdfcraft:watermark` (from the parent): `{ text }` shows a diagonal watermark on each page
@@ -694,7 +702,12 @@ mod host {
         let text = |key: &str| {
             js_sys::Reflect::get(data, &JsValue::from_str(key)).ok().and_then(|v| v.as_string()).ok_or_else(|| format!("{key} must be a string"))
         };
-        Ok(pdfcraft_ui_egui::StampCommand::AddSignBox { id: text("id")?, role: text("role")?, label: text("label")? })
+        // `signer` is optional: missing, null or an empty string means none; any other type is an error.
+        let signer = match js_sys::Reflect::get(data, &JsValue::from_str("signer")).unwrap_or(JsValue::UNDEFINED) {
+            v if v.is_undefined() || v.is_null() => None,
+            v => Some(v.as_string().ok_or("signer must be a string")?).filter(|s| !s.is_empty()),
+        };
+        Ok(pdfcraft_ui_egui::StampCommand::AddSignBox { id: text("id")?, role: text("role")?, signer, label: text("label")? })
     }
 
     /// Read a `pdfcraft:annots-*` message; the error says what was wrong with it.
@@ -728,6 +741,8 @@ mod host {
             if v.is_undefined() || v.is_null() { Ok(false) } else { v.as_bool().ok_or_else(|| format!("{key} must be a boolean")) }
         };
         let annot_sync = flag("annotSync")?;
+        // `replace: true` closes every open document (no questions) before this one opens.
+        let replace = flag("replace")?;
         if annot_sync && actor.is_none() {
             return Err("annotSync needs an actor".into());
         }
@@ -738,7 +753,7 @@ mod host {
         } else {
             !get_panel.as_bool().ok_or_else(|| "commentsPanel must be a boolean".to_string())?
         };
-        let own = pdfcraft_ui_egui::Ownership { actor, read_only, scope, annot_sync, hide_comments_panel, ..Default::default() };
+        let own = pdfcraft_ui_egui::Ownership { actor, read_only, scope, annot_sync, hide_comments_panel, replace, ..Default::default() };
         Ok(pdfcraft_ui_egui::with_policy(own, policy_overrides(data)))
     }
 

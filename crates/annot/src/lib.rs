@@ -1832,12 +1832,16 @@ pub fn set_extra(doc: &mut Document, page: usize, index: usize, key: &str, value
 
 /// The private key of a sign box's role (the PPM host's `/PpmSignRole`).
 pub const SIGN_ROLE_KEY: &str = "PpmSignRole";
+/// The private key of the user a sign box is assigned to (`/PpmSigner`); optional, a box without it is open by role.
+pub const SIGNER_KEY: &str = "PpmSigner";
 
 const SIGN_BOX_TEXT: [f64; 3] = [1.0, 0.0, 0.0];
 
 /// A sign box the way the PPM web viewer draws one: a centred, black, 1 pt dashed (4,3) text box
-/// whose text and subject are `label`, with `role` kept in `/PpmSignRole`. `rect` is in user space.
-pub fn add_sign_box(doc: &mut Document, page: usize, rect: [f64; 4], role: &str, label: &str, author: &str, meta: &Meta) -> Result<usize, AnnotError> {
+/// whose text and subject are `label`, with `role` kept in `/PpmSignRole` and, when given, the
+/// assigned `signer` in `/PpmSigner`. `rect` is in user space.
+#[allow(clippy::too_many_arguments)]
+pub fn add_sign_box(doc: &mut Document, page: usize, rect: [f64; 4], role: &str, signer: Option<&str>, label: &str, author: &str, meta: &Meta) -> Result<usize, AnnotError> {
     let shape = Shape::TextBox { rect, font_size: 12.0 };
     let style = Style { color: [0.0, 0.0, 0.0], opacity: 1.0, width: 1.0, fill: None };
     let index = add_annotation(doc, &NewAnnotation { page, shape, style, contents: label.to_string(), author: author.to_string() }, meta)?;
@@ -1853,6 +1857,9 @@ pub fn add_sign_box(doc: &mut Document, page: usize, rect: [f64; 4], role: &str,
         // Red text in a black box, as the web viewer draws a sign field.
         d.set(appearance::TEXT_COLOR_KEY.to_vec(), num_array(&SIGN_BOX_TEXT));
         d.set(SIGN_ROLE_KEY.as_bytes().to_vec(), PdfString::text(role));
+        if let Some(s) = signer {
+            d.set(SIGNER_KEY.as_bytes().to_vec(), PdfString::text(s));
+        }
         rich_text(d);
     })?;
     draw_appearance(doc, r)?;
