@@ -33,11 +33,12 @@ pub enum StampCommand {
         height: f64,
         meta: String,
     },
-    /// A sign box (`pdfcraft:sign-box-add`): a FreeText box of [`SIGN_BOX_SIZE`] carrying `role`,
-    /// put at once in the middle of the page being read and left selected.
+    /// A sign box (`pdfcraft:sign-box-add`): a FreeText box of [`SIGN_BOX_SIZE`] carrying `role` (and the
+    /// `signer` it is assigned to, if given), put at once in the middle of the page being read and left selected.
     AddSignBox {
         id: String,
         role: String,
+        signer: Option<String>,
         label: String,
     },
     /// A stamp put at given coordinates at once (`pdfcraft:stamp-place`), with no click. `x`, `y`
@@ -95,12 +96,16 @@ pub(crate) struct ArmedStamp {
 }
 
 /// Check a sign box request: bounded text, nothing else to read.
-pub(crate) fn validate_sign_box(id: &str, role: &str, label: &str) -> Result<(), String> {
+pub(crate) fn validate_sign_box(id: &str, role: &str, signer: Option<&str>, label: &str) -> Result<(), String> {
     if id.is_empty() || id.len() > MAX_ID_BYTES {
         return Err("the request id is missing or too long".into());
     }
     if role.trim().is_empty() || role.len() > MAX_ID_BYTES || label.trim().is_empty() || label.len() > MAX_META_BYTES {
         return Err("the sign box needs a role and a label of reasonable length".into());
+    }
+    // The same 1 to 200 characters the actor of `pdfcraft:open` has (UTF-16 units, as the page counts).
+    if signer.is_some_and(|s| s.trim().is_empty() || s.encode_utf16().count() > MAX_ID_BYTES) {
+        return Err("the signer must be 1 to 200 characters".into());
     }
     Ok(())
 }
@@ -183,8 +188,8 @@ impl PdfCraftApp {
 
     /// Put a sign box in the middle of the page being read and select it (the same edit as any
     /// comment, so undo and saving are the usual). Returns the page, or why it was refused.
-    fn place_sign_box(&mut self, id: &str, role: String, label: String) -> Result<usize, String> {
-        validate_sign_box(id, &role, &label)?;
+    fn place_sign_box(&mut self, id: &str, role: String, signer: Option<String>, label: String) -> Result<usize, String> {
+        validate_sign_box(id, &role, signer.as_deref(), &label)?;
         let (index, doc) = self.active_ids().ok_or("no document is open")?;
         let state = self.session.get(doc).ok_or("no document is open")?;
         if !state.allows_annotation() {
@@ -193,7 +198,7 @@ impl PdfCraftApp {
         let page = self.views[index].current.min(state.info.pages.len().saturating_sub(1));
         let rect = sign_box_rect(state.info.pages.get(page).ok_or("the document has no pages")?);
         let author = self.comment_prefs.author.clone();
-        if self.apply_edit(pdfcraft_engine::Edit::AddSignBox { page, rect, role, label, author }) {
+        if self.apply_edit(pdfcraft_engine::Edit::AddSignBox { page, rect, role, signer, label, author }) {
             self.quick_tool = QuickTool::Select;
             Ok(page)
         } else {
@@ -302,9 +307,9 @@ impl PdfCraftApp {
                         Err(error) => self.emit_stamp(StampEvent::Failed { id, error }),
                     }
                 }
-                StampCommand::AddSignBox { id, role, label } => {
+                StampCommand::AddSignBox { id, role, signer, label } => {
                     self.disarm_stamp();
-                    match self.place_sign_box(&id, role, label) {
+                    match self.place_sign_box(&id, role, signer, label) {
                         Ok(page) => self.emit_stamp(StampEvent::Placed { id, page }),
                         Err(error) => self.emit_stamp(StampEvent::Failed { id, error }),
                     }
@@ -368,11 +373,14 @@ mod tests {
 
     #[test]
     fn bad_sign_box_requests_are_refused() {
-        assert!(validate_sign_box("s1", "reviewer", "reviewer 서명란").is_ok());
-        assert!(validate_sign_box("", "reviewer", "x").is_err(), "empty id");
-        assert!(validate_sign_box("s", " ", "x").is_err(), "empty role");
-        assert!(validate_sign_box("s", "r", "").is_err(), "empty label");
-        assert!(validate_sign_box("s", "r", &"x".repeat(MAX_META_BYTES + 1)).is_err(), "huge label");
+        assert!(validate_sign_box("s1", "reviewer", None, "reviewer 서명란").is_ok());
+        assert!(validate_sign_box("", "reviewer", None, "x").is_err(), "empty id");
+        assert!(validate_sign_box("s", " ", None, "x").is_err(), "empty role");
+        assert!(validate_sign_box("s", "r", None, "").is_err(), "empty label");
+        assert!(validate_sign_box("s", "r", None, &"x".repeat(MAX_META_BYTES + 1)).is_err(), "huge label");
+        assert!(validate_sign_box("s", "r", Some("u-kim"), "x").is_ok());
+        assert!(validate_sign_box("s", "r", Some(" "), "x").is_err(), "blank signer");
+        assert!(validate_sign_box("s", "r", Some(&"x".repeat(MAX_ID_BYTES + 1)), "x").is_err(), "long signer");
     }
 
     fn page(width: f32, height: f32, rotation: u16, crop: [f32; 4]) -> pdfcraft_render::PageInfo {
@@ -597,7 +605,7 @@ mod flow_tests {
     #[test]
     fn a_sign_box_request_is_placed_at_once_selected_and_reported() {
         let (mut h, ev) = app(true);
-        send(&mut h, StampCommand::AddSignBox { id: "sb".into(), role: "reviewer".into(), label: "reviewer 서명란".into() });
+        send(&mut h, StampCommand::AddSignBox { id: "sb".into(), role: "reviewer".into(), signer: None, label: "reviewer 서명란".into() });
         // No arming and no click: placed on the page being read, which is left on the Select tool.
         assert_eq!(*ev.borrow(), vec![StampEvent::Placed { id: "sb".into(), page: 0 }]);
         assert_eq!(h.state().quick_tool, QuickTool::Select);
@@ -613,6 +621,19 @@ mod flow_tests {
         assert!(h.state_mut().session.undo(doc).is_ok());
         let saved = h.state().session.save_bytes(doc).unwrap();
         assert!(!saved.windows(11).any(|w| w == b"PpmSignRole"));
+    }
+
+    #[test]
+    fn a_sign_box_request_with_a_signer_stores_it_and_one_without_does_not() {
+        let (mut h, ev) = app(true);
+        send(&mut h, StampCommand::AddSignBox { id: "s1".into(), role: "reviewer".into(), signer: Some("u-kim".into()), label: "x".into() });
+        assert_eq!(*ev.borrow(), vec![StampEvent::Placed { id: "s1".into(), page: 0 }]);
+        let (_, doc) = h.state().active_ids().unwrap();
+        let saved = h.state().session.save_bytes(doc).unwrap();
+        assert!(saved.windows(9).any(|w| w == b"PpmSigner"));
+        assert!(h.state_mut().session.undo(doc).is_ok());
+        let saved = h.state().session.save_bytes(doc).unwrap();
+        assert!(!saved.windows(9).any(|w| w == b"PpmSigner"));
     }
 
     fn place(id: &str, page: usize, x: f64, y: f64, size: Option<(f64, f64)>, bytes: Vec<u8>) -> StampCommand {
@@ -686,9 +707,9 @@ mod flow_tests {
     #[test]
     fn a_sign_box_request_is_refused_without_a_document_or_with_a_bad_role() {
         let (mut h, ev) = app(false);
-        send(&mut h, StampCommand::AddSignBox { id: "a".into(), role: "r".into(), label: "r 서명란".into() });
+        send(&mut h, StampCommand::AddSignBox { id: "a".into(), role: "r".into(), signer: None, label: "r 서명란".into() });
         let (mut h2, ev2) = app(true);
-        send(&mut h2, StampCommand::AddSignBox { id: "b".into(), role: " ".into(), label: "x".into() });
+        send(&mut h2, StampCommand::AddSignBox { id: "b".into(), role: " ".into(), signer: None, label: "x".into() });
         assert!(matches!(&ev.borrow()[..], [StampEvent::Failed { id, .. }] if id == "a"), "{:?}", ev.borrow());
         assert!(matches!(&ev2.borrow()[..], [StampEvent::Failed { id, .. }] if id == "b"), "{:?}", ev2.borrow());
     }

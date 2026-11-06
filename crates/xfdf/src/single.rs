@@ -14,6 +14,7 @@
 //! |---------------------------------------|----------------------------------------------|
 //! | `/PpmStamp` (host stamp meta, JSON)   | `ppm-stamp`, or `ppm-signature` for a signature (JSON with `date` and no `templateId`) |
 //! | `/PpmSignRole` (sign box, FreeText)   | `ppmSignRole`                                |
+//! | `/PpmSigner` (sign box's assigned user) | `ppmSigner`                                 |
 //! | `/IRT` of a non-note (caret on a strike-out) | `ppmIrt` (parent `/NM`); the server allows `inreplyto` on notes only |
 //! | fork-only keys (`PCOutline`, `PCStamp`…) | `ppmFork` (JSON object)                   |
 //! | any other key (kept verbatim)         | stored in `/PpmCustomData` (JSON object)     |
@@ -44,6 +45,7 @@ const SUFFIX: &str = "</annots></xfdf>";
 
 const STAMP_KEY: &str = "PpmStamp";
 const SIGN_ROLE_KEY: &str = "PpmSignRole";
+const SIGNER_KEY: &str = "PpmSigner";
 const CUSTOM_KEY: &str = "PpmCustomData";
 /// Hash of the data URL a picture stamp was made from, so a re-applied item reuses its picture.
 const PICTURE_HASH_KEY: &str = "PpmImageHash";
@@ -367,6 +369,9 @@ fn custom_map(doc: &Document, d: &Dict, tag: &str, irt_name: Option<&str>) -> Ma
         && let Some(role) = text_of(doc, d, SIGN_ROLE_KEY.as_bytes())
     {
         map.insert("ppmSignRole".into(), Value::String(role));
+        if let Some(signer) = text_of(doc, d, SIGNER_KEY.as_bytes()) {
+            map.insert("ppmSigner".into(), Value::String(signer));
+        }
     }
     if let Some(parent) = irt_name {
         map.insert("ppmIrt".into(), Value::String(parent.into()));
@@ -584,6 +589,7 @@ fn apply_custom(d: &mut Dict, custom: &Map<String, Value>) -> Option<String> {
         match k.as_str() {
             "ppm-stamp" | "ppm-signature" => d.set(STAMP_KEY.as_bytes().to_vec(), PdfString::text(&text(v))),
             "ppmSignRole" => d.set(SIGN_ROLE_KEY.as_bytes().to_vec(), PdfString::text(&text(v))),
+            "ppmSigner" => d.set(SIGNER_KEY.as_bytes().to_vec(), PdfString::text(&text(v))),
             "ppmIrt" => parent = Some(text(v)),
             "ppmFork" => {
                 if let Ok(Value::Object(fork)) = serde_json::from_str::<Value>(&text(v)) {

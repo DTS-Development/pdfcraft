@@ -181,7 +181,8 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   after the user applies, undoes or redoes an edit: the difference, by `/NM`, of the annotations
 ///   the `actor` owns (`seq` counts the messages from 1 for each document opened; `page` counts from 1 like the server's, `type` is the annotation's subject or XFDF tag, at most 100 characters). Stamps count too.
 ///   `pdfcraft:annots-selected` `{ annotId | null }` when the selection on the canvas changes.
-///   `pdfcraft:sign-box-selected` `{ annotId, role, page, x, y, width, height }` follows it when the
+///   `pdfcraft:sign-box-selected` `{ annotId, role, page, x, y, width, height, signer? }` (`signer` only when
+///   the box has a `/PpmSigner`; XFDF carries it as `ppmSigner`) follows it when the
 ///   selected annotation is a sign box (a FreeText with `/PpmSignRole`): `page` counts from 0 and the
 ///   rectangle is in PDF points on the page as shown (turned by its `/Rotate`, origin top-left), the
 ///   space `stamp-place` takes. Not sent when the selection is cleared or is anything else; like
@@ -211,8 +212,9 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   stamp is one undoable edit. Reported with `pdfcraft:stamp-placed` `{ id, page }`, or
 ///   `pdfcraft:stamp-failed` `{ id, error }` when it is refused (no document, comments not
 ///   allowed, page out of range, bad numbers, start outside the page, or the `stamp-add` checks).
-/// - `pdfcraft:sign-box-add` (from the parent): `{ id, role, label }` puts a 180 x 60 pt FreeText
-///   sign box (text `label`, dashed black border, `/PpmSignRole` = `role`) in the middle of the
+/// - `pdfcraft:sign-box-add` (from the parent): `{ id, role, label, signer? }` puts a 180 x 60 pt FreeText
+///   sign box (text `label`, dashed black border, `/PpmSignRole` = `role`, and `/PpmSigner` = `signer`
+///   when it is a non-empty string of at most 200 characters; without it the box is as before) in the middle of the
 ///   page being read at once, selected; reported with `pdfcraft:stamp-placed` `{ id, page }`, or
 ///   `pdfcraft:stamp-failed` when it is refused. It is never armed, so there is nothing to cancel.
 /// - `pdfcraft:watermark` (from the parent): `{ text }` shows a diagonal watermark on each page
@@ -694,7 +696,12 @@ mod host {
         let text = |key: &str| {
             js_sys::Reflect::get(data, &JsValue::from_str(key)).ok().and_then(|v| v.as_string()).ok_or_else(|| format!("{key} must be a string"))
         };
-        Ok(pdfcraft_ui_egui::StampCommand::AddSignBox { id: text("id")?, role: text("role")?, label: text("label")? })
+        // `signer` is optional: missing, null or an empty string means none; any other type is an error.
+        let signer = match js_sys::Reflect::get(data, &JsValue::from_str("signer")).unwrap_or(JsValue::UNDEFINED) {
+            v if v.is_undefined() || v.is_null() => None,
+            v => Some(v.as_string().ok_or("signer must be a string")?).filter(|s| !s.is_empty()),
+        };
+        Ok(pdfcraft_ui_egui::StampCommand::AddSignBox { id: text("id")?, role: text("role")?, signer, label: text("label")? })
     }
 
     /// Read a `pdfcraft:annots-*` message; the error says what was wrong with it.

@@ -1637,11 +1637,12 @@ fn helv(doc: &Document, r: ObjRef) -> Object {
 fn a_sign_box_is_a_centred_dashed_text_box_with_its_role() {
     let mut doc = fixture();
     let label = "reviewer 서명란";
-    let i = add_sign_box(&mut doc, 0, [20.0, 600.0, 200.0, 660.0], "reviewer", label, "Ada", &meta("sb")).unwrap();
+    let i = add_sign_box(&mut doc, 0, [20.0, 600.0, 200.0, 660.0], "reviewer", None, label, "Ada", &meta("sb")).unwrap();
     let doc = reopen(&doc);
     let d = list(&doc, 0)[i].clone();
     assert_eq!(d.name(b"Subtype"), Some(&b"FreeText"[..]));
     assert_eq!((text(&d, b"Contents"), text(&d, b"Subj"), text(&d, b"PpmSignRole")), (label.into(), label.into(), "reviewer".into()));
+    assert!(d.get(SIGNER_KEY.as_bytes()).is_none(), "no signer key without a signer");
     assert_eq!(d.int(b"Q"), Some(1));
     let bs = d.get(b"BS").unwrap().as_dict().unwrap();
     assert_eq!((bs.name(b"S"), appearance::nums(bs, b"D")), (Some(&b"D"[..]), Some(vec![4.0, 3.0])));
@@ -1739,4 +1740,13 @@ fn editing_a_korean_comment_reuses_its_font_when_the_glyphs_stay() {
     set_style(&mut doc, 0, t, Some([1.0, 0.0, 0.0]), None, None, None, &meta("")).unwrap();
     assert_eq!(helv(&doc, r), before, "a restyle keeps the embedded font object");
     assert!(doc.object_numbers().len() <= objects + 1, "only the new appearance stream is added");
+}
+
+#[test]
+fn a_sign_box_with_a_signer_keeps_it_in_ppm_signer() {
+    let mut doc = fixture();
+    let i = add_sign_box(&mut doc, 0, [20.0, 600.0, 200.0, 660.0], "reviewer", Some("u-kim"), "x", "Ada", &meta("sb")).unwrap();
+    let doc = reopen(&doc);
+    let d = list(&doc, 0)[i].clone();
+    assert_eq!((text(&d, b"PpmSignRole"), text(&d, b"PpmSigner")), ("reviewer".into(), "u-kim".into()));
 }

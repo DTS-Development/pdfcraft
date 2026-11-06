@@ -428,12 +428,13 @@ fn a_remote_redaction_mark_is_never_hidden() {
 #[test]
 fn an_added_sign_box_exports_the_viewer_form() {
     let mut src = blank();
-    pdfcraft_annot::add_sign_box(&mut src, 0, [20.0, 200.0, 200.0, 260.0], "reviewer", "reviewer 서명란", "Ada", &meta("sb")).unwrap();
+    pdfcraft_annot::add_sign_box(&mut src, 0, [20.0, 200.0, 200.0, 260.0], "reviewer", None, "reviewer 서명란", "Ada", &meta("sb")).unwrap();
     let item = export_annotation(&src, "sb").unwrap();
     assert_server_rules(&item);
     let x = &item.xfdf;
     assert!(x.starts_with("<?xml") && x.contains("<freetext"), "{x}");
     assert!(x.contains("ppmSignRole") && x.contains("reviewer"), "{x}");
+    assert!(!x.contains("ppmSigner"), "no signer key without a signer: {x}");
     assert!(x.contains("style=\"dash\"") && x.contains("dashes=\"4,3\""), "{x}");
     assert!(x.contains("justification=\"center\"") && x.contains("text-align: center") && x.contains("Helvetica 12pt") && x.contains("reviewer 서명란"), "{x}");
     // The web viewer's own row has no fill (`color`) and a red text colour.
@@ -850,4 +851,15 @@ fn a_jpeg_that_two_readers_size_differently_is_refused() {
     // And an ordinary one gets through.
     let x = stamp_xml("ok", &url_of("image/jpeg", &real_jpeg(40, 30)));
     assert_eq!(apply_remote(&mut dst, &[RemoteItem { annot_id: "ok", author_id: "u", xfdf: &x }], &[]).failed, vec![]);
+}
+
+#[test]
+fn a_sign_box_signer_round_trips_through_ppm_signer() {
+    let mut src = blank();
+    pdfcraft_annot::add_sign_box(&mut src, 0, [20.0, 200.0, 200.0, 260.0], "reviewer", Some("u-kim"), "reviewer 서명란", "Ada", &meta("sb")).unwrap();
+    let item = export_annotation(&src, "sb").unwrap();
+    assert!(item.xfdf.contains("ppmSigner") && item.xfdf.contains("u-kim") && item.xfdf.contains("ppmSignRole"), "{}", item.xfdf);
+    let mut dst = blank();
+    let again = round_trip(&src, &mut dst, "sb");
+    assert!(again.xfdf.contains("ppmSigner") && again.xfdf.contains("u-kim"), "{}", again.xfdf);
 }
