@@ -653,6 +653,10 @@ pub struct PdfCraftApp {
     /// While the host names the user ([`Self::set_host_author`]): the name saved in settings, which
     /// `persist` keeps writing so the host's name never reaches a PdfCraft opened without a host.
     stored_author: Option<String>,
+    /// Set by [`Self::start_fresh_for_host`]: this frame keeps no screen state (open side panel,
+    /// egui memory) between frames, so `persist_egui_memory` is off. Holds the side panel saved in
+    /// settings, which `persist` keeps writing so a PdfCraft opened without a host still finds it.
+    host_fresh: Option<Option<RightPanel>>,
     /// Reports unsaved work to the embedding page (web, see [`HostDirtyFn`]).
     pub host_dirty: Option<HostDirtyFn>,
     /// The embedding page's requests for the document's bytes, and where to answer (web, see [`BytesRequest`]).
@@ -1045,6 +1049,7 @@ impl PdfCraftApp {
             host_save: None,
             host_lock: HOST_LOCK,
             stored_author: None,
+            host_fresh: None,
             host_dirty: None,
             bytes_inbox: Default::default(),
             host_bytes: None,
@@ -2434,13 +2439,29 @@ impl PdfCraftApp {
         self.comment_prefs.author = name.chars().take(MAX_AUTHOR_CHARS).collect();
     }
 
+    /// For a frame an embedding page drives (`?host=parent`): start from a clean screen, whatever an
+    /// earlier frame of the origin left. Drops the side panel restored from settings and the egui
+    /// memory eframe loaded from localStorage before the app was created, and stops saving both.
+    /// Preferences (theme, docking layout, panel toggles) stay as they were. Call after [`Self::restore`].
+    pub fn start_fresh_for_host(&mut self, ctx: &egui::Context) {
+        if self.host_fresh.is_none() {
+            self.host_fresh = Some(self.right.take());
+        }
+        // Keep `options`: eframe has just set the web zoom behaviour there.
+        ctx.memory_mut(|m| {
+            let options = std::mem::take(&mut m.options);
+            *m = egui::Memory::default();
+            m.options = options;
+        });
+    }
+
     /// Serialize the user's persistent state (recent files, theme). Local only.
     pub fn persist(&self) -> String {
         let trusted: Vec<String> = self.session.trusted_certificates().iter().map(pdfcraft_engine::sign::x509::to_pem).collect();
         let mut v = serde_json::json!({
             "docking": self.docking,
             "docking_left_open": self.left_open,
-            "docking_right": self.right,
+            "docking_right": self.host_fresh.as_ref().unwrap_or(&self.right),
             "recent": self.recent,
             "reopen_last_session": self.reopen_last_session,
             // Kept only while the preference is on.
@@ -3136,6 +3157,10 @@ impl eframe::App for PdfCraftApp {
             raw.events.push(egui::Event::PointerMoved(pos));
         }
         ctx.request_repaint();
+    }
+
+    fn persist_egui_memory(&self) -> bool {
+        self.host_fresh.is_none()
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
