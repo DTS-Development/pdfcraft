@@ -3021,6 +3021,7 @@ fn comment_list(doc: &pdfcraft_cos::Document) -> Vec<pdfcraft_render::Annotation
             state: s.state,
             quads: s.quads,
             locked: s.locked,
+            sealed: s.sealed,
             intent: s.intent,
             fill_sign: s.fill_sign,
         })

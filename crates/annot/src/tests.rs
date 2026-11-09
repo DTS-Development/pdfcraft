@@ -447,6 +447,23 @@ fn carriage_returns_in_comment_text_become_line_breaks() {
 }
 
 #[test]
+fn only_a_sealed_comment_is_sealed_in_the_list() {
+    let mut doc = fixture();
+    let t = add_annotation(&mut doc, &new(0, Shape::TextBox { rect: [100.0, 680.0, 304.0, 692.0], font_size: 12.0 }), &meta("t")).unwrap();
+    let sealed = |doc: &Document| {
+        let all = summaries(doc);
+        let s = all.iter().find(|s| s.page == 0 && s.index == t).unwrap();
+        (s.locked, s.sealed)
+    };
+    assert_eq!(sealed(&doc), (false, false));
+    // The user's own lock (Locked only) is not a signature.
+    set_locked(&mut doc, 0, t, true).unwrap();
+    assert_eq!(sealed(&doc), (true, false));
+    seal(&mut doc, 0, t).unwrap();
+    assert_eq!(sealed(&doc), (true, true));
+}
+
+#[test]
 fn a_locked_text_box_still_refits_its_text() {
     let mut doc = fixture();
     let t = add_annotation(&mut doc, &new(0, Shape::TextBox { rect: [100.0, 680.0, 304.0, 692.0], font_size: 12.0 }), &meta("t")).unwrap();

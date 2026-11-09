@@ -5460,6 +5460,7 @@ mod tests {
             state: None,
             quads: Vec::new(),
             locked: false,
+            sealed: false,
             intent: None,
             fill_sign,
         }

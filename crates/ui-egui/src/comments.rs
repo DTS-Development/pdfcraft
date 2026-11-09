@@ -673,8 +673,9 @@ fn is_markup(subtype: &str) -> bool {
 /// Rectangles, ovals, text boxes, stamps and drawings (drawn signatures among them). A callout's
 /// `/Rect` also holds its leader line, so it only moves.
 fn resizable(a: &Annotation) -> bool {
-    // A locked comment (a signature) shows no handles: the engine would refuse the edit anyway.
-    !a.locked && matches!(a.subtype.as_str(), "Square" | "Circle" | "FreeText" | "Stamp" | "Ink") && a.intent.as_deref() != Some("FreeTextCallout")
+    // A sealed comment (a signature) shows no handles: the engine would refuse the edit anyway.
+    // One the user only locked keeps them, as in the host's own viewer.
+    !a.sealed && matches!(a.subtype.as_str(), "Square" | "Circle" | "FreeText" | "Stamp" | "Ink") && a.intent.as_deref() != Some("FreeTextCallout")
 }
 
 const HANDLES: [(i8, i8); 8] = [(-1, -1), (0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0)];
@@ -1061,7 +1062,7 @@ fn select_input(
                 _ => egui::CursorIcon::ResizeNeSw,
             });
         } else if let Some(a) = cx.hit(p) {
-            let movable = cx.allowed && !a.locked && !is_markup(&a.subtype);
+            let movable = cx.allowed && !a.sealed && !is_markup(&a.subtype);
             ui.ctx().set_cursor_icon(if movable { egui::CursorIcon::Move } else { egui::CursorIcon::PointingHand });
         }
     }
@@ -1085,7 +1086,7 @@ fn select_input(
         {
             cv.selected = Some((cx.page, a.index));
             cv.reveal = true;
-            if cx.allowed && !a.locked {
+            if cx.allowed && !a.sealed {
                 cv.gesture = Some(Gesture::Move { page: cx.page, index: a.index, from: o });
             }
             consumed = true;
@@ -1593,7 +1594,7 @@ pub(crate) fn keys(ctx: &egui::Context, view: &mut DocView, doc: &pdfcraft_engin
     if allowed
         && let Some((page, index)) = cv.selected
         && doc.can_delete_comment(page, index)
-        && !doc.info.annotations.iter().any(|a| a.page == page && a.index == index && a.locked)
+        && !doc.info.annotations.iter().any(|a| a.page == page && a.index == index && a.sealed)
         && ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
     {
         cv.selected = None;
@@ -1960,6 +1961,36 @@ pub fn status_badge(state: &str) -> Option<(&'static str, &'static str, Color32)
 mod tests {
     use super::*;
     use pdfcraft_render::TextGlyph;
+
+    #[test]
+    fn handles_are_hidden_for_a_signature_only() {
+        let mut a = Annotation {
+            page: 0,
+            subtype: "FreeText".into(),
+            author: None,
+            contents: None,
+            modified: None,
+            name: None,
+            in_reply_to: None,
+            parent: None,
+            rect: [0.0; 4],
+            color: None,
+            index: 0,
+            state: None,
+            quads: Vec::new(),
+            locked: false,
+            sealed: false,
+            intent: None,
+            fill_sign: false,
+        };
+        assert!(resizable(&a));
+        // Locked by the user: the handles stay (the engine refuses the edit), as in the host's own viewer.
+        a.locked = true;
+        assert!(resizable(&a));
+        // Locked and LockedContents (a signature): none.
+        a.sealed = true;
+        assert!(!resizable(&a));
+    }
 
     /// One glyph per character, `w` points wide, on a line of `em`-point text whose baseline is at `y`, drawn
     /// along `direction` (a unit vector in view space, y down).

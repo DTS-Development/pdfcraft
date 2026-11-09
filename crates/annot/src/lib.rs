@@ -2314,6 +2314,8 @@ pub struct Summary {
     pub state: Option<String>,
     pub quads: Vec<[f32; 8]>,
     pub locked: bool,
+    /// Locked and LockedContents both set ([`is_sealed`]): a signature.
+    pub sealed: bool,
     pub intent: Option<String>,
     /// A Fill & Sign mark ([`is_fill_sign`]).
     pub fill_sign: bool,
@@ -2394,6 +2396,7 @@ pub fn summaries(doc: &Document) -> Vec<Summary> {
                 state: text_value(doc, d, b"State"),
                 quads,
                 locked: annotation_flags(doc, d) & FLAG_LOCKED != 0,
+                sealed: is_sealed(doc, d),
                 intent: d.get(b"IT").and_then(|o| doc.resolve(o).as_name().map(|n| String::from_utf8_lossy(n).into_owned())),
                 fill_sign: is_fill_sign(doc, d),
             });

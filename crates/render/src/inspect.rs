@@ -385,6 +385,8 @@ pub struct Annotation {
     pub quads: Vec<[f32; 8]>,
     /// The Locked flag (`/F` bit 8): the comment can't be moved, resized, restyled or deleted.
     pub locked: bool,
+    /// Locked and LockedContents (`/F` bits 128 and 512) both set: a signature, whose handles are not drawn.
+    pub sealed: bool,
     /// `/IT`, the intent: `FreeTextCallout`, `PolygonCloud`, `FreeTextTypeWriter`…
     pub intent: Option<String>,
     /// A Fill & Sign mark: typed text, a check, cross, dot or line, or a typed, drawn or picture
@@ -1188,6 +1190,7 @@ impl<'a> Inspector<'a> {
                     state: self.text(d, b"State"),
                     quads,
                     locked: d.get(b"F").ok().and_then(|f| self.resolve(f).as_i64().ok()).unwrap_or(0) & 128 != 0,
+                    sealed: d.get(b"F").ok().and_then(|f| self.resolve(f).as_i64().ok()).unwrap_or(0) & (128 | 512) == 128 | 512,
                     intent: self.name(d, b"IT"),
                     fill_sign,
                 });
