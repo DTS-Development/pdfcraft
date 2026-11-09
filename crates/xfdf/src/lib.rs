@@ -195,7 +195,7 @@ const SUBTYPES: [(&str, &str); 17] = [
     ("Redact", "redact"),
 ];
 
-const FLAGS: [(i64, &str); 9] = [
+const FLAGS: [(i64, &str); 10] = [
     (1, "invisible"),
     (2, "hidden"),
     (4, "print"),
@@ -205,6 +205,7 @@ const FLAGS: [(i64, &str); 9] = [
     (64, "readonly"),
     (128, "locked"),
     (256, "togglenoview"),
+    (512, "lockedcontents"),
 ];
 
 fn esc(s: &str) -> String {

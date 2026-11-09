@@ -54,6 +54,19 @@ pub enum StampCommand {
         bytes: Vec<u8>,
         meta: String,
     },
+    /// Sign in a sign box (`pdfcraft:sign-in-box`): like `Place`, but the sign box named `annot_id`
+    /// (its `/NM`) is removed in the same edit and the stamp is sealed, so it can't be changed.
+    SignIn {
+        id: String,
+        annot_id: String,
+        page: usize,
+        x: f64,
+        y: f64,
+        size: Option<(f64, f64)>,
+        name: String,
+        bytes: Vec<u8>,
+        meta: String,
+    },
     /// The screen watermark (`pdfcraft:watermark`): `None` or blank takes it away.
     Watermark {
         text: Option<String>,
@@ -208,6 +221,8 @@ impl PdfCraftApp {
         let author = self.comment_prefs.author.clone();
         if self.apply_edit(pdfcraft_engine::Edit::AddSignBox { page, rect, role, signer, label, author }) {
             self.quick_tool = QuickTool::Select;
+            // The new box is selected by this program, not by the user: the page is told so.
+            self.api_selected = self.views[index].comments.selected.and_then(|(p, i)| self.annot_name(doc, p, i));
             Ok(page)
         } else {
             Err(self.toast.as_ref().map(|(m, _)| m.clone()).unwrap_or_else(|| "the sign box could not be placed".to_string()))
@@ -227,6 +242,7 @@ impl PdfCraftApp {
         name: &str,
         bytes: Vec<u8>,
         meta: &str,
+        sign_box: Option<&str>,
     ) -> Result<usize, String> {
         let (_, doc) = self.active_ids().ok_or("no document is open")?;
         let state = self.session.get(doc).ok_or("no document is open")?;
@@ -234,6 +250,20 @@ impl PdfCraftApp {
             return Err("the document doesn't allow comments".into());
         }
         let info = state.info.pages.get(page).ok_or("the page is out of range")?;
+        // The sign box to sign in: it must exist, be a sign box and lie on the page given.
+        let box_index = match sign_box {
+            None => None,
+            Some(annot_id) => {
+                let (box_page, index) = state.annot_position(annot_id).ok_or("there is no annotation with that annotId")?;
+                if state.sign_box_at(box_page, index).is_none() {
+                    return Err("the annotation is not a sign box".into());
+                }
+                if box_page != page {
+                    return Err("the sign box is on another page".into());
+                }
+                Some(index)
+            }
+        };
         // Cheap checks first: the size and the place are known before the PNG is read.
         validate_place(info, x, y, size)?;
         let (w, h) = match size {
@@ -246,13 +276,10 @@ impl PdfCraftApp {
         let armed = validate(id, name, bytes, w, h, meta)?;
         let rect = view_rect_to_user(info, x, y, w, h);
         let author = self.comment_prefs.author.clone();
-        let edit = pdfcraft_engine::Edit::AddCustomStamp {
-            page,
-            rect,
-            name: armed.name,
-            file: pdfcraft_engine::MarkFile { name: "stamp.png".into(), bytes: armed.png, page: 0 },
-            author,
-            extra: Some(("PpmStamp".into(), armed.meta)),
+        let file = pdfcraft_engine::MarkFile { name: "stamp.png".into(), bytes: armed.png, page: 0 };
+        let edit = match box_index {
+            Some(index) => pdfcraft_engine::Edit::SignInBox { page, index, rect, name: armed.name, file, author, meta: armed.meta },
+            None => pdfcraft_engine::Edit::AddCustomStamp { page, rect, name: armed.name, file, author, extra: Some(("PpmStamp".into(), armed.meta)) },
         };
         if self.apply_edit(edit) {
             Ok(page)
@@ -324,7 +351,14 @@ impl PdfCraftApp {
                 }
                 StampCommand::Place { id, page, x, y, size, name, bytes, meta } => {
                     self.disarm_stamp();
-                    match self.place_stamp(&id, page, x, y, size, &name, bytes, &meta) {
+                    match self.place_stamp(&id, page, x, y, size, &name, bytes, &meta, None) {
+                        Ok(page) => self.emit_stamp(StampEvent::Placed { id, page }),
+                        Err(error) => self.emit_stamp(StampEvent::Failed { id, error }),
+                    }
+                }
+                StampCommand::SignIn { id, annot_id, page, x, y, size, name, bytes, meta } => {
+                    self.disarm_stamp();
+                    match self.place_stamp(&id, page, x, y, size, &name, bytes, &meta, Some(&annot_id)) {
                         Ok(page) => self.emit_stamp(StampEvent::Placed { id, page }),
                         Err(error) => self.emit_stamp(StampEvent::Failed { id, error }),
                     }
@@ -840,5 +874,211 @@ mod flow_tests {
         w.write_image_data(&vec![0u8; 1024 * 4096]).unwrap();
         drop(w);
         assert!(validate("r", "n", out, 10.0, 10.0, "{}").unwrap_err().contains("too large"), "32 Mpx in all");
+    }
+    // ── signing in a sign box (`pdfcraft:sign-in-box`) ─────────────────────────────────────────
+
+    use crate::host_annots::{AnnotCommand, AnnotEvent};
+
+    type Heard = Rc<RefCell<Vec<AnnotEvent>>>;
+
+    /// A document the page shares (`annotSync`, actor "alice"), with what both sides hear.
+    fn shared_app() -> (Harness<'static, PdfCraftApp>, Rc<RefCell<Vec<StampEvent>>>, Heard) {
+        let events: Rc<RefCell<Vec<StampEvent>>> = Rc::default();
+        let heard: Heard = Rc::default();
+        let (sink, listen) = (events.clone(), heard.clone());
+        let mut app = PdfCraftApp::new();
+        app.host_stamp = Some(Box::new(move |e| sink.borrow_mut().push(e.clone())));
+        app.host_annots = Some(Box::new(move |e| listen.borrow_mut().push(e.clone())));
+        app.ownership_inbox.lock().unwrap().push(pdfcraft_engine::Ownership { actor: Some("alice".into()), annot_sync: true, ..Default::default() });
+        app.startup_inbox.lock().unwrap().push(("a.pdf".into(), pdf()));
+        let mut harness = Harness::builder().with_size(egui::vec2(1000.0, 700.0)).build_eframe(move |_| app);
+        harness.run_steps(4);
+        (harness, events, heard)
+    }
+
+    /// A sign box another user (u-a) placed, as the server's list carries it.
+    const REMOTE_BOX: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" ?><xfdf xmlns=\"http://ns.adobe.com/xfdf/\" xml:space=\"preserve\"><fields /><annots><freetext page=\"0\" rect=\"20,200,200,260\" flags=\"print\" name=\"vb\" subject=\"reviewer\" date=\"D:20261026120000+09'00'\" creationdate=\"D:20261026120000+09'00'\" title=\"Ada\"><trn-custom-data bytes=\"{&quot;ppmSignRole&quot;:&quot;reviewer&quot;,&quot;authorId&quot;:&quot;u-a&quot;}\"/><contents>reviewer</contents><defaultappearance>0 0 0 rg /Helvetica 12 Tf</defaultappearance></freetext></annots></xfdf>";
+
+    fn sign_in(id: &str, annot_id: &str) -> StampCommand {
+        StampCommand::SignIn {
+            id: id.into(),
+            annot_id: annot_id.into(),
+            page: 0,
+            x: 20.0,
+            y: 40.0,
+            size: Some((90.0, 30.0)),
+            name: "Signature".into(),
+            bytes: png(),
+            meta: "{\"signBoxId\":\"vb\"}".into(),
+        }
+    }
+
+    /// The annotation count and the stamp's lock state on page 0.
+    fn page_notes(h: &Harness<'static, PdfCraftApp>) -> Vec<(String, bool)> {
+        let (_, doc) = h.state().active_ids().unwrap();
+        h.state().session.get(doc).unwrap().info.annotations.iter().map(|a| (a.subtype.clone(), a.locked)).collect()
+    }
+
+    fn remote_box(h: &mut Harness<'static, PdfCraftApp>) {
+        let item = pdfcraft_engine::RemoteAnnot { annot_id: "vb".into(), author_id: "u-a".into(), xfdf: REMOTE_BOX.into() };
+        h.state().annot_inbox.lock().unwrap().push(AnnotCommand::Reset { items: vec![item], seq: 0 });
+        h.run_steps(3);
+    }
+
+    /// Signing in someone else's sign box: the box goes, a sealed stamp takes its place, and the
+    /// page hears both (the box's delete and the stamp's upsert) in `annots-changed`.
+    #[test]
+    fn signing_in_replaces_the_box_with_a_sealed_stamp_and_the_page_hears_both() {
+        let (mut h, ev, heard) = shared_app();
+        remote_box(&mut h);
+        assert_eq!(page_notes(&h), vec![("FreeText".to_string(), false)]);
+        heard.borrow_mut().clear();
+        send(&mut h, sign_in("s1", "vb"));
+        h.run_steps(3);
+        assert_eq!(*ev.borrow(), vec![StampEvent::Placed { id: "s1".into(), page: 0 }]);
+        assert_eq!(page_notes(&h), vec![("Stamp".to_string(), true)], "the box is gone and the stamp is locked");
+        let changes: Vec<_> = heard.borrow().iter().filter_map(|e| if let AnnotEvent::Changed { changes, .. } = e { Some(changes.clone()) } else { None }).collect();
+        assert!(changes.iter().any(|c| c.deletes.contains(&"vb".to_string())), "the box's delete is sent: {changes:?}");
+        assert!(changes.iter().any(|c| c.upserts.iter().any(|u| u.subtype.eq_ignore_ascii_case("stamp") && u.xfdf.contains("lockedcontents"))), "{changes:?}");
+        assert!(
+            !heard.borrow().iter().any(|e| matches!(e, AnnotEvent::SignBoxSelected { .. })),
+            "nothing is selected, so no sign box is reported"
+        );
+        // The stamp is where it was asked, and it keeps the sign box's id in its metadata.
+        let (_, doc) = h.state().active_ids().unwrap();
+        let note = h.state().session.get(doc).unwrap().info.annotations[0].clone();
+        assert_rect(note.rect.map(f64::from), [20.0, 230.0, 110.0, 260.0]);
+    }
+
+    /// Nothing is signed in a thing that is not a sign box, or not there; the document stays as it was.
+    #[test]
+    fn signing_in_something_else_is_refused() {
+        let (mut h, ev, _) = shared_app();
+        remote_box(&mut h);
+        send(&mut h, sign_in("none", "nope"));
+        // A stamp is not a sign box.
+        send(&mut h, place("st", 0, 5.0, 5.0, Some((20.0, 20.0)), png()));
+        let (_, doc) = h.state().active_ids().unwrap();
+        let stamp_id = h.state().session.get(doc).unwrap().info.annotations.iter().find(|a| a.subtype == "Stamp").and_then(|a| a.name.clone());
+        if let Some(stamp_id) = stamp_id {
+            send(&mut h, sign_in("stamp", &stamp_id));
+        }
+        let events = ev.borrow();
+        assert!(matches!(&events[0], StampEvent::Failed { id, .. } if id == "none"), "{events:?}");
+        assert!(events.iter().skip(1).filter(|e| matches!(e, StampEvent::Failed { id, .. } if id == "stamp")).count() <= 1);
+        drop(events);
+        assert!(page_notes(&h).iter().any(|(t, _)| t == "FreeText"), "the box is still there");
+        // A box the user has locked is not signed in either.
+        let locked = pdfcraft_engine::RemoteAnnot { annot_id: "vb".into(), author_id: "u-a".into(), xfdf: REMOTE_BOX.replace("flags=\"print\"", "flags=\"print,locked\"") };
+        h.state().annot_inbox.lock().unwrap().push(AnnotCommand::Reset { items: vec![locked], seq: 0 });
+        h.run_steps(3);
+        assert!(page_notes(&h).iter().any(|(t, l)| t == "FreeText" && *l), "{:?}", page_notes(&h));
+        ev.borrow_mut().clear();
+        send(&mut h, sign_in("locked", "vb"));
+        assert!(matches!(ev.borrow().as_slice(), [StampEvent::Failed { id, .. }] if id == "locked"), "{:?}", ev.borrow());
+    }
+
+    /// A sealed stamp: no move, resize, delete, unlock, text or status edit, from the user's side
+    /// (`apply_edit`) or from the page's (`annots-apply`/`annots-reset`); undo and redo leave it.
+    #[test]
+    fn a_signature_cannot_be_changed_unlocked_deleted_or_undone() {
+        use pdfcraft_engine::Edit;
+        let (mut h, _, _) = shared_app();
+        remote_box(&mut h);
+        // An earlier edit that undo could otherwise reach back to.
+        send(&mut h, place("st", 0, 150.0, 5.0, Some((20.0, 20.0)), png()));
+        send(&mut h, sign_in("s1", "vb"));
+        h.run_steps(3);
+        let (_, doc) = h.state().active_ids().unwrap();
+        let stamp = h
+            .state()
+            .session
+            .get(doc)
+            .unwrap()
+            .info
+            .annotations
+            .iter()
+            .find(|a| a.locked && a.subtype == "Stamp")
+            .cloned()
+            .expect("the signature");
+        let (page, index) = (stamp.page, stamp.index);
+        let nm = stamp.name.clone().expect("a name");
+        let refused = [
+            Edit::MoveAnnotation { page, index, dx: 5.0, dy: 5.0 },
+            Edit::ResizeAnnotation { page, index, rect: [0.0, 0.0, 300.0, 300.0] },
+            Edit::DeleteAnnotation { page, index },
+            Edit::LockAnnotation { page, index, locked: false },
+            Edit::SetAnnotationContents { page, index, text: "x".into() },
+            Edit::SetAnnotationStatus { page, index, state: pdfcraft_engine::ReviewState::Rejected, author: "alice".into() },
+            Edit::MarkAnnotation { page, index, marked: true, author: "alice".into() },
+        ];
+        let before = h.state().session.save_bytes(doc).unwrap();
+        for edit in refused {
+            let label = format!("{edit:?}");
+            assert!(h.state_mut().session.apply(doc, edit).is_err(), "{label} must be refused");
+            assert!(!h.state_mut().apply_edit(Edit::DeleteAnnotation { page, index }));
+        }
+        assert_eq!(h.state().session.save_bytes(doc).unwrap(), before, "refused edits changed nothing");
+        // The page's messages can neither replace it nor take it away (a reset without it included).
+        let remote = pdfcraft_engine::RemoteAnnot { annot_id: nm.clone(), author_id: "u-a".into(), xfdf: REMOTE_BOX.replace("name=\"vb\"", &format!("name=\"{nm}\"")) };
+        h.state_mut().session.annots_apply(doc, vec![remote], vec![nm.clone()]).unwrap();
+        h.state_mut().session.annots_reset(doc, vec![]).unwrap();
+        assert_eq!(page_notes(&h).iter().filter(|(t, l)| t == "Stamp" && *l).count(), 1, "the signature is still there");
+        assert!(h.state().session.get(doc).unwrap().info.annotations.iter().all(|a| a.subtype == "Stamp"), "no box or copy came back");
+        // History starts at the signature: undo and redo find nothing to undo.
+        assert!(h.state_mut().session.undo(doc).is_err());
+        assert!(h.state_mut().session.redo(doc).is_err());
+        assert!(page_notes(&h).iter().any(|(t, l)| t == "Stamp" && *l));
+    }
+
+    /// Saved and opened again, the signature is still locked and sealed; a locked copy keeps refusing.
+    #[test]
+    fn a_signature_stays_sealed_after_saving_and_reopening() {
+        let (mut h, ev) = app(true);
+        send(&mut h, StampCommand::AddSignBox { id: "b".into(), role: "r".into(), signer: None, label: "r 서명란".into() });
+        let (_, doc) = h.state().active_ids().unwrap();
+        let index = h.state().session.get(doc).unwrap().info.annotations[0].index;
+        let nm = h.state().session.get(doc).unwrap().annot_name_at(0, index).expect("the box has a name");
+        send(&mut h, sign_in("s1", &nm));
+        assert_eq!(ev.borrow().last(), Some(&StampEvent::Placed { id: "s1".into(), page: 0 }), "{:?}", ev.borrow());
+        let saved = h.state().session.save_bytes(doc).unwrap().as_ref().clone();
+        assert!(saved.windows(8).any(|w| w == b"PpmStamp"), "stamp key");
+        let reopened = h.state_mut().session.open_new("again.pdf", std::sync::Arc::new(saved)).unwrap_or_else(|e| panic!("{e}"));
+        assert!(h.state().session.get(reopened).unwrap().info.annotations.iter().all(|a| a.subtype == "Stamp" && a.locked));
+        let notes = h.state().session.get(reopened).unwrap().info.annotations.clone();
+        assert_eq!(notes.len(), 1);
+        let (page, index) = (notes[0].page, notes[0].index);
+        use pdfcraft_engine::Edit;
+        assert!(h.state_mut().session.apply(reopened, Edit::LockAnnotation { page, index, locked: false }).is_err());
+        assert!(h.state_mut().session.apply(reopened, Edit::DeleteAnnotation { page, index }).is_err());
+        assert!(h.state_mut().session.apply(reopened, Edit::MoveAnnotation { page, index, dx: 1.0, dy: 1.0 }).is_err());
+    }
+
+    /// `source`: a sign box the program adds (and selects) is reported as `api`; the user's own
+    /// click on a box is `user`.
+    #[test]
+    fn a_sign_box_selection_is_api_when_the_program_chose_it_and_user_otherwise() {
+        let (mut h, _, heard) = shared_app();
+        send(&mut h, StampCommand::AddSignBox { id: "b1".into(), role: "r".into(), signer: None, label: "r 서명란".into() });
+        h.run_steps(3);
+        let sources = |heard: &Heard| -> Vec<bool> {
+            heard.borrow().iter().filter_map(|e| if let AnnotEvent::SignBoxSelected { from_api, .. } = e { Some(*from_api) } else { None }).collect()
+        };
+        assert_eq!(sources(&heard), vec![true], "added by the program");
+        // The user picks something else, then the box again: those are theirs.
+        let (i, doc) = h.state().active_ids().unwrap();
+        let index = h.state().session.get(doc).unwrap().info.annotations[0].index;
+        h.state_mut().views[i].comments.selected = None;
+        h.run_steps(3);
+        h.state_mut().views[i].comments.selected = Some((0, index));
+        h.run_steps(3);
+        assert_eq!(sources(&heard), vec![true, false]);
+        // `annots-select` is the program's again.
+        h.state_mut().views[i].comments.selected = None;
+        h.run_steps(3);
+        let nm = h.state().session.get(doc).unwrap().annot_name_at(0, index).unwrap();
+        h.state().annot_inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: nm });
+        h.run_steps(3);
+        assert_eq!(sources(&heard), vec![true, false, true]);
     }
 }

@@ -40,7 +40,8 @@ pub enum AnnotEvent {
     },
     Selected(Option<String>),
     /// The selected annotation is a sign box: its role and its place on the page as shown (`page` from 0).
-    SignBoxSelected { annot_id: String, role: String, signer: Option<String>, page: usize, rect: [f64; 4] },
+    /// `from_api` is set when the program chose it (a sign box just added, `annots-select`), not the user.
+    SignBoxSelected { annot_id: String, role: String, signer: Option<String>, page: usize, rect: [f64; 4], from_api: bool },
 }
 
 /// Requests from the host, drained every frame once the shared document is open.
@@ -148,8 +149,9 @@ impl AnnotEvent {
                 vec![("pdfcraft:annots-changed", json!({ "seq": seq, "upserts": upserts, "deletes": c.deletes }))]
             }
             Self::Selected(id) => vec![("pdfcraft:annots-selected", json!({ "annotId": id }))],
-            Self::SignBoxSelected { annot_id, role, signer, page, rect } => {
-                let mut msg = json!({ "annotId": annot_id, "role": role, "page": page, "x": rect[0], "y": rect[1], "width": rect[2], "height": rect[3] });
+            Self::SignBoxSelected { annot_id, role, signer, page, rect, from_api } => {
+                let source = if *from_api { "api" } else { "user" };
+                let mut msg = json!({ "annotId": annot_id, "role": role, "page": page, "x": rect[0], "y": rect[1], "width": rect[2], "height": rect[3], "source": source });
                 // `signer` is there only for a box that has one, so an unassigned box's message is as it was.
                 if let (Some(signer), Some(m)) = (signer, msg.as_object_mut()) {
                     m.insert("signer".into(), json!(signer));
@@ -389,7 +391,7 @@ impl PdfCraftApp {
         self.views.iter().find(|v| v.id == doc)
     }
 
-    fn annot_name(&self, doc: DocId, page: usize, index: usize) -> Option<String> {
+    pub(crate) fn annot_name(&self, doc: DocId, page: usize, index: usize) -> Option<String> {
         self.session.get(doc)?.annot_name_at(page, index)
     }
 
@@ -403,6 +405,7 @@ impl PdfCraftApp {
                 view.go_to_page(page);
                 view.comments.selected = Some((page, index));
                 view.comments.reveal = true;
+                self.api_selected = Some(annot_id.to_string());
             }
             None => view.comments.selected = None,
         }
@@ -410,13 +413,16 @@ impl PdfCraftApp {
 
     /// The selected annotation as a sign box: its rectangle is turned from user space into the page
     /// as shown (origin top-left, after `/Rotate`), the space `stamp-place` takes.
-    fn sign_box_selected(&self, doc: DocId, name: Option<&str>) -> Option<AnnotEvent> {
+    fn sign_box_selected(&mut self, doc: DocId, name: Option<&str>) -> Option<AnnotEvent> {
         let annot_id = name?;
         let (page, index) = self.view_of(doc)?.comments.selected?;
         let state = self.session.get(doc)?;
         let (role, signer, rect) = state.sign_box_at(page, index)?;
         let info = state.info.pages.get(page)?;
-        Some(AnnotEvent::SignBoxSelected { annot_id: annot_id.into(), role, signer, page, rect: user_rect_to_view(info, rect) })
+        let rect = user_rect_to_view(info, rect);
+        // The program's choice is told once; whatever is reported next is the user's.
+        let from_api = self.api_selected.take().as_deref() == Some(annot_id);
+        Some(AnnotEvent::SignBoxSelected { annot_id: annot_id.into(), role, signer, page, rect, from_api })
     }
 
     /// Tell the page when the canvas selection changed (once per change).
@@ -440,6 +446,8 @@ impl PdfCraftApp {
                 report(&event);
             }
         }
+        // A program's choice that was not a sign box is not kept for a later click.
+        self.api_selected = None;
         self.annot_selected_sent = Some(selected);
     }
 }
@@ -537,17 +545,20 @@ mod tests {
 
     #[test]
     fn a_sign_box_selection_becomes_a_message() {
-        let e = AnnotEvent::SignBoxSelected { annot_id: "a".into(), role: "reviewer".into(), signer: None, page: 1, rect: [1.0, 2.0, 3.0, 4.0] };
-        assert_eq!(
-            e.to_messages(),
-            vec![("pdfcraft:sign-box-selected", json!({"annotId": "a", "role": "reviewer", "page": 1, "x": 1.0, "y": 2.0, "width": 3.0, "height": 4.0}))]
-        );
-        let e = AnnotEvent::SignBoxSelected { annot_id: "a".into(), role: "reviewer".into(), signer: Some("u-kim".into()), page: 1, rect: [1.0, 2.0, 3.0, 4.0] };
+        let e = AnnotEvent::SignBoxSelected { annot_id: "a".into(), role: "reviewer".into(), signer: None, page: 1, rect: [1.0, 2.0, 3.0, 4.0], from_api: false };
         assert_eq!(
             e.to_messages(),
             vec![(
                 "pdfcraft:sign-box-selected",
-                json!({"annotId": "a", "role": "reviewer", "page": 1, "x": 1.0, "y": 2.0, "width": 3.0, "height": 4.0, "signer": "u-kim"})
+                json!({"annotId": "a", "role": "reviewer", "page": 1, "x": 1.0, "y": 2.0, "width": 3.0, "height": 4.0, "source": "user"})
+            )]
+        );
+        let e = AnnotEvent::SignBoxSelected { annot_id: "a".into(), role: "reviewer".into(), signer: Some("u-kim".into()), page: 1, rect: [1.0, 2.0, 3.0, 4.0], from_api: true };
+        assert_eq!(
+            e.to_messages(),
+            vec![(
+                "pdfcraft:sign-box-selected",
+                json!({"annotId": "a", "role": "reviewer", "page": 1, "x": 1.0, "y": 2.0, "width": 3.0, "height": 4.0, "source": "api", "signer": "u-kim"})
             )]
         );
     }

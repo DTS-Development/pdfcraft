@@ -672,6 +672,8 @@ pub struct PdfCraftApp {
     annot_selected_sent: Option<Option<String>>,
     /// The selected annotation was changed by the user: a sign box is told again (its place may have moved).
     annot_selected_changed: bool,
+    /// The `/NM` the program selected (a sign box it added, `annots-select`) and has not reported yet.
+    api_selected: Option<String>,
     /// The document the page's `annots-*` messages belong to: the last one opened with `annotSync`.
     annot_target: Option<pdfcraft_engine::DocId>,
     /// An `annotSync` file was taken but its document isn't here yet (a password is asked for).
@@ -1063,6 +1065,7 @@ impl PdfCraftApp {
             host_annots: None,
             annot_selected_sent: None,
             annot_selected_changed: false,
+            api_selected: None,
             annot_target: None,
             annot_open_waiting: false,
             annot_seq: 0,

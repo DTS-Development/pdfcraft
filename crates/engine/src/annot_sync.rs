@@ -393,11 +393,17 @@ fn same_alloc(a: &Option<Arc<Object>>, b: Option<&Arc<Object>>) -> bool {
 /// cache up to date.
 fn diff(cos: &Cos, actor: &str, st: &mut SyncState) {
     let mut present: HashSet<String> = HashSet::new();
+    // Names of the annotations that are not the actor's, kept only while the server's are tracked.
+    let mut others: HashSet<String> = HashSet::new();
+    let track_others = !st.remote.is_empty();
     let mut found: Vec<(String, usize, Option<Arc<Object>>, Dict)> = Vec::new();
     {
         let (mine, failed) = (&st.mine, &st.failed);
         walk(cos, |page, _, _, arc, d| {
             if !is_mine(cos, d, actor) || is_check_mark(cos, d) {
+                if track_others {
+                    others.extend(nm_of(cos, d));
+                }
                 return;
             }
             let Some(nm) = nm_of(cos, d) else { return };
@@ -458,6 +464,15 @@ fn diff(cos: &Cos, actor: &str, st: &mut SyncState) {
             st.queue_delete(nm);
         } else {
             st.upserts.remove(&nm);
+        }
+    }
+    // Someone else's annotation the actor's edit took away (signing in a sign box another user
+    // placed): the server is told, as for the actor's own.
+    if track_others {
+        let removed: Vec<String> = st.remote.keys().filter(|k| !others.contains(*k) && !present.contains(*k)).cloned().collect();
+        for nm in removed {
+            st.remote.remove(&nm);
+            st.queue_delete(nm);
         }
     }
     st.failed.retain(|k, _| present.contains(k));
@@ -584,6 +599,11 @@ pub(crate) fn sign_box_of(cos: &Cos, d: &Dict) -> Option<SignBox> {
         return None;
     }
     Some((role, signer, [n[0].min(n[2]), n[1].min(n[3]), n[0].max(n[2]), n[1].max(n[3])]))
+}
+
+/// Is the annotation at `(page, index)` of `cos` a sign box?
+pub(crate) fn sign_box_at_index(cos: &Cos, page: usize, index: usize) -> bool {
+    dict_at(cos, page, index).is_some_and(|d| sign_box_of(cos, &d).is_some())
 }
 
 /// Is the annotation at `(page, index)` of `cos` a reply to another?
@@ -844,6 +864,28 @@ impl Session {
             }
         } else {
             live = upserts;
+        }
+        // A sealed annotation (a signature) is final here: the server's news can't replace it, and
+        // neither can its absence from a list remove it. A rejection is the server withdrawing the
+        // actor's own refused change, so that one goes through.
+        let (mut deletes, mut mine_deletes) = (deletes, mine_deletes);
+        if mode != Mode::Reject
+            && let Some(editor) = doc.editor.as_ref()
+        {
+            let mut sealed: HashSet<String> = HashSet::new();
+            walk(&editor.cos, |_, _, _, _, d| {
+                if pdfcraft_annot::is_sealed(&editor.cos, d) {
+                    sealed.extend(nm_of(&editor.cos, d));
+                }
+            });
+            if !sealed.is_empty() {
+                let before = live.len() + current_only.len() + deletes.len() + mine_deletes.len();
+                live.retain(|a| !sealed.contains(&a.annot_id));
+                current_only.retain(|a| !sealed.contains(&a.annot_id));
+                deletes.retain(|nm| !sealed.contains(nm));
+                mine_deletes.retain(|nm| !sealed.contains(nm));
+                report.skipped += before - (live.len() + current_only.len() + deletes.len() + mine_deletes.len());
+            }
         }
         let reason = doc.read_only_reason.clone().unwrap_or_default();
         let editor = doc.editor.as_mut().ok_or(EditError::ReadOnly(reason))?;

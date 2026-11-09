@@ -68,6 +68,7 @@ pub(crate) fn creates_comments(edit: &Edit) -> bool {
             | Edit::AddAnnotation(_)
             | Edit::AddCustomStamp { .. }
             | Edit::AddSignBox { .. }
+            | Edit::SignInBox { .. }
             | Edit::ReplyToAnnotation { .. }
             | Edit::SetAnnotationStatus { .. }
             | Edit::MarkAnnotation { .. }
@@ -118,6 +119,7 @@ fn work(edit: &Edit) -> Work {
         Edit::AddAnnotation(..)
         | Edit::AddCustomStamp { .. }
         | Edit::AddSignBox { .. }
+        | Edit::SignInBox { .. }
         | Edit::DeleteAnnotation { .. }
         | Edit::SetAnnotationContents { .. }
         | Edit::ReplyToAnnotation { .. }
