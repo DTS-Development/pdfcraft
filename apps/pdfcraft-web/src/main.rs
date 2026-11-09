@@ -85,10 +85,12 @@ fn main() {
                             app.ownership_inbox.clone(),
                             app.annot_inbox.clone(),
                             app.bytes_inbox.clone(),
+                            app.goto_inbox.clone(),
                             cc.egui_ctx.clone(),
                         );
                         app.host_stamp = Some(bridge.stamp_fn());
                         app.host_annots = Some(bridge.annots_fn());
+                        app.host_goto = Some(bridge.goto_fn());
                         app.host_compare = Some(bridge.compare_fn());
                         app.host_save = Some(bridge.save_fn());
                         app.host_dirty = Some(bridge.dirty_fn());
@@ -253,6 +255,9 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   `{ id, replaced, inserted, deleted, visual }` or `pdfcraft:compare-failed` `{ id, error }`
 ///   (to the parent) report the outcome. In this mode the Compare panel has no Mark as
 ///   comments or Report.
+/// - `pdfcraft:goto` (from the parent): `{ id, location: { kind: "pdf", page, rect? } }` shows a page (from 1)
+///   and, with `rect` (user-space points), scrolls that box into view and flashes it; answered by
+///   `pdfcraft:goto-done { id }` or `pdfcraft:goto-failed { id, reason: "not-found" | "error" }`.
 /// - `pdfcraft:dirty` (to the parent): `{ dirty }` whenever unsaved work appears or goes away.
 /// - `pdfcraft:failed` (to the parent): `{ error }` when the app couldn't start.
 ///
@@ -317,6 +322,7 @@ mod host {
             ownership: pdfcraft_ui_egui::OwnershipInbox,
             annots: pdfcraft_ui_egui::AnnotInbox,
             bytes: pdfcraft_ui_egui::BytesInbox,
+            gotos: pdfcraft_ui_egui::GotoInbox,
             ctx: egui::Context,
         ) {
             let bridge = self.clone();
@@ -343,6 +349,24 @@ mod host {
                                 ctx.request_repaint();
                             }
                             Err(error) => eframe::web_sys::console::warn_1(&format!("PdfCraft: {kind} refused: {error}").into()),
+                        }
+                        return;
+                    }
+                    Some("pdfcraft:goto") => {
+                        // `{ id, location: { kind: "pdf", page (from 1), rect? } }`; a bad request is answered
+                        // `goto-failed` with `error` so the page's promise settles, as the office apps do.
+                        match goto_command(&data) {
+                            Ok(command) => {
+                                if let Ok(mut q) = gotos.lock() {
+                                    q.push(command);
+                                }
+                                ctx.request_repaint();
+                            }
+                            Err(error) => {
+                                eframe::web_sys::console::warn_1(&format!("PdfCraft: pdfcraft:goto refused: {error}").into());
+                                let id = string(&data, "id").unwrap_or_default().chars().take(128).collect();
+                                bridge.post_goto(&pdfcraft_ui_egui::GotoEvent::Failed { id, reason: pdfcraft_ui_egui::GotoFail::Error });
+                            }
                         }
                         return;
                     }
@@ -542,6 +566,23 @@ mod host {
                     let _ = self.post(&m, None);
                 }
             }
+        }
+
+        pub fn post_goto(&self, event: &pdfcraft_ui_egui::GotoEvent) {
+            let (kind, body) = event.to_message();
+            let Ok(json) = serde_json::to_string(&body) else { return };
+            let Ok(value) = js_sys::JSON::parse(&json) else { return };
+            if let Some(m) = message(&[("type", kind.into())]) {
+                if let Some(fields) = value.dyn_ref::<js_sys::Object>() {
+                    let _ = js_sys::Object::assign(&m, fields);
+                }
+                let _ = self.post(&m, None);
+            }
+        }
+
+        pub fn goto_fn(&self) -> pdfcraft_ui_egui::HostGotoFn {
+            let bridge = self.clone();
+            Box::new(move |event| bridge.post_goto(event))
         }
 
         pub fn annots_fn(&self) -> pdfcraft_ui_egui::HostAnnotFn {
@@ -754,6 +795,12 @@ mod host {
     }
 
     /// Read a `pdfcraft:annots-*` message; the error says what was wrong with it.
+    fn goto_command(data: &JsValue) -> Result<pdfcraft_ui_egui::GotoCommand, String> {
+        let json = js_sys::JSON::stringify(data).ok().and_then(|s| s.as_string()).ok_or("not plain data")?;
+        let value = serde_json::from_str::<serde_json::Value>(&json).map_err(|e| e.to_string())?;
+        pdfcraft_ui_egui::GotoCommand::from_json(&value)
+    }
+
     fn annots_command(kind: &str, data: &JsValue) -> Result<pdfcraft_ui_egui::AnnotCommand, String> {
         let json = js_sys::JSON::stringify(data).ok().and_then(|s| s.as_string()).ok_or("not plain data")?;
         let value = serde_json::from_str::<serde_json::Value>(&json).map_err(|e| e.to_string())?;

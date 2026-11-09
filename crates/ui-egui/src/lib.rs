@@ -56,6 +56,7 @@ mod export_ui;
 mod host_annots;
 mod host_bytes;
 mod host_compare;
+mod host_goto;
 mod host_lock;
 mod host_stamp;
 mod js_ui;
@@ -69,6 +70,7 @@ mod stamps_ui;
 pub use host_annots::{AnnotCommand, AnnotEvent, AnnotInbox, HostAnnotFn};
 pub use host_bytes::{BytesInbox, BytesPurpose, BytesReply, BytesRequest, HostBytesFn};
 pub use host_compare::{CompareCommand, CompareEvent, CompareInbox, HostCompareFn, MAX_COMPARE_BYTES};
+pub use host_goto::{GotoCommand, GotoEvent, GotoFail, GotoInbox, HostGotoFn};
 pub use host_lock::{HOST_LOCK, commands_manifest, open_scope, parse_mode, policy_overrides, with_policy};
 pub use host_stamp::{HostStampFn, MAX_PNG_BYTES, SIGN_BOX_SIZE, StampCommand, StampEvent, StampInbox};
 pub use pdfcraft_engine::{AnnotChanges, RejectedAnnot, RemoteAnnot};
@@ -668,6 +670,9 @@ pub struct PdfCraftApp {
     /// The embedding page's annotation messages, and where to report changes (web, see [`AnnotCommand`]).
     pub annot_inbox: AnnotInbox,
     pub host_annots: Option<HostAnnotFn>,
+    /// The embedding page's `goto` requests (a page, a rectangle), and where to report them (web, see [`GotoCommand`]).
+    pub goto_inbox: GotoInbox,
+    pub host_goto: Option<HostGotoFn>,
     /// The selection last reported to the page (`None`: nothing reported yet).
     annot_selected_sent: Option<Option<String>>,
     /// The selected annotation was changed by the user: a sign box is told again (its place may have moved).
@@ -1063,6 +1068,8 @@ impl PdfCraftApp {
             host_stamp: None,
             annot_inbox: Default::default(),
             host_annots: None,
+            goto_inbox: Default::default(),
+            host_goto: None,
             annot_selected_sent: None,
             annot_selected_changed: false,
             api_selected: None,
@@ -3497,6 +3504,7 @@ impl eframe::App for PdfCraftApp {
         });
         self.process_pending_edits();
         self.host_annots_tick();
+        self.host_goto_tick();
         palette::show(self, &ctx);
         dialogs::show(self, &ctx);
         self.show_progress(&ctx);
