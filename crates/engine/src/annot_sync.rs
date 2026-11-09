@@ -603,7 +603,11 @@ pub(crate) fn sign_box_of(cos: &Cos, d: &Dict) -> Option<SignBox> {
 /// The `/NM`s of the sign boxes that `edit` (or a batch's edits) signs in, read before it runs.
 pub(crate) fn signed_in_names(cos: &Cos, edit: &Edit) -> Vec<String> {
     match edit {
-        Edit::SignInBox { page, index, .. } => dict_at(cos, *page, *index).and_then(|d| nm_of(cos, &d)).into_iter().collect(),
+        // The box and the replies that go with it.
+        Edit::SignInBox { page, index, .. } => pdfcraft_annot::thread_indices(cos, *page, *index)
+            .into_iter()
+            .filter_map(|at| dict_at(cos, *page, at).and_then(|d| nm_of(cos, &d)))
+            .collect(),
         Edit::Batch { edits, .. } => edits.iter().flat_map(|e| signed_in_names(cos, e)).collect(),
         _ => Vec::new(),
     }

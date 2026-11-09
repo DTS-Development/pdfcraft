@@ -1673,6 +1673,18 @@ pub fn delete_annotation_unchecked(doc: &mut Document, page: usize, index: usize
     delete_with(doc, page, index, false)
 }
 
+/// Positions in the page's `/Annots` of the annotation at `index` and of everything deleting it takes with
+/// it (its replies, theirs, and pop-ups), the annotation itself first. Empty when there is none.
+pub fn thread_indices(doc: &Document, page: usize, index: usize) -> Vec<usize> {
+    let Ok(p) = page_ref(doc, page) else { return Vec::new() };
+    let list = annots(doc, p);
+    let Some(target) = list.get(index) else { return Vec::new() };
+    let doomed = doomed_with(doc, &list, target.as_ref());
+    let mut out = vec![index];
+    out.extend(list.iter().enumerate().filter(|(i, e)| *i != index && e.as_ref().is_some_and(|r| doomed.contains(&r))).map(|(i, _)| i));
+    out
+}
+
 fn delete_with(doc: &mut Document, page: usize, index: usize, respect_lock: bool) -> Result<(), AnnotError> {
     let p = page_ref(doc, page)?;
     let list = annots(doc, p);
