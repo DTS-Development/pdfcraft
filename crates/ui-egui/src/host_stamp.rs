@@ -516,11 +516,13 @@ mod flow_tests {
     use super::*;
 
     fn pdf() -> Vec<u8> {
-        let objects = [
-            "<< /Type /Catalog /Pages 2 0 R >>",
-            "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 300] >>",
-            "<< /Type /Page /Parent 2 0 R >>",
-        ];
+        pdf_pages(1)
+    }
+
+    fn pdf_pages(n: usize) -> Vec<u8> {
+        let kids: Vec<String> = (0..n).map(|i| format!("{} 0 R", 3 + i)).collect();
+        let mut objects = vec!["<< /Type /Catalog /Pages 2 0 R >>".to_string(), format!("<< /Type /Pages /Kids [{}] /Count {n} /MediaBox [0 0 200 300] >>", kids.join(" "))];
+        objects.extend((0..n).map(|_| "<< /Type /Page /Parent 2 0 R >>".to_string()));
         let mut out = b"%PDF-1.7\n".to_vec();
         let mut offsets = Vec::new();
         for (i, o) in objects.iter().enumerate() {
@@ -883,6 +885,10 @@ mod flow_tests {
 
     /// A document the page shares (`annotSync`, actor "alice"), with what both sides hear.
     fn shared_app() -> (Harness<'static, PdfCraftApp>, Rc<RefCell<Vec<StampEvent>>>, Heard) {
+        shared_app_pages(1)
+    }
+
+    fn shared_app_pages(pages: usize) -> (Harness<'static, PdfCraftApp>, Rc<RefCell<Vec<StampEvent>>>, Heard) {
         let events: Rc<RefCell<Vec<StampEvent>>> = Rc::default();
         let heard: Heard = Rc::default();
         let (sink, listen) = (events.clone(), heard.clone());
@@ -890,7 +896,7 @@ mod flow_tests {
         app.host_stamp = Some(Box::new(move |e| sink.borrow_mut().push(e.clone())));
         app.host_annots = Some(Box::new(move |e| listen.borrow_mut().push(e.clone())));
         app.ownership_inbox.lock().unwrap().push(pdfcraft_engine::Ownership { actor: Some("alice".into()), annot_sync: true, ..Default::default() });
-        app.startup_inbox.lock().unwrap().push(("a.pdf".into(), pdf()));
+        app.startup_inbox.lock().unwrap().push(("a.pdf".into(), pdf_pages(pages)));
         let mut harness = Harness::builder().with_size(egui::vec2(1000.0, 700.0)).build_eframe(move |_| app);
         harness.run_steps(4);
         (harness, events, heard)
@@ -983,12 +989,12 @@ mod flow_tests {
     /// A sign box on another page than the stamp is asked for is not signed in; the box stays.
     #[test]
     fn signing_in_a_box_on_another_page_is_refused() {
-        let (mut h, ev, _) = shared_app();
+        let (mut h, ev, _) = shared_app_pages(2);
         remote_box(&mut h);
         ev.borrow_mut().clear();
         let StampCommand::SignIn { id, annot_id, x, y, size, name, bytes, meta, .. } = sign_in("far", "vb") else { unreachable!() };
         send(&mut h, StampCommand::SignIn { id, annot_id, page: 1, x, y, size, name, bytes, meta });
-        assert!(matches!(ev.borrow().as_slice(), [StampEvent::Failed { id, .. }] if id == "far"), "{:?}", ev.borrow());
+        assert!(matches!(ev.borrow().as_slice(), [StampEvent::Failed { id, error }] if id == "far" && error.contains("another page")), "{:?}", ev.borrow());
         assert_eq!(page_notes(&h), vec![("FreeText".to_string(), false)], "the box is untouched");
     }
 
