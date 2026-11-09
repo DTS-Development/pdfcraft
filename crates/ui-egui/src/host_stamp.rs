@@ -959,14 +959,16 @@ mod flow_tests {
         // A stamp is not a sign box.
         send(&mut h, place("st", 0, 5.0, 5.0, Some((20.0, 20.0)), png()));
         let (_, doc) = h.state().active_ids().unwrap();
-        let stamp_id = h.state().session.get(doc).unwrap().info.annotations.iter().find(|a| a.subtype == "Stamp").and_then(|a| a.name.clone());
-        if let Some(stamp_id) = stamp_id {
-            send(&mut h, sign_in("stamp", &stamp_id));
-        }
+        let session = &h.state().session;
+        let at = session.get(doc).unwrap().info.annotations.iter().find(|a| a.subtype == "Stamp").map(|a| (a.page, a.index)).expect("the stamp was placed");
+        let stamp_id = session.get(doc).unwrap().annot_name_at(at.0, at.1).expect("the stamp has a name");
+        send(&mut h, sign_in("stamp", &stamp_id));
         let events = ev.borrow();
         assert!(matches!(&events[0], StampEvent::Failed { id, .. } if id == "none"), "{events:?}");
-        assert!(events.iter().skip(1).filter(|e| matches!(e, StampEvent::Failed { id, .. } if id == "stamp")).count() <= 1);
+        let for_stamp: Vec<_> = events.iter().filter(|e| matches!(e, StampEvent::Failed { id, .. } | StampEvent::Placed { id, .. } if id == "stamp")).collect();
+        assert!(matches!(for_stamp.as_slice(), [StampEvent::Failed { .. }]), "exactly one failure for the stamp, no placement: {events:?}");
         drop(events);
+        assert_eq!(page_notes(&h).iter().filter(|(t, _)| t == "Stamp").count(), 1, "no second stamp");
         assert!(page_notes(&h).iter().any(|(t, _)| t == "FreeText"), "the box is still there");
         // A box the user has locked is not signed in either.
         let locked = pdfcraft_engine::RemoteAnnot { annot_id: "vb".into(), author_id: "u-a".into(), xfdf: REMOTE_BOX.replace("flags=\"print\"", "flags=\"print,locked\"") };
@@ -976,6 +978,31 @@ mod flow_tests {
         ev.borrow_mut().clear();
         send(&mut h, sign_in("locked", "vb"));
         assert!(matches!(ev.borrow().as_slice(), [StampEvent::Failed { id, .. }] if id == "locked"), "{:?}", ev.borrow());
+    }
+
+    /// A sign box on another page than the stamp is asked for is not signed in; the box stays.
+    #[test]
+    fn signing_in_a_box_on_another_page_is_refused() {
+        let (mut h, ev, _) = shared_app();
+        remote_box(&mut h);
+        ev.borrow_mut().clear();
+        let StampCommand::SignIn { id, annot_id, x, y, size, name, bytes, meta, .. } = sign_in("far", "vb") else { unreachable!() };
+        send(&mut h, StampCommand::SignIn { id, annot_id, page: 1, x, y, size, name, bytes, meta });
+        assert!(matches!(ev.borrow().as_slice(), [StampEvent::Failed { id, .. }] if id == "far"), "{:?}", ev.borrow());
+        assert_eq!(page_notes(&h), vec![("FreeText".to_string(), false)], "the box is untouched");
+    }
+
+    /// The only deletion of someone else's annotation that reaches the page is a sign box a
+    /// signature replaced: one the server itself takes away is not echoed back as a delete.
+    #[test]
+    fn another_users_annotation_taken_away_by_the_server_is_not_sent_as_a_delete() {
+        let (mut h, _, heard) = shared_app();
+        remote_box(&mut h);
+        h.state().annot_inbox.lock().unwrap().push(AnnotCommand::Reset { items: vec![], seq: 1 });
+        h.run_steps(3);
+        assert!(page_notes(&h).is_empty(), "{:?}", page_notes(&h));
+        let sent: Vec<_> = heard.borrow().iter().filter_map(|e| if let AnnotEvent::Changed { changes, .. } = e { Some(changes.deletes.clone()) } else { None }).flatten().collect();
+        assert!(!sent.contains(&"vb".to_string()), "{sent:?}");
     }
 
     /// A sealed stamp: no move, resize, delete, unlock, text or status edit, from the user's side

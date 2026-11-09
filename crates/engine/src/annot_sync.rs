@@ -203,12 +203,19 @@ pub(crate) struct SyncState {
     /// The `/NM`s of each change message handed to the page, by its number, until a reset shows the
     /// page has seen them.
     sent: Vec<(u64, Vec<String>)>,
+    /// The `/NM`s of sign boxes a signature just replaced; if another user placed one, the server
+    /// is told it is gone (the only deletion of someone else's annotation the actor's edit sends).
+    signed_away: BTreeSet<String>,
 }
 
 impl SyncState {
     fn queue_upsert(&mut self, u: AnnotUpsert, reply: bool) {
         self.deletes.remove(&u.annot_id);
         self.upserts.insert(u.annot_id.clone(), (u, reply));
+    }
+
+    pub(crate) fn note_signed_away(&mut self, names: Vec<String>) {
+        self.signed_away.extend(names);
     }
 
     fn queue_delete(&mut self, nm: String) {
@@ -393,17 +400,11 @@ fn same_alloc(a: &Option<Arc<Object>>, b: Option<&Arc<Object>>) -> bool {
 /// cache up to date.
 fn diff(cos: &Cos, actor: &str, st: &mut SyncState) {
     let mut present: HashSet<String> = HashSet::new();
-    // Names of the annotations that are not the actor's, kept only while the server's are tracked.
-    let mut others: HashSet<String> = HashSet::new();
-    let track_others = !st.remote.is_empty();
     let mut found: Vec<(String, usize, Option<Arc<Object>>, Dict)> = Vec::new();
     {
         let (mine, failed) = (&st.mine, &st.failed);
         walk(cos, |page, _, _, arc, d| {
             if !is_mine(cos, d, actor) || is_check_mark(cos, d) {
-                if track_others {
-                    others.extend(nm_of(cos, d));
-                }
                 return;
             }
             let Some(nm) = nm_of(cos, d) else { return };
@@ -466,12 +467,10 @@ fn diff(cos: &Cos, actor: &str, st: &mut SyncState) {
             st.upserts.remove(&nm);
         }
     }
-    // Someone else's annotation the actor's edit took away (signing in a sign box another user
-    // placed): the server is told, as for the actor's own.
-    if track_others {
-        let removed: Vec<String> = st.remote.keys().filter(|k| !others.contains(*k) && !present.contains(*k)).cloned().collect();
-        for nm in removed {
-            st.remote.remove(&nm);
+    // A sign box of another user that a signature replaced: the server is told, as for the
+    // actor's own. Nothing else the actor's edit takes from someone else is sent.
+    for nm in std::mem::take(&mut st.signed_away) {
+        if !present.contains(&nm) && st.remote.remove(&nm).is_some() {
             st.queue_delete(nm);
         }
     }
@@ -599,6 +598,15 @@ pub(crate) fn sign_box_of(cos: &Cos, d: &Dict) -> Option<SignBox> {
         return None;
     }
     Some((role, signer, [n[0].min(n[2]), n[1].min(n[3]), n[0].max(n[2]), n[1].max(n[3])]))
+}
+
+/// The `/NM`s of the sign boxes that `edit` (or a batch's edits) signs in, read before it runs.
+pub(crate) fn signed_in_names(cos: &Cos, edit: &Edit) -> Vec<String> {
+    match edit {
+        Edit::SignInBox { page, index, .. } => dict_at(cos, *page, *index).and_then(|d| nm_of(cos, &d)).into_iter().collect(),
+        Edit::Batch { edits, .. } => edits.iter().flat_map(|e| signed_in_names(cos, e)).collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Is the annotation at `(page, index)` of `cos` a sign box?

@@ -4116,6 +4116,7 @@ impl Session {
         } else {
             Vec::new()
         };
+        let signed_boxes = annot_sync::signed_in_names(&editor.cos, &edit);
         let previous = std::mem::replace(&mut editor.cos, next);
         let keys = keys_after(&edit).unwrap_or_else(|| editor.keys.clone());
         let previous_keys = std::mem::replace(&mut editor.keys, keys);
@@ -4149,6 +4150,9 @@ impl Session {
         {
             ed.undo.clear();
             ed.redo.clear();
+        }
+        if let Some(st) = doc.sync.as_mut() {
+            st.note_signed_away(signed_boxes);
         }
         // Annotations of a document that shares them go to the host's database: nothing to save.
         if doc.sync.is_none() || !annot_sync::is_annotation_work(&edit) {
