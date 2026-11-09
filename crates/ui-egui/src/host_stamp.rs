@@ -1043,6 +1043,16 @@ mod flow_tests {
         assert_eq!(ev.borrow().last(), Some(&StampEvent::Placed { id: "s1".into(), page: 0 }), "{:?}", ev.borrow());
         let saved = h.state().session.save_bytes(doc).unwrap().as_ref().clone();
         assert!(saved.windows(8).any(|w| w == b"PpmStamp"), "stamp key");
+        // The server reads the signature from this dictionary: /PpmStamp carries the meta JSON
+        // (with signBoxId) and /F has Locked(128)|LockedContents(512), both in the same object.
+        let text = String::from_utf8_lossy(&saved);
+        let at = text.rfind("/PpmStamp").expect("stamp key in the saved file");
+        let object_start = text[..at].rfind(" obj").expect("inside an object");
+        let object_end = at + text[at..].find("endobj").expect("object end");
+        let stamp = &text[object_start..object_end];
+        assert!(stamp.contains("signBoxId") && stamp.contains("vb"), "meta JSON: {stamp}");
+        let flags: i64 = stamp.split("/F ").nth(1).and_then(|t| t.split(|c: char| !c.is_ascii_digit()).next()).and_then(|n| n.parse().ok()).expect("/F");
+        assert_eq!(flags & (128 | 512), 128 | 512, "Locked and LockedContents in /F={flags}");
         let reopened = h.state_mut().session.open_new("again.pdf", std::sync::Arc::new(saved)).unwrap_or_else(|e| panic!("{e}"));
         assert!(h.state().session.get(reopened).unwrap().info.annotations.iter().all(|a| a.subtype == "Stamp" && a.locked));
         let notes = h.state().session.get(reopened).unwrap().info.annotations.clone();
