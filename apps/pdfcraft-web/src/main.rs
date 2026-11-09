@@ -75,6 +75,9 @@ fn main() {
                         if let Some(author) = query_param("author") {
                             app.set_host_author(&author);
                         }
+                        // A host-driven frame starts clean: the previous frame's open side panel
+                        // (compare, ...) and egui memory in localStorage are neither read nor saved (#26).
+                        app.start_fresh_for_host(&cc.egui_ctx);
                         bridge.listen(
                             app.startup_inbox.clone(),
                             app.stamp_inbox.clone(),

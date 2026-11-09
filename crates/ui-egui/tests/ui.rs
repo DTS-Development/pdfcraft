@@ -1404,3 +1404,32 @@ fn the_edit_tab_turns_on_edit_text_and_images() {
     h.run_steps(3);
     assert_eq!(h.state().quick_tool, QuickTool::Hand);
 }
+
+/// #26: a frame an embedding page drives starts without the side panel an earlier frame left in
+/// settings and without egui memory; the saved settings keep the panel for a PdfCraft with no host.
+#[test]
+fn host_frame_starts_without_the_saved_side_panel_and_keeps_it_in_settings() {
+    use pdfcraft_ui_egui::RightPanel;
+    let mut earlier = PdfCraftApp::new();
+    earlier.right = Some(RightPanel::Compare);
+    let saved = earlier.persist();
+    let saved = saved.as_str();
+    // Standalone: restored as before, egui memory persisted.
+    let mut a = PdfCraftApp::new();
+    a.restore(saved);
+    assert_eq!(a.right, Some(RightPanel::Compare));
+    assert!(eframe::App::persist_egui_memory(&a));
+    // Host-driven: no panel, no egui memory, settings still carry the old panel.
+    let mut h = PdfCraftApp::new();
+    h.restore(saved);
+    let ctx = egui::Context::default();
+    ctx.memory_mut(|m| m.options.zoom_with_keyboard = false);
+    ctx.memory_mut(|m| m.data.insert_persisted(egui::Id::new("x"), 1u8));
+    h.start_fresh_for_host(&ctx);
+    assert_eq!(h.right, None);
+    assert!(!eframe::App::persist_egui_memory(&h));
+    assert!(ctx.memory_mut(|m| m.data.get_persisted::<u8>(egui::Id::new("x"))).is_none(), "egui memory dropped");
+    assert!(!ctx.memory(|m| m.options.zoom_with_keyboard), "eframe's options kept");
+    let json: serde_json::Value = serde_json::from_str(&h.persist()).unwrap();
+    assert_eq!(json["docking_right"], "Compare");
+}
