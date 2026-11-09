@@ -1429,6 +1429,19 @@ mod ownership_rules {
     }
 
     #[test]
+    fn pages_with_a_sealed_comment_are_refused_whoever_asks() {
+        let mut doc = fixture();
+        let i = note(&mut doc, Some("u-a"), "a");
+        assert_eq!(check_pages_unsigned(&doc, &[0, 1]), Ok(()), "a plain comment is no signature");
+        assert_eq!(check_all_pages_unsigned(&doc), Ok(()));
+        seal(&mut doc, 0, i).unwrap();
+        assert_eq!(check_pages_unsigned(&doc, &[0]), Err(AnnotError::SignedPage));
+        assert_eq!(check_pages_unsigned(&doc, &[1]), Ok(()), "only the page with the signature");
+        assert_eq!(check_pages_unsigned(&doc, &[7]), Ok(()), "unknown pages are the edit's to report");
+        assert_eq!(check_all_pages_unsigned(&doc), Err(AnnotError::SignedPage));
+    }
+
+    #[test]
     fn pages_with_comments_of_others_are_refused() {
         let mut doc = fixture();
         note(&mut doc, Some("u-a"), "a");

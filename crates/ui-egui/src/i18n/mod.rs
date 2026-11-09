@@ -508,10 +508,11 @@ pub fn words(wording: &str) -> String {
 
 /// The refusals the document-sharing (PPM) rules add. Only these are said in the UI language when
 /// they come up as an edit error; any other engine error keeps its English text, as upstream.
-const OWNERSHIP_REFUSALS: [&str; 6] = [
+const OWNERSHIP_REFUSALS: [&str; 7] = [
     "this comment belongs to someone else",
     "the comment has replies from someone else",
     "this page has comments from someone else",
+    "this page has a signature",
     "the document is read-only",
     "this change isn't available here: only comments can be made in this view",
     "a reply can't be replied to",
@@ -1111,6 +1112,7 @@ mod tests {
             "this comment belongs to someone else".to_string(),
             "the comment has replies from someone else".to_string(),
             "this page has comments from someone else".to_string(),
+            "this page has a signature".to_string(),
             pdfcraft_engine::EditError::HostReadOnly.to_string(),
             pdfcraft_engine::EditError::HostViewerOnly.to_string(),
         ];
