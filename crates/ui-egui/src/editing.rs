@@ -201,6 +201,8 @@ impl PdfCraftApp {
                         view.comments.selected = newest.map(|n| (page, n));
                         view.comments.reveal = true;
                     }
+                    // The sign box is gone and its index may now name another comment: nothing is selected.
+                    Edit::SignInBox { .. } => view.comments.selected = None,
                     Edit::DeleteAnnotation { .. } => {
                         view.comments.selected = reply_parent.as_ref().and_then(|p| find_after_delete(&info.annotations, p))
                     }
@@ -1061,7 +1063,8 @@ fn content_page(edit: &Edit) -> Option<usize> {
 fn comment_page(edit: &Edit) -> Option<usize> {
     match edit {
         Edit::AddAnnotation(a) => Some(a.page),
-        Edit::DeleteAnnotation { page, .. }
+        Edit::SignInBox { page, .. }
+        | Edit::DeleteAnnotation { page, .. }
         | Edit::SetAnnotationContents { page, .. }
         | Edit::ReplyToAnnotation { page, .. }
         | Edit::SetAnnotationStatus { page, .. }

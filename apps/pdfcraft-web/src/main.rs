@@ -187,7 +187,9 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   after the user applies, undoes or redoes an edit: the difference, by `/NM`, of the annotations
 ///   the `actor` owns (`seq` counts the messages from 1 for each document opened; `page` counts from 1 like the server's, `type` is the annotation's subject or XFDF tag, at most 100 characters). Stamps count too.
 ///   `pdfcraft:annots-selected` `{ annotId | null }` when the selection on the canvas changes.
-///   `pdfcraft:sign-box-selected` `{ annotId, role, page, x, y, width, height, signer? }` (`signer` only when
+///   `pdfcraft:sign-box-selected` `{ annotId, role, page, x, y, width, height, source, signer? }` (`source` is `"user"`
+///   when the user clicked or keyed the box and `"api"` when the program selected it: a box just added with
+///   `sign-box-add`, or `annots-select`; `signer` only when
 ///   the box has a `/PpmSigner`, sent as stored, never trimmed or left out; XFDF carries it as `ppmSigner`, and an
 ///   imported `ppmSigner` that is not a string is ignored. Whether an XFDF signer is valid is for the server to check) follows it when the
 ///   selected annotation is a sign box (a FreeText with `/PpmSignRole`): `page` counts from 0 and the
@@ -219,6 +221,16 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   stamp is one undoable edit. Reported with `pdfcraft:stamp-placed` `{ id, page }`, or
 ///   `pdfcraft:stamp-failed` `{ id, error }` when it is refused (no document, comments not
 ///   allowed, page out of range, bad numbers, start outside the page, or the `stamp-add` checks).
+/// - `pdfcraft:sign-in-box` (from the parent): `{ id, annotId, page, x, y, width?, height?, name, bytes, meta }`
+///   signs in the sign box `annotId` (its `/NM`; it must be a FreeText with `/PpmSignRole` on `page`, and
+///   not locked): the same as `stamp-place`, but in one edit the sign box is removed and the stamp put
+///   in its place with `/F` Locked (128) and LockedContents (512). A sealed stamp can't be moved, resized,
+///   deleted, unlocked or edited by the user or by `annots-apply`/`annots-reset` (`annots-reject` still
+///   works), whoever signed it, also after the file is saved and opened again. The edit starts the undo
+///   history over, so undo and redo can't bring the box back. Reported like `stamp-place` with `pdfcraft:stamp-placed`
+///   `{ id, page }` or `pdfcraft:stamp-failed` `{ id, error }` (no such `annotId`, not a sign box, on another
+///   page, locked, plus the `stamp-place` checks). With `annotSync` the box's delete and the stamp's upsert
+///   come in `annots-changed`. Nothing is selected afterwards.
 /// - `pdfcraft:sign-box-add` (from the parent): `{ id, role, label, signer? }` puts a 180 x 60 pt FreeText
 ///   sign box (text `label`, dashed black border, `/PpmSignRole` = `role`, and `/PpmSigner` = `signer`
 ///   when it is a string of 1 to 200 characters (UTF-16) with no space at either end and no control, bidi or
@@ -378,6 +390,19 @@ mod host {
                     Some("pdfcraft:stamp-place") => {
                         let id = string(&data, "id").unwrap_or_default();
                         match stamp_place(&data) {
+                            Ok(command) => {
+                                if let Ok(mut q) = stamps.lock() {
+                                    q.push(command);
+                                }
+                                ctx.request_repaint();
+                            }
+                            Err(error) => bridge.post_stamp(&pdfcraft_ui_egui::StampEvent::Failed { id, error }),
+                        }
+                        return;
+                    }
+                    Some("pdfcraft:sign-in-box") => {
+                        let id = string(&data, "id").unwrap_or_default();
+                        match sign_in_box(&data) {
                             Ok(command) => {
                                 if let Ok(mut q) = stamps.lock() {
                                     q.push(command);
@@ -698,6 +723,21 @@ mod host {
             bytes: array.to_vec(),
             meta: text("meta")?,
         })
+    }
+
+    /// Read a `pdfcraft:sign-in-box` message: a `stamp-place` plus the `annotId` of the sign box it signs.
+    fn sign_in_box(data: &JsValue) -> Result<pdfcraft_ui_egui::StampCommand, String> {
+        let annot_id =
+            js_sys::Reflect::get(data, &JsValue::from_str("annotId")).ok().and_then(|v| v.as_string()).ok_or("annotId must be a string")?;
+        if annot_id.is_empty() {
+            return Err("annotId must not be empty".into());
+        }
+        match stamp_place(data)? {
+            pdfcraft_ui_egui::StampCommand::Place { id, page, x, y, size, name, bytes, meta } => {
+                Ok(pdfcraft_ui_egui::StampCommand::SignIn { id, annot_id, page, x, y, size, name, bytes, meta })
+            }
+            _ => Err("not a sign-in message".into()),
+        }
     }
 
     /// Read a `pdfcraft:sign-box-add` message; the error is what the parent is told.

@@ -673,7 +673,8 @@ fn is_markup(subtype: &str) -> bool {
 /// Rectangles, ovals, text boxes, stamps and drawings (drawn signatures among them). A callout's
 /// `/Rect` also holds its leader line, so it only moves.
 fn resizable(a: &Annotation) -> bool {
-    matches!(a.subtype.as_str(), "Square" | "Circle" | "FreeText" | "Stamp" | "Ink") && a.intent.as_deref() != Some("FreeTextCallout")
+    // A locked comment (a signature) shows no handles: the engine would refuse the edit anyway.
+    !a.locked && matches!(a.subtype.as_str(), "Square" | "Circle" | "FreeText" | "Stamp" | "Ink") && a.intent.as_deref() != Some("FreeTextCallout")
 }
 
 const HANDLES: [(i8, i8); 8] = [(-1, -1), (0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0)];
@@ -1060,7 +1061,7 @@ fn select_input(
                 _ => egui::CursorIcon::ResizeNeSw,
             });
         } else if let Some(a) = cx.hit(p) {
-            let movable = cx.allowed && !is_markup(&a.subtype);
+            let movable = cx.allowed && !a.locked && !is_markup(&a.subtype);
             ui.ctx().set_cursor_icon(if movable { egui::CursorIcon::Move } else { egui::CursorIcon::PointingHand });
         }
     }
@@ -1084,7 +1085,7 @@ fn select_input(
         {
             cv.selected = Some((cx.page, a.index));
             cv.reveal = true;
-            if cx.allowed {
+            if cx.allowed && !a.locked {
                 cv.gesture = Some(Gesture::Move { page: cx.page, index: a.index, from: o });
             }
             consumed = true;
@@ -1592,6 +1593,7 @@ pub(crate) fn keys(ctx: &egui::Context, view: &mut DocView, doc: &pdfcraft_engin
     if allowed
         && let Some((page, index)) = cv.selected
         && doc.can_delete_comment(page, index)
+        && !doc.info.annotations.iter().any(|a| a.page == page && a.index == index && a.locked)
         && ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
     {
         cv.selected = None;

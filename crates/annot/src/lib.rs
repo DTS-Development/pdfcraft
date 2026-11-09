@@ -820,6 +820,8 @@ const FLAG_NO_ROTATE: i64 = 16;
 const FLAG_HIDDEN: i64 = 2;
 const FLAG_NO_VIEW: i64 = 32;
 const FLAG_LOCKED: i64 = 128;
+/// LockedContents (§12.5.3): together with Locked it seals an annotation (see [`seal`]).
+const FLAG_LOCKED_CONTENTS: i64 = 512;
 
 /// Size of a note icon (points, unscaled by zoom).
 pub const NOTE_SIZE: f64 = 20.0;
@@ -1690,6 +1692,7 @@ fn delete_with(doc: &mut Document, page: usize, index: usize, respect_lock: bool
 /// new text: the wrap width and top edge stay, the height fits the wrapped lines.
 pub fn set_contents(doc: &mut Document, page: usize, index: usize, text: &str, meta: &Meta) -> Result<(), AnnotError> {
     let (_, r) = annot_ref(doc, page, index)?;
+    unsealed(doc, r)?;
     let free_text = annot_dict(doc, r).name(b"Subtype") == Some(b"FreeText");
     doc.update_dict(r, |d| {
         d.set(b"Contents".to_vec(), PdfString::text(text));
@@ -1756,6 +1759,8 @@ pub fn add_reply(doc: &mut Document, page: usize, index: usize, text: &str, auth
 /// Set a comment's review status (Acrobat: "Set status ▸ Accepted"…). Like Acrobat this adds a
 /// state reply (`/State`, `/StateModel /Review`) by `author`; the latest one wins.
 pub fn set_review_state(doc: &mut Document, page: usize, index: usize, state: ReviewState, author: &str, meta: &Meta) -> Result<usize, AnnotError> {
+    let (_, r) = annot_ref(doc, page, index)?;
+    unsealed(doc, r)?;
     let text = format!("{} set by {}", state.name(), if author.is_empty() { "unknown" } else { author });
     reply(doc, page, index, &text, author, meta, Some(state))
 }
@@ -1814,10 +1819,35 @@ fn unlocked(doc: &Document, r: ObjRef) -> Result<(), AnnotError> {
     if flags(doc, r) & FLAG_LOCKED != 0 { Err(AnnotError::Invalid("the comment is locked".into())) } else { Ok(()) }
 }
 
+/// Is `d` sealed: Locked and LockedContents both set. A sealed comment (a signature) can't be
+/// unlocked, edited or deleted through the editor, whoever asks.
+pub fn is_sealed(doc: &Document, d: &Dict) -> bool {
+    let f = annotation_flags(doc, d);
+    f & (FLAG_LOCKED | FLAG_LOCKED_CONTENTS) == FLAG_LOCKED | FLAG_LOCKED_CONTENTS
+}
+
+/// Refuse to change the contents or the review of a sealed comment.
+fn unsealed(doc: &Document, r: ObjRef) -> Result<(), AnnotError> {
+    if flags(doc, r) & FLAG_LOCKED_CONTENTS != 0 { Err(AnnotError::Invalid("the comment is sealed".into())) } else { Ok(()) }
+}
+
+/// Seal the comment at `(page, index)`: Locked and LockedContents, so it can't be moved, resized,
+/// deleted, edited or unlocked (a signature).
+pub fn seal(doc: &mut Document, page: usize, index: usize) -> Result<(), AnnotError> {
+    let (_, r) = annot_ref(doc, page, index)?;
+    let f = flags(doc, r) | FLAG_LOCKED | FLAG_LOCKED_CONTENTS;
+    doc.update_dict(r, |d| d.set(b"F".to_vec(), Object::Int(f)))?;
+    Ok(())
+}
+
 /// Lock or unlock a comment (the Locked flag). A locked comment can't be moved, resized,
-/// restyled or deleted; its text and replies stay editable, as in Acrobat.
+/// restyled or deleted; its text and replies stay editable, as in Acrobat. A sealed one
+/// ([`seal`]) can't be unlocked.
 pub fn set_locked(doc: &mut Document, page: usize, index: usize, locked: bool) -> Result<(), AnnotError> {
     let (_, r) = annot_ref(doc, page, index)?;
+    if !locked {
+        unsealed(doc, r)?;
+    }
     let f = if locked { flags(doc, r) | FLAG_LOCKED } else { flags(doc, r) & !FLAG_LOCKED };
     doc.update_dict(r, |d| d.set(b"F".to_vec(), Object::Int(f)))?;
     Ok(())
@@ -1882,6 +1912,7 @@ pub fn set_picture_source(doc: &mut Document, page: usize, index: usize, bytes: 
 /// `/StateModel /Marked` by `author`; the latest one wins. It's private bookkeeping, not a status.
 pub fn set_marked(doc: &mut Document, page: usize, index: usize, marked: bool, author: &str, meta: &Meta) -> Result<usize, AnnotError> {
     let (p, parent) = annot_ref(doc, page, index)?;
+    unsealed(doc, parent)?;
     let pd = annot_dict(doc, parent);
     if pd.name(b"Subtype") == Some(b"Popup") {
         return Err(AnnotError::Invalid("pop-ups can't be marked".into()));

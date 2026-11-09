@@ -326,6 +326,7 @@ fn scope_of(edit: &Edit) -> Scope {
         | Edit::AddAnnotation(_)
         | Edit::AddCustomStamp { .. }
         | Edit::AddSignBox { .. }
+        | Edit::SignInBox { .. }
         | Edit::DeleteAnnotation { .. }
         | Edit::SetAnnotationContents { .. }
         | Edit::ReplyToAnnotation { .. }
@@ -1539,6 +1540,20 @@ pub enum Edit {
         /// (the PPM host's `/PpmStamp` metadata).
         extra: Option<(String, String)>,
     },
+    /// Sign in a sign box: the box at `index` on `page` (a FreeText with `/PpmSignRole`, not
+    /// locked) is removed and a custom stamp over `rect` (user space) takes its place, with
+    /// `meta` stored as `/PpmStamp`. The stamp is sealed (Locked and LockedContents), so nothing
+    /// moves, resizes, edits or deletes it afterwards, and undo and redo history is dropped so
+    /// neither can bring the box back.
+    SignInBox {
+        page: usize,
+        index: usize,
+        rect: [f64; 4],
+        name: String,
+        file: MarkFile,
+        author: String,
+        meta: String,
+    },
     /// A sign box (the PPM host's FreeText with `/PpmSignRole`) over `rect` (user space).
     AddSignBox {
         page: usize,
@@ -2154,6 +2169,7 @@ impl Edit {
             Edit::AddAnnotation(a) => Label::of(add_annotation(&a.shape)),
             Edit::AddCustomStamp { .. } => Label::of("Add stamp"),
             Edit::AddSignBox { .. } => Label::of("Add sign box"),
+            Edit::SignInBox { .. } => Label::of("Sign"),
             Edit::DeleteAnnotation { .. } => Label::of("Delete comment"),
             Edit::SetAnnotationContents { .. } => Label::of("Edit comment"),
             Edit::ReplyToAnnotation { .. } => Label::of("Reply"),
@@ -2319,6 +2335,7 @@ fn check_permission(edit: &Edit, p: &pdfcraft_cos::Permissions) -> Result<(), Ed
         | Edit::AddAnnotation(_)
         | Edit::AddCustomStamp { .. }
         | Edit::AddSignBox { .. }
+        | Edit::SignInBox { .. }
         | Edit::DeleteAnnotation { .. }
         | Edit::SetAnnotationContents { .. }
         | Edit::ReplyToAnnotation { .. }
@@ -2524,10 +2541,65 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
 /// redaction, sanitizing…). The server holds a saved file to the same rule.
 fn run_edit_checked(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> Result<(), EditError> {
     let Some(actor) = cx.ownership.actor.clone() else { return run_edit(doc, edit, cx) };
-    let others = pdfcraft_annot::ownership::foreign_snapshot(doc, &actor);
+    let mut others = pdfcraft_annot::ownership::foreign_snapshot(doc, &actor);
+    // Signing in takes the sign box away, whoever placed it.
+    if let Edit::SignInBox { page, index, .. } = edit {
+        others = others.without(doc, *page, *index);
+    }
     run_edit(doc, edit, cx)?;
     pdfcraft_annot::ownership::check_foreign_kept(doc, &others)?;
     Ok(())
+}
+
+/// Put a custom stamp on `page` and return its index in the page's `/Annots`. `extra` is a private
+/// key and text stored in the stamp's dictionary (a host-placed stamp's `/PpmStamp`).
+#[allow(clippy::too_many_arguments)]
+fn add_custom_stamp(
+    doc: &mut pdfcraft_cos::Document,
+    cx: &mut EditCtx,
+    page: usize,
+    rect: &[f64; 4],
+    name: &str,
+    file: &MarkFile,
+    author: &str,
+    extra: Option<&(String, String)>,
+) -> Result<usize, EditError> {
+    let src = mark_source(doc, file)?;
+    let (sw, sh) = (src.size.0.max(1.0), src.size.1.max(1.0));
+    let natural = rect[2] == rect[0] && rect[3] == rect[1];
+    let rotation = pdfcraft_organize::page_rotation(doc, page)?;
+    let rect = if natural {
+        let k = (200.0 / sw.max(sh)).min(1.0);
+        let (w, h) = if matches!(rotation, 90 | 270) { (sh * k, sw * k) } else { (sw * k, sh * k) };
+        [rect[0] - w / 2.0, rect[1] - h / 2.0, rect[0] + w / 2.0, rect[1] + h / 2.0]
+    } else {
+        *rect
+    };
+    let shape = Shape::CustomStamp { rect, name: name.to_string(), picture: src.xobject, image: src.image, size: (sw, sh) };
+    let style = pdfcraft_annot::Style::default_for(&shape);
+    // A host-placed stamp (`extra` set) keeps its name out of /Contents: viewers show that as a note.
+    let contents = if extra.is_some() { String::new() } else { name.to_string() };
+    let new = NewAnnotation { page, shape, style, contents, author: author.to_string() };
+    let index = pdfcraft_annot::add_annotation(doc, &new, &cx.meta())?;
+    pdfcraft_annot::orient_image_stamp(doc, page, index, rotation)?;
+    if let Some((key, value)) = extra {
+        pdfcraft_annot::set_extra(doc, page, index, key, value)?;
+    }
+    // The picture file as it came, so the annotation database gets it without re-encoding;
+    // a document that is not shared keeps no second copy of it.
+    if src.image && cx.ownership.annot_sync {
+        pdfcraft_annot::set_picture_source(doc, page, index, &file.bytes)?;
+    }
+    Ok(index)
+}
+
+/// Does `edit` sign in a sign box (alone or inside a batch)?
+fn signs_in(edit: &Edit) -> bool {
+    match edit {
+        Edit::SignInBox { .. } => true,
+        Edit::Batch { edits, .. } => edits.iter().any(signs_in),
+        _ => false,
+    }
 }
 
 fn run_edit_body(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> Result<(), EditError> {
@@ -2583,32 +2655,18 @@ fn run_edit_body(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx
             pdfcraft_annot::add_annotation(doc, a, &cx.meta())?;
         }
         Edit::AddCustomStamp { page, rect, name, file, author, extra } => {
-            let src = mark_source(doc, file)?;
-            let (sw, sh) = (src.size.0.max(1.0), src.size.1.max(1.0));
-            let natural = rect[2] == rect[0] && rect[3] == rect[1];
-            let rotation = pdfcraft_organize::page_rotation(doc, *page)?;
-            let rect = if natural {
-                let k = (200.0 / sw.max(sh)).min(1.0);
-                let (w, h) = if matches!(rotation, 90 | 270) { (sh * k, sw * k) } else { (sw * k, sh * k) };
-                [rect[0] - w / 2.0, rect[1] - h / 2.0, rect[0] + w / 2.0, rect[1] + h / 2.0]
-            } else {
-                *rect
-            };
-            let shape = Shape::CustomStamp { rect, name: name.clone(), picture: src.xobject, image: src.image, size: (sw, sh) };
-            let style = pdfcraft_annot::Style::default_for(&shape);
-            // A host-placed stamp (`extra` set) keeps its name out of /Contents: viewers show that as a note.
-            let contents = if extra.is_some() { String::new() } else { name.clone() };
-            let new = NewAnnotation { page: *page, shape, style, contents, author: author.clone() };
-            let index = pdfcraft_annot::add_annotation(doc, &new, &cx.meta())?;
-            pdfcraft_annot::orient_image_stamp(doc, *page, index, rotation)?;
-            if let Some((key, value)) = extra {
-                pdfcraft_annot::set_extra(doc, *page, index, key, value)?;
+            add_custom_stamp(doc, cx, *page, rect, name, file, author, extra.as_ref())?;
+        }
+        Edit::SignInBox { page, index, rect, name, file, author, meta } => {
+            // Only a sign box can be signed in; a locked one is refused by the delete below.
+            let is_box = annot_sync::sign_box_at_index(doc, *page, *index);
+            if !is_box {
+                return Err(EditError::Invalid("there is no sign box to sign at that place".into()));
             }
-            // The picture file as it came, so the annotation database gets it without re-encoding;
-            // a document that is not shared keeps no second copy of it.
-            if src.image && cx.ownership.annot_sync {
-                pdfcraft_annot::set_picture_source(doc, *page, index, &file.bytes)?;
-            }
+            pdfcraft_annot::delete_annotation(doc, *page, *index)?;
+            let extra = ("PpmStamp".to_string(), meta.clone());
+            let at = add_custom_stamp(doc, cx, *page, rect, name, file, author, Some(&extra))?;
+            pdfcraft_annot::seal(doc, *page, at)?;
         }
         Edit::AddSignBox { page, rect, role, signer, label, author } => {
             pdfcraft_annot::add_sign_box(doc, *page, *rect, role, signer.as_deref(), label, author, &cx.meta())?;
@@ -4058,6 +4116,7 @@ impl Session {
         } else {
             Vec::new()
         };
+        let signed_boxes = annot_sync::signed_in_names(&editor.cos, &edit);
         let previous = std::mem::replace(&mut editor.cos, next);
         let keys = keys_after(&edit).unwrap_or_else(|| editor.keys.clone());
         let previous_keys = std::mem::replace(&mut editor.keys, keys);
@@ -4083,6 +4142,17 @@ impl Session {
                 Self::show_released(doc);
             }
             return Err(e);
+        }
+        // A signature is final: undo or redo past it would bring the sign box back and take the
+        // signature away, so history starts over here.
+        if signs_in(&edit)
+            && let Some(ed) = doc.editor.as_mut()
+        {
+            ed.undo.clear();
+            ed.redo.clear();
+        }
+        if let Some(st) = doc.sync.as_mut() {
+            st.note_signed_away(signed_boxes);
         }
         // Annotations of a document that shares them go to the host's database: nothing to save.
         if doc.sync.is_none() || !annot_sync::is_annotation_work(&edit) {

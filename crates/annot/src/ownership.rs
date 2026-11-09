@@ -287,6 +287,29 @@ pub fn check_foreign_kept(doc: &Document, before: &Foreign) -> Result<(), AnnotE
     Ok(())
 }
 
+impl Foreign {
+    /// Leave out the comment at `(page, index)`: an edit that is meant to take it away (signing in
+    /// a sign box another user placed) must not be refused for it.
+    pub fn without(mut self, doc: &Document, page: usize, index: usize) -> Self {
+        let Ok(p) = page_ref(doc, page) else { return self };
+        let Some(entry) = annots(doc, p).into_iter().nth(index) else { return self };
+        match entry.as_ref() {
+            Some(r) => {
+                self.by_ref.remove(&r);
+            }
+            None => {
+                if let Some(dict) = entry_dict(doc, &entry) {
+                    let e = essence(doc, &dict);
+                    if let Some(at) = self.inline.iter().position(|(pg, was)| *pg == page && same(was, &e)) {
+                        self.inline.swap_remove(at);
+                    }
+                }
+            }
+        }
+        self
+    }
+}
+
 /// What existed before an edit that creates comments.
 pub struct Known {
     pages: HashSet<ObjRef>,

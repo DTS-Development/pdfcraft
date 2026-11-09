@@ -203,12 +203,19 @@ pub(crate) struct SyncState {
     /// The `/NM`s of each change message handed to the page, by its number, until a reset shows the
     /// page has seen them.
     sent: Vec<(u64, Vec<String>)>,
+    /// The `/NM`s of sign boxes a signature just replaced; if another user placed one, the server
+    /// is told it is gone (the only deletion of someone else's annotation the actor's edit sends).
+    signed_away: BTreeSet<String>,
 }
 
 impl SyncState {
     fn queue_upsert(&mut self, u: AnnotUpsert, reply: bool) {
         self.deletes.remove(&u.annot_id);
         self.upserts.insert(u.annot_id.clone(), (u, reply));
+    }
+
+    pub(crate) fn note_signed_away(&mut self, names: Vec<String>) {
+        self.signed_away.extend(names);
     }
 
     fn queue_delete(&mut self, nm: String) {
@@ -460,6 +467,13 @@ fn diff(cos: &Cos, actor: &str, st: &mut SyncState) {
             st.upserts.remove(&nm);
         }
     }
+    // A sign box of another user that a signature replaced: the server is told, as for the
+    // actor's own. Nothing else the actor's edit takes from someone else is sent.
+    for nm in std::mem::take(&mut st.signed_away) {
+        if !present.contains(&nm) && st.remote.remove(&nm).is_some() {
+            st.queue_delete(nm);
+        }
+    }
     st.failed.retain(|k, _| present.contains(k));
 }
 
@@ -584,6 +598,20 @@ pub(crate) fn sign_box_of(cos: &Cos, d: &Dict) -> Option<SignBox> {
         return None;
     }
     Some((role, signer, [n[0].min(n[2]), n[1].min(n[3]), n[0].max(n[2]), n[1].max(n[3])]))
+}
+
+/// The `/NM`s of the sign boxes that `edit` (or a batch's edits) signs in, read before it runs.
+pub(crate) fn signed_in_names(cos: &Cos, edit: &Edit) -> Vec<String> {
+    match edit {
+        Edit::SignInBox { page, index, .. } => dict_at(cos, *page, *index).and_then(|d| nm_of(cos, &d)).into_iter().collect(),
+        Edit::Batch { edits, .. } => edits.iter().flat_map(|e| signed_in_names(cos, e)).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Is the annotation at `(page, index)` of `cos` a sign box?
+pub(crate) fn sign_box_at_index(cos: &Cos, page: usize, index: usize) -> bool {
+    dict_at(cos, page, index).is_some_and(|d| sign_box_of(cos, &d).is_some())
 }
 
 /// Is the annotation at `(page, index)` of `cos` a reply to another?
@@ -844,6 +872,28 @@ impl Session {
             }
         } else {
             live = upserts;
+        }
+        // A sealed annotation (a signature) is final here: the server's news can't replace it, and
+        // neither can its absence from a list remove it. A rejection is the server withdrawing the
+        // actor's own refused change, so that one goes through.
+        let (mut deletes, mut mine_deletes) = (deletes, mine_deletes);
+        if mode != Mode::Reject
+            && let Some(editor) = doc.editor.as_ref()
+        {
+            let mut sealed: HashSet<String> = HashSet::new();
+            walk(&editor.cos, |_, _, _, _, d| {
+                if pdfcraft_annot::is_sealed(&editor.cos, d) {
+                    sealed.extend(nm_of(&editor.cos, d));
+                }
+            });
+            if !sealed.is_empty() {
+                let before = live.len() + current_only.len() + deletes.len() + mine_deletes.len();
+                live.retain(|a| !sealed.contains(&a.annot_id));
+                current_only.retain(|a| !sealed.contains(&a.annot_id));
+                deletes.retain(|nm| !sealed.contains(nm));
+                mine_deletes.retain(|nm| !sealed.contains(nm));
+                report.skipped += before - (live.len() + current_only.len() + deletes.len() + mine_deletes.len());
+            }
         }
         let reason = doc.read_only_reason.clone().unwrap_or_default();
         let editor = doc.editor.as_mut().ok_or(EditError::ReadOnly(reason))?;

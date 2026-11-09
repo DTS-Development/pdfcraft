@@ -885,3 +885,19 @@ fn a_ppm_signer_that_is_not_a_string_is_ignored_and_a_padded_one_is_kept() {
     let got = import_item(&mut dst, &with("&quot; kim &quot;"));
     assert!(got.contains("ppmSigner") && got.contains(" kim "), "kept as given: {got}");
 }
+
+#[test]
+fn a_sealed_stamp_keeps_both_lock_flags_through_xfdf() {
+    // Locked (128) and LockedContents (512): the server's copy and a reload must stay sealed.
+    let mut src = blank();
+    stamp(&mut src, 0, "sealed", Some("{}"));
+    let index = summaries(&src).iter().find(|s| s.name.as_deref() == Some("sealed")).unwrap().index;
+    pdfcraft_annot::seal(&mut src, 0, index).unwrap();
+    let item = round_trip(&src, &mut blank(), "sealed");
+    assert!(item.xfdf.contains("locked") && item.xfdf.contains("lockedcontents"), "{}", item.xfdf);
+    let mut dst = blank();
+    apply_remote(&mut dst, &[RemoteItem { annot_id: "sealed", author_id: "u-a", xfdf: &item.xfdf }], &[]);
+    let r = find_by_name(&dst, "sealed").unwrap();
+    let flags = dst.get(r).as_dict().unwrap().int(b"F").unwrap();
+    assert_eq!(flags & (128 | 512), 128 | 512, "flags {flags}");
+}
