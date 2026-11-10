@@ -447,6 +447,23 @@ fn carriage_returns_in_comment_text_become_line_breaks() {
 }
 
 #[test]
+fn only_a_sealed_comment_is_sealed_in_the_list() {
+    let mut doc = fixture();
+    let t = add_annotation(&mut doc, &new(0, Shape::TextBox { rect: [100.0, 680.0, 304.0, 692.0], font_size: 12.0 }), &meta("t")).unwrap();
+    let sealed = |doc: &Document| {
+        let all = summaries(doc);
+        let s = all.iter().find(|s| s.page == 0 && s.index == t).unwrap();
+        (s.locked, s.sealed)
+    };
+    assert_eq!(sealed(&doc), (false, false));
+    // The user's own lock (Locked only) is not a signature.
+    set_locked(&mut doc, 0, t, true).unwrap();
+    assert_eq!(sealed(&doc), (true, false));
+    seal(&mut doc, 0, t).unwrap();
+    assert_eq!(sealed(&doc), (true, true));
+}
+
+#[test]
 fn a_locked_text_box_still_refits_its_text() {
     let mut doc = fixture();
     let t = add_annotation(&mut doc, &new(0, Shape::TextBox { rect: [100.0, 680.0, 304.0, 692.0], font_size: 12.0 }), &meta("t")).unwrap();
@@ -1762,4 +1779,44 @@ fn a_sign_box_with_a_signer_keeps_it_in_ppm_signer() {
     let doc = reopen(&doc);
     let d = list(&doc, 0)[i].clone();
     assert_eq!((text(&d, b"PpmSignRole"), text(&d, b"PpmSigner")), ("reviewer".into(), "u-kim".into()));
+}
+
+#[test]
+fn a_sign_box_takes_no_reply_status_or_mark_and_a_plain_text_box_does() {
+    let mut doc = fixture();
+    let b = add_sign_box(&mut doc, 0, [20.0, 600.0, 200.0, 660.0], "reviewer", None, "sign", "Ada", &meta("sb")).unwrap();
+    assert!(is_sign_box(&list(&doc, 0)[b]));
+    let before = list(&doc, 0).len();
+    assert!(add_reply(&mut doc, 0, b, "hi", "Bob", &meta("r1")).is_err());
+    assert!(set_review_state(&mut doc, 0, b, ReviewState::Accepted, "Bob", &meta("r2")).is_err());
+    assert!(set_marked(&mut doc, 0, b, true, "Bob", &meta("r3")).is_err());
+    assert_eq!(list(&doc, 0).len(), before, "nothing was added");
+    // An ordinary text box is not a sign box.
+    let t = add_annotation(
+        &mut doc,
+        &NewAnnotation {
+            page: 0,
+            shape: Shape::TextBox { rect: [20.0, 500.0, 200.0, 540.0], font_size: 12.0 },
+            style: Style { color: [0.0; 3], opacity: 1.0, width: 1.0, fill: None },
+            contents: "note".into(),
+            author: "Ada".into(),
+        },
+        &meta("tb"),
+    )
+    .unwrap();
+    assert!(!is_sign_box(&list(&doc, 0)[t]));
+    add_reply(&mut doc, 0, t, "hi", "Bob", &meta("r4")).unwrap();
+}
+
+#[test]
+fn deleting_only_the_annotation_leaves_its_replies_in_the_file() {
+    let mut doc = fixture();
+    let n = list(&doc, 0).len();
+    let r = add_reply(&mut doc, 0, 0, "keep me", "Bob", &meta("r1")).unwrap();
+    assert_eq!(r, n);
+    delete_annotation_only(&mut doc, 0, 0).unwrap();
+    let after = list(&doc, 0);
+    assert_eq!(after.len(), n, "only the parent went");
+    assert!(after.iter().any(|d| d.get(b"IRT").is_some()), "the reply stays, as it was");
+    assert!(delete_annotation_only(&mut doc, 0, 99).is_err());
 }

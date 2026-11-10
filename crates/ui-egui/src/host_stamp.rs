@@ -1064,6 +1064,50 @@ mod flow_tests {
         assert!(page_notes(&h).iter().any(|(t, l)| t == "Stamp" && *l));
     }
 
+    /// A reply another user (u-b) put on the sign box `vb`, as the server's list could still carry it.
+    const REMOTE_REPLY: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" ?><xfdf xmlns=\"http://ns.adobe.com/xfdf/\" xml:space=\"preserve\"><fields /><annots><text page=\"0\" rect=\"20,200,40,220\" flags=\"print,nozoom,norotate\" name=\"vr\" inreplyto=\"vb\" date=\"D:20261026120100+09'00'\" creationdate=\"D:20261026120100+09'00'\" title=\"Bob\"><contents>old reply</contents></text></annots></xfdf>";
+
+    /// A sign box takes no reply, status or checkmark from this side (the server refuses them too).
+    /// A reply that came from the server is shown all the same, and signing the box still works and
+    /// leaves that reply exactly as it was: the server refuses deleting another user's reply.
+    #[test]
+    fn a_sign_box_refuses_replies_but_a_remote_one_does_not_block_signing() {
+        use pdfcraft_engine::{Edit, ReviewState};
+        let (mut h, ev, heard) = shared_app();
+        remote_box(&mut h);
+        let (_, doc) = h.state().active_ids().unwrap();
+        let before = h.state().session.save_bytes(doc).unwrap();
+        for edit in [
+            Edit::ReplyToAnnotation { page: 0, index: 0, text: "hi".into(), author: "alice".into() },
+            Edit::SetAnnotationStatus { page: 0, index: 0, state: ReviewState::Accepted, author: "alice".into() },
+            Edit::MarkAnnotation { page: 0, index: 0, marked: true, author: "alice".into() },
+        ] {
+            let label = format!("{edit:?}");
+            assert!(h.state_mut().session.apply(doc, edit).is_err(), "{label} must be refused on a sign box");
+        }
+        assert_eq!(h.state().session.save_bytes(doc).unwrap(), before, "refused edits changed nothing");
+        // The server's list has a reply on the box: it is received and listed.
+        let items = vec![
+            pdfcraft_engine::RemoteAnnot { annot_id: "vb".into(), author_id: "u-a".into(), xfdf: REMOTE_BOX.into() },
+            pdfcraft_engine::RemoteAnnot { annot_id: "vr".into(), author_id: "u-b".into(), xfdf: REMOTE_REPLY.into() },
+        ];
+        h.state().annot_inbox.lock().unwrap().push(AnnotCommand::Reset { items, seq: 1 });
+        h.run_steps(3);
+        assert_eq!(page_notes(&h).iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>(), vec!["FreeText", "Text"]);
+        heard.borrow_mut().clear();
+        send(&mut h, sign_in("s1", "vb"));
+        h.run_steps(3);
+        assert_eq!(*ev.borrow(), vec![StampEvent::Placed { id: "s1".into(), page: 0 }], "signing is not blocked");
+        // The box is gone, the reply stays untouched next to the sealed stamp.
+        let notes = page_notes(&h);
+        assert!(notes.iter().any(|(t, l)| t == "Stamp" && *l), "{notes:?}");
+        assert!(notes.iter().any(|(t, _)| t == "Text"), "the old reply stays: {notes:?}");
+        assert!(!notes.iter().any(|(t, _)| t == "FreeText"), "{notes:?}");
+        let changes: Vec<_> = heard.borrow().iter().filter_map(|e| if let AnnotEvent::Changed { changes, .. } = e { Some(changes.clone()) } else { None }).collect();
+        assert!(changes.iter().any(|c| c.deletes.contains(&"vb".to_string())), "{changes:?}");
+        assert!(!changes.iter().any(|c| c.deletes.contains(&"vr".to_string())), "the other user's reply is never deleted: {changes:?}");
+    }
+
     /// Saved and opened again, the signature is still locked and sealed; a locked copy keeps refusing.
     #[test]
     fn a_signature_stays_sealed_after_saving_and_reopening() {

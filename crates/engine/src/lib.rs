@@ -2663,7 +2663,9 @@ fn run_edit_body(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx
             if !is_box {
                 return Err(EditError::Invalid("there is no sign box to sign at that place".into()));
             }
-            pdfcraft_annot::delete_annotation(doc, *page, *index)?;
+            // The box alone goes: its replies stay as they are, because the server refuses
+            // deleting another user's reply (rule 1) and the fingerprint includes `/IRT`.
+            pdfcraft_annot::delete_annotation_only(doc, *page, *index)?;
             let extra = ("PpmStamp".to_string(), meta.clone());
             let at = add_custom_stamp(doc, cx, *page, rect, name, file, author, Some(&extra))?;
             pdfcraft_annot::seal(doc, *page, at)?;
@@ -3021,6 +3023,7 @@ fn comment_list(doc: &pdfcraft_cos::Document) -> Vec<pdfcraft_render::Annotation
             state: s.state,
             quads: s.quads,
             locked: s.locked,
+            sealed: s.sealed,
             intent: s.intent,
             fill_sign: s.fill_sign,
         })

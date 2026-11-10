@@ -673,8 +673,9 @@ fn is_markup(subtype: &str) -> bool {
 /// Rectangles, ovals, text boxes, stamps and drawings (drawn signatures among them). A callout's
 /// `/Rect` also holds its leader line, so it only moves.
 fn resizable(a: &Annotation) -> bool {
-    // A locked comment (a signature) shows no handles: the engine would refuse the edit anyway.
-    !a.locked && matches!(a.subtype.as_str(), "Square" | "Circle" | "FreeText" | "Stamp" | "Ink") && a.intent.as_deref() != Some("FreeTextCallout")
+    // A sealed comment (a signature) shows no handles: the engine would refuse the edit anyway.
+    // One the user only locked keeps them, as in the host's own viewer.
+    !a.sealed && matches!(a.subtype.as_str(), "Square" | "Circle" | "FreeText" | "Stamp" | "Ink") && a.intent.as_deref() != Some("FreeTextCallout")
 }
 
 const HANDLES: [(i8, i8); 8] = [(-1, -1), (0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0)];
@@ -1061,7 +1062,7 @@ fn select_input(
                 _ => egui::CursorIcon::ResizeNeSw,
             });
         } else if let Some(a) = cx.hit(p) {
-            let movable = cx.allowed && !a.locked && !is_markup(&a.subtype);
+            let movable = cx.allowed && !a.sealed && !is_markup(&a.subtype);
             ui.ctx().set_cursor_icon(if movable { egui::CursorIcon::Move } else { egui::CursorIcon::PointingHand });
         }
     }
@@ -1085,7 +1086,7 @@ fn select_input(
         {
             cv.selected = Some((cx.page, a.index));
             cv.reveal = true;
-            if cx.allowed && !a.locked {
+            if cx.allowed && !a.sealed {
                 cv.gesture = Some(Gesture::Move { page: cx.page, index: a.index, from: o });
             }
             consumed = true;
@@ -1593,7 +1594,7 @@ pub(crate) fn keys(ctx: &egui::Context, view: &mut DocView, doc: &pdfcraft_engin
     if allowed
         && let Some((page, index)) = cv.selected
         && doc.can_delete_comment(page, index)
-        && !doc.info.annotations.iter().any(|a| a.page == page && a.index == index && a.locked)
+        && !doc.info.annotations.iter().any(|a| a.page == page && a.index == index && a.sealed)
         && ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
     {
         cv.selected = None;
@@ -1634,6 +1635,8 @@ pub(crate) fn context_menu(
             let (page, index) = (a.page, a.index);
             // Others' comments (and ones nobody owns) take replies only; the engine refuses the rest.
             let mine = allowed && doc.can_edit_comment(page, index);
+            // A sign box takes no replies, statuses or marks (the server refuses them too).
+            let sign_box = doc.sign_box_at(page, index).is_some();
             attachment_items(ui, view, info, a);
             if ui.add_enabled(mine, egui::Button::new(tl!("Edit text…"))).clicked() {
                 view.comments.composer = Some(Composer {
@@ -1645,21 +1648,27 @@ pub(crate) fn context_menu(
                 });
                 ui.close();
             }
-            if ui.add_enabled(allowed, egui::Button::new(tl!("Reply"))).clicked() {
+            if !sign_box && ui.add_enabled(allowed, egui::Button::new(tl!("Reply"))).clicked() {
                 view.comments.reveal = true;
                 action = Some(CanvasAction::OpenComments);
                 ui.close();
             }
             ui.add_enabled_ui(mine, |ui| {
-                ui.menu_button(tl!("Set status"), |ui| {
-                    for s in [ReviewState::None, ReviewState::Accepted, ReviewState::Cancelled, ReviewState::Completed, ReviewState::Rejected] {
-                        if ui.button(tl!(s.name())).clicked() {
-                            action =
-                                Some(CanvasAction::Edit(Box::new(Edit::SetAnnotationStatus { page, index, state: s, author: prefs.author.clone() })));
-                            ui.close();
+                if !sign_box {
+                    ui.menu_button(tl!("Set status"), |ui| {
+                        for s in [ReviewState::None, ReviewState::Accepted, ReviewState::Cancelled, ReviewState::Completed, ReviewState::Rejected] {
+                            if ui.button(tl!(s.name())).clicked() {
+                                action = Some(CanvasAction::Edit(Box::new(Edit::SetAnnotationStatus {
+                                    page,
+                                    index,
+                                    state: s,
+                                    author: prefs.author.clone(),
+                                })));
+                                ui.close();
+                            }
                         }
-                    }
-                });
+                    });
+                }
                 ui.menu_button(tl!("Colour"), |ui| {
                     if let Some(c) = swatch_grid(ui, a.color.map(|c| c.map(f64::from))) {
                         action = Some(CanvasAction::Edit(Box::new(Edit::StyleAnnotation {
@@ -1676,7 +1685,7 @@ pub(crate) fn context_menu(
             });
             let thread: Vec<&pdfcraft_render::Annotation> = info.annotations.iter().filter(|r| r.replies_to(a)).collect();
             let marked = crate::comments_panel::is_marked(&thread);
-            if ui.add_enabled(mine, egui::Button::new(tl!(if marked { "Remove checkmark" } else { "Mark with checkmark" }))).clicked() {
+            if !sign_box && ui.add_enabled(mine, egui::Button::new(tl!(if marked { "Remove checkmark" } else { "Mark with checkmark" }))).clicked() {
                 action = Some(CanvasAction::Edit(Box::new(Edit::MarkAnnotation { page, index, marked: !marked, author: prefs.author.clone() })));
                 ui.close();
             }
@@ -1960,6 +1969,36 @@ pub fn status_badge(state: &str) -> Option<(&'static str, &'static str, Color32)
 mod tests {
     use super::*;
     use pdfcraft_render::TextGlyph;
+
+    #[test]
+    fn handles_are_hidden_for_a_signature_only() {
+        let mut a = Annotation {
+            page: 0,
+            subtype: "FreeText".into(),
+            author: None,
+            contents: None,
+            modified: None,
+            name: None,
+            in_reply_to: None,
+            parent: None,
+            rect: [0.0; 4],
+            color: None,
+            index: 0,
+            state: None,
+            quads: Vec::new(),
+            locked: false,
+            sealed: false,
+            intent: None,
+            fill_sign: false,
+        };
+        assert!(resizable(&a));
+        // Locked by the user: the handles stay (the engine refuses the edit), as in the host's own viewer.
+        a.locked = true;
+        assert!(resizable(&a));
+        // Locked and LockedContents (a signature): none.
+        a.sealed = true;
+        assert!(!resizable(&a));
+    }
 
     /// One glyph per character, `w` points wide, on a line of `em`-point text whose baseline is at `y`, drawn
     /// along `direction` (a unit vector in view space, y down).
