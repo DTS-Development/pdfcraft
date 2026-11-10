@@ -58,6 +58,7 @@ pub use device::*;
 pub use function::Function;
 pub use hayro_cmap;
 pub use hayro_syntax;
+pub use hayro_syntax::{content_byte_budget_left, set_content_byte_budget};
 pub use interpret::*;
 pub use soft_mask::*;
 pub use types::*;

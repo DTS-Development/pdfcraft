@@ -443,6 +443,61 @@ mod tests {
         assert_eq!(hayro::hayro_interpret::content_byte_budget_left(), None);
     }
 
+    /// A page that paints one shading 10,000 times (`sh`), whose data is a 1 MB stream, is a 2 KB
+    /// file and 10 GB of decoding: the byte limit sits where every stream is decoded, so shading
+    /// and function streams are stopped like forms (30 s before).
+    #[test]
+    fn shading_and_function_streams_count_against_the_byte_limit() {
+        let nums = |v: &[i64]| Object::Array(v.iter().map(|n| Object::Integer(*n)).collect());
+        let flate = |dict: lopdf::Dictionary, data: Vec<u8>| {
+            let mut s = Stream::new(dict, data);
+            s.compress().unwrap();
+            s
+        };
+        for kind in ["mesh", "sampled", "postscript"] {
+            let mut doc = Document::with_version("1.7");
+            let shading = match kind {
+                "mesh" => doc.add_object(flate(
+                    dictionary! {"ShadingType" => 4, "ColorSpace" => "DeviceGray", "BitsPerCoordinate" => 32,
+                        "BitsPerComponent" => 16, "BitsPerFlag" => 8, "Decode" => nums(&[0, 1, 0, 1, 0, 1])},
+                    vec![0u8; 1 << 20],
+                )),
+                _ => {
+                    let function = if kind == "sampled" {
+                        flate(dictionary! {"FunctionType" => 0, "Domain" => nums(&[0, 1]), "Range" => nums(&[0, 1]),
+                            "Size" => nums(&[1 << 20]), "BitsPerSample" => 8}, vec![0u8; 1 << 20])
+                    } else {
+                        let mut program = vec![b' '; 1 << 20];
+                        program.insert(0, b'{');
+                        program.push(b'}');
+                        flate(dictionary! {"FunctionType" => 4, "Domain" => nums(&[0, 1]), "Range" => nums(&[0, 1])}, program)
+                    };
+                    let function = doc.add_object(function);
+                    doc.add_object(dictionary! {"ShadingType" => 2, "ColorSpace" => "DeviceGray",
+                        "Coords" => ints([0, 0, 1, 1]), "Function" => function})
+                }
+            };
+            let content = doc.add_object(Stream::new(dictionary! {}, "/S sh\n".repeat(10_000).into_bytes()));
+            let pages = doc.new_object_id();
+            let page = doc.add_object(dictionary! {
+                "Type" => "Page", "Parent" => pages, "MediaBox" => ints([0, 0, 100, 100]), "Contents" => content,
+                "Resources" => dictionary! {"Shading" => dictionary! {"S" => shading}}
+            });
+            doc.objects.insert(pages, dictionary! {"Type" => "Pages", "Kids" => vec![Object::Reference(page)], "Count" => 1}.into());
+            let catalog = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => pages});
+            doc.trailer.set("Root", catalog);
+            let mut bytes = Vec::new();
+            doc.save_to(&mut bytes).unwrap();
+            let t = std::time::Instant::now();
+            let r = extract_pages(Arc::new(bytes), None, None, usize::MAX);
+            assert!(matches!(r, Err(ExtractError::TooMuchWork(1))), "{kind}: {r:?}");
+            // The mesh costs more than its bytes (it is also turned into triangles): 0.8 s alone,
+            // about 1.3 s with the other tests running; 30 s before.
+            assert!(t.elapsed().as_secs_f32() < 3.0, "{kind} took {:?}", t.elapsed());
+            assert_eq!(hayro::hayro_interpret::content_byte_budget_left(), None);
+        }
+    }
+
     /// Many pages sharing one content stream: each is under its own allowance, the call's bytes
     /// run out, and the page it ran out on is named.
     #[test]
