@@ -6267,6 +6267,48 @@ mod ownership {
         (s, id)
     }
 
+    const SIGNED: &str = "this page has a signature";
+
+    /// Two pages; page 0 holds a signature (a sign box signed in), page 1 a plain comment.
+    fn signed_page(actor: Option<&str>) -> (Session, DocId) {
+        let (mut s, id) = session_with(2);
+        act(&mut s, actor, false);
+        let add = Edit::AddSignBox { page: 0, rect: [20.0, 200.0, 100.0, 240.0], role: "reviewer".into(), signer: None, label: "sign".into(), author: "Ada".into() };
+        s.apply(id, add).unwrap();
+        let file = MarkFile { name: "q.png".into(), bytes: quadrant_png(), page: 0 };
+        let sign = Edit::SignInBox { page: 0, index: 0, rect: [20.0, 200.0, 100.0, 240.0], name: "sig".into(), file, author: "Ada".into(), meta: PPM_JSON.into() };
+        s.apply(id, sign).unwrap();
+        s.apply(id, rect_at(1, 10.0)).unwrap();
+        (s, id)
+    }
+
+    #[test]
+    fn a_page_with_a_signature_is_not_deleted_moved_or_flattened() {
+        // With an actor and without: the signature holds either way.
+        for actor in [Some("u-a"), None] {
+            let (mut s, id) = signed_page(actor);
+            refused(&mut s, id, Edit::DeletePages { pages: vec![0] }, SIGNED);
+            refused(&mut s, id, Edit::MovePages { pages: vec![0], to: 1 }, SIGNED);
+            refused(&mut s, id, Edit::Flatten { comments: true, fields: false }, SIGNED);
+            refused(&mut s, id, Edit::Batch { label: "batch".into(), edits: vec![Edit::DeletePages { pages: vec![0] }] }, SIGNED);
+            // Pages without a signature, and flattening form fields only, are untouched.
+            s.apply(id, Edit::Flatten { comments: false, fields: true }).unwrap();
+            s.apply(id, Edit::DeletePages { pages: vec![1] }).unwrap();
+        }
+    }
+
+    /// A signature stamp named like a Fill & Sign one would be baked in by Fill & Sign flattening; it is refused.
+    #[test]
+    fn fill_sign_flattening_keeps_a_signature_stamp() {
+        let (mut s, id) = session_with(1);
+        let add = Edit::AddSignBox { page: 0, rect: [20.0, 200.0, 100.0, 240.0], role: "reviewer".into(), signer: None, label: "sign".into(), author: "Ada".into() };
+        s.apply(id, add).unwrap();
+        let file = MarkFile { name: "q.png".into(), bytes: quadrant_png(), page: 0 };
+        let sign = Edit::SignInBox { page: 0, index: 0, rect: [20.0, 200.0, 100.0, 240.0], name: "Signature".into(), file, author: "Ada".into(), meta: PPM_JSON.into() };
+        s.apply(id, sign).unwrap();
+        refused(&mut s, id, Edit::FlattenFillSign, SIGNED);
+    }
+
     #[test]
     fn every_creation_path_marks_the_owner_and_names_the_comment() {
         let (mut s, id) = session_with(2);

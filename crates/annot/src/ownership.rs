@@ -98,6 +98,40 @@ pub fn check_pages(doc: &Document, pages: &[usize], actor: &str) -> Result<(), A
     Ok(())
 }
 
+/// Do the pages (0-based; unknown ones are skipped) hold a sealed comment, a signature? Deleting,
+/// moving or flattening such a page would lose or alter the signature, whoever asks.
+pub fn check_pages_unsigned(doc: &Document, pages: &[usize]) -> Result<(), AnnotError> {
+    let refs = page_refs(doc)?;
+    for &i in pages {
+        let Some(&p) = refs.get(i) else { continue };
+        if annots(doc, p).iter().filter_map(|e| entry_dict(doc, e)).any(|d| is_sealed(doc, &d)) {
+            return Err(AnnotError::SignedPage);
+        }
+    }
+    Ok(())
+}
+
+/// Is there a sealed comment that Fill & Sign flattening would bake in (a signature stamp named
+/// like a Fill & Sign one: `PCCustomSignature`)? Flattening removes the annotation and with it the
+/// signature's stamp meta, so it is refused like the other page changes.
+pub fn check_fill_sign_unsigned(doc: &Document) -> Result<(), AnnotError> {
+    for p in page_refs(doc)? {
+        for d in annots(doc, p).iter().filter_map(|e| entry_dict(doc, e)) {
+            let hidden = annotation_flags(doc, &d) & (FLAG_HIDDEN | FLAG_NO_VIEW) != 0;
+            if !hidden && is_sealed(doc, &d) && is_fill_sign(doc, &d) {
+                return Err(AnnotError::SignedPage);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// [`check_pages_unsigned`] for every page.
+pub fn check_all_pages_unsigned(doc: &Document) -> Result<(), AnnotError> {
+    let n = page_refs(doc)?.len();
+    check_pages_unsigned(doc, &(0..n).collect::<Vec<_>>())
+}
+
 /// Every page.
 pub fn check_all_pages(doc: &Document, actor: &str) -> Result<(), AnnotError> {
     let n = page_refs(doc)?.len();

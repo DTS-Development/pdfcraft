@@ -34,6 +34,13 @@ pub(crate) fn check(doc: &pdfcraft_cos::Document, edit: &Edit, own: &Ownership) 
     if own.annot_sync {
         crate::annot_sync::check_reply_target(doc, edit)?;
     }
+    // A page with a signature stays as it is, whoever asks and whether or not an actor is named.
+    match edit {
+        Edit::DeletePages { pages } | Edit::MovePages { pages, .. } => owner::check_pages_unsigned(doc, pages)?,
+        Edit::Flatten { comments: true, .. } => owner::check_all_pages_unsigned(doc)?,
+        Edit::FlattenFillSign => owner::check_fill_sign_unsigned(doc)?,
+        _ => {}
+    }
     let Some(actor) = own.actor.as_deref() else { return Ok(()) };
     match edit {
         Edit::DeleteAnnotation { page, index } => owner::check_delete(doc, *page, *index, actor)?,

@@ -50,6 +50,9 @@ pub enum AnnotError {
     ForeignReplies,
     #[error("this page has comments from someone else")]
     ForeignPage,
+    /// A page with a sealed comment (a signature) can't be deleted, moved or flattened.
+    #[error("this page has a signature")]
+    SignedPage,
 }
 
 pub type Rgb = [f64; 3];
