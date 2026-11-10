@@ -14,6 +14,7 @@ use hayro::hayro_interpret::{
     BlendMode, ClipPath, Context, Device, GlyphDrawMode, Image, InterpreterCache, InterpreterSettings, Paint, PathDrawMode, SoftMask, interpret_page,
 };
 use kurbo::{Affine, BezPath, Rect, Shape};
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -737,6 +738,8 @@ pub(crate) fn extract_page_limited(
         dev.glyph_room = *room;
         dev.stop = stop;
     }
+    // Layout below is limited too when the caller limits the page.
+    let arrange_limit = limits.is_some().then(|| ArrangeLimit::set(ARRANGE_WORK));
     interpret_page(p, &mut ctx, &mut dev);
     if dev.over_room {
         return Err(PageStop::TooManyGlyphs);
@@ -833,6 +836,10 @@ pub(crate) fn extract_page_limited(
     let first = |ids: &[usize]| ids.iter().filter_map(|&i| rank.get(i).copied()).min().unwrap_or(usize::MAX);
     extra.sort_by_key(|f| first(&f.ids));
     let mut extra = extra.into_iter().peekable();
+    // A layout that ran out of work returned nothing: the page is turned away, not read wrongly.
+    if arrange_limit.as_ref().is_some_and(ArrangeLimit::over) {
+        return Err(PageStop::TooMuchWork);
+    }
     let mut slots: Vec<Option<TextGlyph>> = glyphs.into_iter().map(|g| Some(g.2)).collect();
     let mut text = PageText::default();
     let mut emit = |text: &mut PageText, ids: &[usize], line_of: &[u32], space_before: &[bool], quarter: Option<u8>| {
@@ -875,6 +882,66 @@ struct Flow {
     ids: Vec<usize>,
     line_of: Vec<u32>,
     space_before: Vec<bool>,
+}
+
+/// Work one page's reading-order layout may do when text is extracted for a server call: pair checks
+/// of the segment merge, block lookups and block-order picks, each counted as one. The passes are
+/// quadratic or worse in the number of text segments, so a page made of many thousand tiny pieces
+/// (a drawing that shows one letter per form call) would hold the caller for tens of seconds
+/// while its operators and glyphs both stay inside their limits. A real page needs a few
+/// hundred thousand; 100 million is about half a second.
+const ARRANGE_WORK: usize = 100_000_000;
+
+thread_local! {
+    /// Work left for layout on this thread; `None` is no limit (the editor).
+    static ARRANGE_LEFT: Cell<Option<usize>> = const { Cell::new(None) };
+    /// Set once layout ran out of work; the layout in progress stops and returns nothing.
+    static ARRANGE_OVER: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Limits layout on this thread while alive and lifts the limit when dropped, whatever the exit.
+struct ArrangeLimit;
+
+impl ArrangeLimit {
+    fn set(work: usize) -> Self {
+        ARRANGE_LEFT.with(|c| c.set(Some(work)));
+        ARRANGE_OVER.with(|c| c.set(false));
+        Self
+    }
+
+    /// Whether layout ran out of work since the limit was set.
+    fn over(&self) -> bool {
+        ARRANGE_OVER.with(Cell::get)
+    }
+}
+
+impl Drop for ArrangeLimit {
+    fn drop(&mut self) {
+        ARRANGE_LEFT.with(|c| c.set(None));
+        ARRANGE_OVER.with(|c| c.set(false));
+    }
+}
+
+/// Whether this thread's layout is limited right now (for a test of the guard).
+#[cfg(test)]
+pub(crate) fn arrange_is_limited() -> bool {
+    ARRANGE_LEFT.with(|c| c.get().is_some())
+}
+
+/// Takes `n` from the layout's work; `false` when there is not enough (layout must stop).
+fn arrange_spend(n: usize) -> bool {
+    ARRANGE_LEFT.with(|c| match c.get() {
+        None => true,
+        Some(left) if left >= n => {
+            c.set(Some(left - n));
+            true
+        }
+        Some(_) => {
+            c.set(Some(0));
+            ARRANGE_OVER.with(|o| o.set(true));
+            false
+        }
+    })
 }
 
 /// Lay out the page's glyphs `ids`, giving each the box at the same position in `rects`.
@@ -1586,6 +1653,10 @@ fn arrange(glyphs: &[TextGlyph]) -> (Vec<usize>, Vec<u32>, Vec<bool>) {
     while merged {
         merged = false;
         'outer: for a in 0..segs.len() {
+            // Server extraction: this pass is quadratic, and restarts after each merge.
+            if !arrange_spend(segs.len()) {
+                return Default::default();
+            }
             for b in 0..segs.len() {
                 if a == b {
                     continue;
@@ -1594,6 +1665,9 @@ fn arrange(glyphs: &[TextGlyph]) -> (Vec<usize>, Vec<u32>, Vec<bool>) {
                 let h = sa.h.min(sb.h);
                 let gap = (sb.bbox[0] - sa.bbox[2]).max(sa.bbox[0] - sb.bbox[2]);
                 if (sa.cy() - sb.cy()).abs() < h * 0.3 && (sa.h / sb.h - 1.0).abs() < 0.35 && gap < h * 1.2 {
+                    if !arrange_spend(segs.len()) {
+                        return Default::default();
+                    }
                     let sb = segs.remove(b);
                     let a = if b < a { a - 1 } else { a };
                     segs[a].merge(sb);
@@ -1609,6 +1683,9 @@ fn arrange(glyphs: &[TextGlyph]) -> (Vec<usize>, Vec<u32>, Vec<bool>) {
     by_top.sort_by(|a, b| segs[*a].bbox[1].total_cmp(&segs[*b].bbox[1]));
     let mut blocks: Vec<(Vec<usize>, [f32; 4])> = Vec::new();
     for si in by_top {
+        if !arrange_spend(blocks.len().max(1)) {
+            return Default::default();
+        }
         let s = &segs[si];
         let target = blocks.iter().position(|(members, bb)| {
             let Some(&m) = members.last() else { return false };
@@ -1631,7 +1708,11 @@ fn arrange(glyphs: &[TextGlyph]) -> (Vec<usize>, Vec<u32>, Vec<bool>) {
     // 3. Block order.
     let mut remaining: Vec<usize> = (0..blocks.len()).collect();
     let mut block_order = Vec::with_capacity(blocks.len());
-    while let Some(&top) = remaining.iter().min_by(|a, b| blocks[**a].1[1].total_cmp(&blocks[**b].1[1])) {
+    while !remaining.is_empty() {
+        if !arrange_spend(remaining.len().saturating_mul(3)) {
+            return Default::default();
+        }
+        let Some(&top) = remaining.iter().min_by(|a, b| blocks[**a].1[1].total_cmp(&blocks[**b].1[1])) else { break };
         let tb = blocks[top].1;
         let pick = remaining
             .iter()
@@ -1705,6 +1786,24 @@ mod tests {
 
     fn em_box(text: &str, x0: f32, y0: f32, x1: f32, y1: f32) -> TextGlyph {
         TextGlyph { text: text.into(), rect: [x0, y0, x1, y1], quad: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], direction: [1.0, 0.0] }
+    }
+
+    /// Layout with a limit stops and returns nothing once the work is used; without one it is unchanged.
+    #[test]
+    fn layout_stops_when_its_work_limit_is_used() {
+        // Pieces far apart, so none merges and the merge pass compares every pair.
+        let many = || (0..300).map(|i| em_box("a", 40.0 * i as f32, 0.0, 40.0 * i as f32 + 5.0, 8.0)).collect::<Vec<_>>();
+        assert_eq!(layout(many()).glyphs.len(), 300);
+        let limit = ArrangeLimit::set(1000);
+        let cut = layout(many());
+        assert!(limit.over());
+        assert!(cut.glyphs.is_empty());
+        drop(limit);
+        assert!(!arrange_is_limited());
+        assert_eq!(layout(many()).glyphs.len(), 300);
+        let roomy = ArrangeLimit::set(10_000_000);
+        assert_eq!(layout(many()).glyphs.len(), 300);
+        assert!(!roomy.over());
     }
 
     #[test]

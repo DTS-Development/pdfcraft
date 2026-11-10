@@ -57,10 +57,11 @@ pub enum ExtractError {
 const PAGE_OPS: usize = 10_000_000;
 /// Content operators all the pages of one call may run together. Pages that share one heavy
 /// content stream each stay under [`PAGE_OPS`], so hundreds of them filled just below it would
-/// still hold the caller for minutes; 200 million is some twenty full pages, far more than a
-/// document of large drawings needs, and a few tens of seconds of work at most. The page that
-/// passes it is the one named.
-const CALL_OPS: usize = 100_000_000;
+/// still hold the caller for minutes. 20 million is a few seconds of work at most (about 0.17
+/// microseconds an operator in the Node module) and four times what a real 937-page file of
+/// 880,000 glyphs runs (4.8 million, the largest of the files measured; its busiest page ran
+/// 15,000). The page that passes it is the one named.
+const CALL_OPS: usize = 20_000_000;
 /// Content bytes (inflated or read from the file) one page, and a whole call, may decode and scan.
 /// A form painted over and over is decoded each time, so its size counts each time; the operator
 /// count alone wouldn't see it (a 1 MB blank form painted 50,000 times is a few operators).
@@ -347,6 +348,18 @@ mod tests {
         let r = extract_pages(bytes, None, None, 1000);
         assert!(matches!(r, Err(ExtractError::TooManyGlyphs(1000))), "{r:?}");
         assert!(t.elapsed().as_secs_f32() < 1.0, "took {:?}", t.elapsed());
+    }
+
+    /// Few operators and few enough glyphs, but 2^17 text pieces for the reading-order layout to sort
+    /// (about 4 s in the Node module before layout counted its work, 19 s at 2^20).
+    #[test]
+    fn a_page_of_many_text_pieces_is_stopped_by_the_layout_work_limit() {
+        let t = std::time::Instant::now();
+        let r = extract_pages(nested(17), None, None, usize::MAX);
+        assert!(matches!(r, Err(ExtractError::TooMuchWork(1))), "{r:?}");
+        assert!(t.elapsed().as_secs_f32() < 2.0, "took {:?}", t.elapsed());
+        // The limit is lifted afterwards: layout on this thread is unlimited again.
+        assert!(!crate::text::arrange_is_limited());
     }
 
     /// Work that isn't glyphs (and isn't nested paints, which have their own limit): a content
