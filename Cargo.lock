@@ -4761,6 +4761,7 @@ dependencies = [
  "pdfcraft-cos",
  "pdfcraft-edit",
  "pdfcraft-model",
+ "pdfcraft-render",
  "pdfcraft-xfdf",
  "serde",
  "serde_json",
