@@ -275,6 +275,8 @@ fn card(
     let mut edit = None;
     // Others' comments (and ones nobody owns) take replies only; the engine refuses the rest.
     let mine = allowed && doc.can_edit_comment(a.page, a.index);
+    // A sign box takes no replies, statuses or marks (the server refuses them too).
+    let sign_box = doc.sign_box_at(a.page, a.index).is_some();
     let key = (a.page, a.index);
     let selected = view.comments.selected == Some(key);
     let color = a.color.map(|c| color32(c.map(f64::from))).unwrap_or(t.accent);
@@ -314,7 +316,7 @@ fn card(
                     }
                     // Acrobat's per-comment checkmark: a toggle on the selected card, a mark otherwise.
                     let tip = if marked { tl!("Remove checkmark") } else { tl!("Mark with checkmark") };
-                    if selected && mine {
+                    if selected && mine && !sign_box {
                         if icons::button(ui, "circle-check", 22.0, marked, tip).clicked() {
                             edit = Some(Edit::MarkAnnotation { page: a.page, index: a.index, marked: !marked, author: prefs.author.clone() });
                         }
@@ -402,7 +404,7 @@ fn card(
                 ui.painter().vline(x, (resp.response.rect.top() - 14.0)..=(resp.response.rect.top() - 2.0), Stroke::new(1.5, t.border));
             }
             // A shared reply can't be replied to (the server keeps one level).
-            if selected && allowed && !(doc.annot_sync() && doc.annot_is_reply(a.page, a.index)) {
+            if selected && allowed && !sign_box && !(doc.annot_sync() && doc.annot_is_reply(a.page, a.index)) {
                 ui.add_space(8.0);
                 egui::Frame::NONE.inner_margin(egui::Margin { left: 34, right: 0, top: 0, bottom: 0 }).show(ui, |ui| {
                     // The field fills its line and Post sits right-aligned under it: a field sized
@@ -476,19 +478,21 @@ fn card(
                 view.comments.editing = Some((a.page, a.index, a.contents.clone().unwrap_or_default()));
                 ui.close();
             }
-            ui.add_enabled_ui(mine, |ui| {
-                ui.menu_button(tl!("Set status"), |ui| {
-                    for s in [ReviewState::None, ReviewState::Accepted, ReviewState::Cancelled, ReviewState::Completed, ReviewState::Rejected] {
-                        if ui.button(tl!(s.name())).clicked() {
-                            edit = Some(Edit::SetAnnotationStatus { page: a.page, index: a.index, state: s, author: prefs.author.clone() });
-                            ui.close();
+            if !sign_box {
+                ui.add_enabled_ui(mine, |ui| {
+                    ui.menu_button(tl!("Set status"), |ui| {
+                        for s in [ReviewState::None, ReviewState::Accepted, ReviewState::Cancelled, ReviewState::Completed, ReviewState::Rejected] {
+                            if ui.button(tl!(s.name())).clicked() {
+                                edit = Some(Edit::SetAnnotationStatus { page: a.page, index: a.index, state: s, author: prefs.author.clone() });
+                                ui.close();
+                            }
                         }
-                    }
+                    });
                 });
-            });
-            if ui.add_enabled(mine, egui::Button::new(tl!(if marked { "Remove checkmark" } else { "Mark with checkmark" }))).clicked() {
-                edit = Some(Edit::MarkAnnotation { page: a.page, index: a.index, marked: !marked, author: prefs.author.clone() });
-                ui.close();
+                if ui.add_enabled(mine, egui::Button::new(tl!(if marked { "Remove checkmark" } else { "Mark with checkmark" }))).clicked() {
+                    edit = Some(Edit::MarkAnnotation { page: a.page, index: a.index, marked: !marked, author: prefs.author.clone() });
+                    ui.close();
+                }
             }
             if ui.button(tl!("Copy text")).clicked() {
                 ui.ctx().copy_text(a.contents.clone().unwrap_or_default());

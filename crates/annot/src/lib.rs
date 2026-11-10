@@ -1673,6 +1673,18 @@ pub fn delete_annotation_unchecked(doc: &mut Document, page: usize, index: usize
     delete_with(doc, page, index, false)
 }
 
+/// Remove only the annotation at `(page, index)`, leaving its replies and pop-up in the file.
+/// Signing uses this for the sign box: the server refuses deleting another user's reply, and
+/// its fingerprint includes `/IRT`, so older replies must stay exactly as they were.
+pub fn delete_annotation_only(doc: &mut Document, page: usize, index: usize) -> Result<(), AnnotError> {
+    let p = page_ref(doc, page)?;
+    let mut list = annots(doc, p);
+    let target = list.get(index).and_then(|e| e.as_ref()).ok_or(AnnotError::NoSuchAnnotation { page, index })?;
+    unlocked(doc, target)?;
+    list.remove(index);
+    set_annots(doc, p, list)
+}
+
 fn delete_with(doc: &mut Document, page: usize, index: usize, respect_lock: bool) -> Result<(), AnnotError> {
     let p = page_ref(doc, page)?;
     let list = annots(doc, p);
@@ -1775,6 +1787,7 @@ fn reply(
     state: Option<ReviewState>,
 ) -> Result<usize, AnnotError> {
     let (p, parent) = annot_ref(doc, page, index)?;
+    no_sign_box_reply(doc, parent)?;
     let pd = annot_dict(doc, parent);
     if pd.name(b"Subtype") == Some(b"Popup") {
         return Err(AnnotError::Invalid("pop-ups can't be replied to".into()));
@@ -1865,6 +1878,21 @@ pub const SIGN_ROLE_KEY: &str = "PpmSignRole";
 /// The private key of the user a sign box is assigned to (`/PpmSigner`); optional, a box without it is open by role.
 pub const SIGNER_KEY: &str = "PpmSigner";
 
+/// Is `d` a sign box: a FreeText carrying `/PpmSignRole`. A sign box takes no replies, statuses
+/// or marks (the server refuses them too); signing only removes the box itself.
+pub fn is_sign_box(d: &Dict) -> bool {
+    d.name(b"Subtype") == Some(b"FreeText") && d.get(SIGN_ROLE_KEY.as_bytes()).is_some()
+}
+
+/// Refuse a reply, status or mark on a sign box.
+fn no_sign_box_reply(doc: &Document, r: ObjRef) -> Result<(), AnnotError> {
+    if doc.get(r).as_dict().is_some_and(is_sign_box) {
+        Err(AnnotError::Invalid("a sign box can't be replied to".into()))
+    } else {
+        Ok(())
+    }
+}
+
 const SIGN_BOX_TEXT: [f64; 3] = [1.0, 0.0, 0.0];
 
 /// A sign box the way the PPM web viewer draws one: a centred, black, 1 pt dashed (4,3) text box
@@ -1913,6 +1941,7 @@ pub fn set_picture_source(doc: &mut Document, page: usize, index: usize, bytes: 
 pub fn set_marked(doc: &mut Document, page: usize, index: usize, marked: bool, author: &str, meta: &Meta) -> Result<usize, AnnotError> {
     let (p, parent) = annot_ref(doc, page, index)?;
     unsealed(doc, parent)?;
+    no_sign_box_reply(doc, parent)?;
     let pd = annot_dict(doc, parent);
     if pd.name(b"Subtype") == Some(b"Popup") {
         return Err(AnnotError::Invalid("pop-ups can't be marked".into()));
