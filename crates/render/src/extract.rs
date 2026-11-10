@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::page::Rotation;
@@ -44,11 +44,13 @@ pub enum ExtractError {
     TooMuchWork(usize),
 }
 
-/// Content operators one page may run, and all the pages of one call together. A page of ordinary
-/// content runs a few hundred to a few hundred thousand; the limits only turn away files that
-/// paint a small form millions of times over.
-const PAGE_OPS: usize = 5_000_000;
-const CALL_OPS: usize = 50_000_000;
+/// Content operators one page may run; every page starts with the whole allowance, so a long
+/// document of dense pages is not refused for its length and the error names the page that went
+/// over. An ordinary page runs a few hundred to a few hundred thousand; a large drawing or map
+/// page a few million (a path is 3 to 5 operators), so 10 million leaves such a page room. A page
+/// of 10 million operators takes about a second to turn away, and a file's cost is bounded by its
+/// page count times that.
+const PAGE_OPS: usize = 10_000_000;
 
 /// Extract the text of `pages` (0-based indices; `None` is every page), in ascending page order
 /// without duplicates. `max_glyphs` bounds the glyphs of all the returned pages together: the
@@ -101,10 +103,9 @@ pub fn extract_pages_each(
     }
     let settings = InterpreterSettings::default();
     let mut glyphs = 0usize;
-    let mut ops_left = CALL_OPS;
     for index in wanted {
-        // The page may use what is left of the glyph room and of the work allowance.
-        let ops = Arc::new(AtomicUsize::new(PAGE_OPS.min(ops_left)));
+        // The page may use what is left of the glyph room, and the whole work allowance.
+        let ops = Arc::new(AtomicUsize::new(PAGE_OPS));
         // The interpreter can panic on a damaged page: report it as that page's error.
         let done = catch_unwind(AssertUnwindSafe(|| {
             let info = page_info(&pdf, index);
@@ -116,7 +117,6 @@ pub fn extract_pages_each(
             PageStop::TooManyGlyphs => ExtractError::TooManyGlyphs(max_glyphs),
             PageStop::TooMuchWork => ExtractError::TooMuchWork(index + 1),
         })?;
-        ops_left = ops_left.saturating_sub(PAGE_OPS.min(ops_left).saturating_sub(ops.load(Ordering::Relaxed)));
         glyphs = glyphs.saturating_add(text.glyphs.len());
         if glyphs > max_glyphs {
             return Err(ExtractError::TooManyGlyphs(max_glyphs));
@@ -297,13 +297,39 @@ mod tests {
     /// stream of millions of operators, which a small compressed file can inflate to.
     #[test]
     fn a_page_with_millions_of_operators_is_stopped_by_the_work_limit() {
-        let bytes = pdf([0, 0, 400, 200], vec![], &"q\nQ\n".repeat(3_000_000));
+        let bytes = pdf([0, 0, 400, 200], vec![], &"q\nQ\n".repeat(6_000_000));
         let t = std::time::Instant::now();
         let r = extract_pages(bytes, None, None, usize::MAX);
         assert!(matches!(r, Err(ExtractError::TooMuchWork(1))), "{r:?}");
         assert!(t.elapsed().as_secs_f32() < 5.0, "took {:?}", t.elapsed());
-        // A page below the limit is read as before.
-        assert_eq!(extract_pages(pdf([0, 0, 400, 200], vec![], &"q\nQ\n".repeat(100_000)), None, None, usize::MAX).unwrap().len(), 1);
+    }
+
+    /// The allowance is per page: pages that each use most of it are all read, and a page over it
+    /// is the one named, whatever the pages before it used.
+    #[test]
+    fn the_work_limit_is_per_page_and_names_the_page() {
+        let heavy = "q\nQ\n".repeat(4_000_000); // 8 million operators, under the limit
+        let over = "q\nQ\n".repeat(6_000_000);
+        let two = |a: &str, b: &str| {
+            let mut doc = Document::with_version("1.7");
+            let pages = doc.new_object_id();
+            let kids: Vec<Object> = [a, b]
+                .iter()
+                .map(|ops| {
+                    let content = doc.add_object(Stream::new(dictionary! {}, ops.as_bytes().to_vec()));
+                    Object::Reference(doc.add_object(dictionary! {"Type" => "Page", "Parent" => pages, "MediaBox" => ints([0, 0, 100, 100]), "Contents" => content}))
+                })
+                .collect();
+            doc.objects.insert(pages, dictionary! {"Type" => "Pages", "Kids" => kids, "Count" => 2}.into());
+            let catalog = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => pages});
+            doc.trailer.set("Root", catalog);
+            let mut bytes = Vec::new();
+            doc.save_to(&mut bytes).unwrap();
+            Arc::new(bytes)
+        };
+        assert_eq!(extract_pages(two(&heavy, &heavy), None, None, usize::MAX).unwrap().len(), 2);
+        let r = extract_pages(two(&heavy, &over), None, None, usize::MAX);
+        assert!(matches!(r, Err(ExtractError::TooMuchWork(2))), "{r:?}");
     }
 
     /// An ordinary page is not mistaken for either.
