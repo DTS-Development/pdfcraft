@@ -1854,19 +1854,20 @@ fn every_kind_of_signature_takes_no_reply_status_or_mark_and_other_comments_do()
         d.set(b"Name".to_vec(), Object::name("PCCustomSignature"));
         d.set(b"PCPictureImage".to_vec(), Object::Bool(true));
     });
-    // Not signatures: typed text, marks, initials, a plain ink, a template stamp, a stamp with no meta.
-    let text_box = add(&mut doc, Shape::Typewriter { rect: [100.0, 700.0, 200.0, 716.0], font_size: 11.0 });
-    let mark = add(&mut doc, Shape::Mark { rect: [100.0, 600.0, 114.0, 614.0], mark: FillMark::Check });
     let initials = stamp_like(&mut doc, 0, |d| {
         d.set(b"Name".to_vec(), Object::name("PCCustomInitials"));
         d.set(b"PCPictureImage".to_vec(), Object::Bool(true));
     });
+    // Not signatures: typed text, marks, a picture initials stamp without its picture flag, a plain ink, a template stamp, a stamp with no meta.
+    let text_box = add(&mut doc, Shape::Typewriter { rect: [100.0, 700.0, 200.0, 716.0], font_size: 11.0 });
+    let mark = add(&mut doc, Shape::Mark { rect: [100.0, 600.0, 114.0, 614.0], mark: FillMark::Check });
+    let initials_no_image = stamp_like(&mut doc, 0, |d| d.set(b"Name".to_vec(), Object::name("PCCustomInitials")));
     let ink = add(&mut doc, Shape::Ink { strokes: vec![vec![[10.0, 10.0], [30.0, 20.0]]] });
     let template = stamp_like(&mut doc, 0, |_| {});
     set_extra(&mut doc, 0, template, "PpmStamp", r#"{"date":"2026-11-10","templateId":"t1"}"#).unwrap();
     let plain = stamp_like(&mut doc, 0, |_| {});
     let is = |doc: &Document, i: usize| is_signature(doc, &list(doc, 0)[i]);
-    for (name, i) in [("drawn", drawn), ("typed", typed), ("sealed", sealed), ("host", host), ("picture", picture)] {
+    for (name, i) in [("drawn", drawn), ("typed", typed), ("sealed", sealed), ("host", host), ("picture", picture), ("initials", initials)] {
         assert!(is(&doc, i), "{name} is a signature");
         let before = list(&doc, 0).len();
         assert!(add_reply(&mut doc, 0, i, "hi", "Bob", &meta("r1")).is_err(), "{name}: reply");
@@ -1874,7 +1875,7 @@ fn every_kind_of_signature_takes_no_reply_status_or_mark_and_other_comments_do()
         assert!(set_marked(&mut doc, 0, i, true, "Bob", &meta("r3")).is_err(), "{name}: mark");
         assert_eq!(list(&doc, 0).len(), before, "{name}: nothing was added");
     }
-    for (name, i) in [("text", text_box), ("mark", mark), ("initials", initials), ("ink", ink), ("template", template), ("plain", plain)] {
+    for (name, i) in [("text", text_box), ("mark", mark), ("initials without picture", initials_no_image), ("ink", ink), ("template", template), ("plain", plain)] {
         assert!(!is(&doc, i), "{name} is not a signature");
         add_reply(&mut doc, 0, i, "hi", "Bob", &meta(&format!("r{i}"))).unwrap_or_else(|e| panic!("{name}: {e}"));
     }

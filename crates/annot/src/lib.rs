@@ -1892,8 +1892,9 @@ pub fn is_sign_box(d: &Dict) -> bool {
 /// - a host signature: a stamp whose `/PpmStamp` is JSON with a `date` and no `templateId`
 ///   (what the PPM server calls `ppm-signature`, sealed or not);
 /// - a Fill & Sign drawn signature (an Ink with `/PCFillSign`, or whose subject is "Signature"),
-///   typed signature (stamp `/PCTypedSignature`) or picture signature (stamp `/PCCustomSignature`
-///   with `/PCPictureImage`). Typed text, marks and initials are not signatures.
+///   typed signature or initials (stamp `/PCTypedSignature`) or picture signature or initials (stamp
+///   `/PCCustomSignature` or `/PCCustomInitials` with `/PCPictureImage`). Initials count as signatures.
+///   Typed text and marks are not.
 ///
 /// Keep in step with `isSignature` in craft-node's `annot-fingerprint.ts` and craft-bridge.
 pub fn is_signature(doc: &Document, d: &Dict) -> bool {
@@ -1908,7 +1909,7 @@ pub fn is_signature(doc: &Document, d: &Dict) -> bool {
                 .is_some_and(|v| v.get("templateId").is_none() && v.get("date").is_some());
             host || match d.name(b"Name") {
                 Some(b"PCTypedSignature") => true,
-                Some(b"PCCustomSignature") => yes(b"PCPictureImage"),
+                Some(b"PCCustomSignature" | b"PCCustomInitials") => yes(b"PCPictureImage"),
                 _ => false,
             }
         }
