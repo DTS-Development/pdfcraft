@@ -454,7 +454,7 @@ mod tests {
             s.compress().unwrap();
             s
         };
-        for kind in ["mesh", "sampled", "postscript"] {
+        for kind in ["mesh", "sampled", "postscript", "transfer"] {
             let mut doc = Document::with_version("1.7");
             let shading = match kind {
                 "mesh" => doc.add_object(flate(
@@ -463,7 +463,7 @@ mod tests {
                     vec![0u8; 1 << 20],
                 )),
                 _ => {
-                    let function = if kind == "sampled" {
+                    let function = if kind == "sampled" || kind == "transfer" {
                         flate(dictionary! {"FunctionType" => 0, "Domain" => nums(&[0, 1]), "Range" => nums(&[0, 1]),
                             "Size" => nums(&[1 << 20]), "BitsPerSample" => 8}, vec![0u8; 1 << 20])
                     } else {
@@ -473,15 +473,24 @@ mod tests {
                         flate(dictionary! {"FunctionType" => 4, "Domain" => nums(&[0, 1]), "Range" => nums(&[0, 1])}, program)
                     };
                     let function = doc.add_object(function);
+                    if kind == "transfer" {
+                        // Not a shading: the same function stream, reached from `gs /TR`.
+                        function
+                    } else {
                     doc.add_object(dictionary! {"ShadingType" => 2, "ColorSpace" => "DeviceGray",
                         "Coords" => ints([0, 0, 1, 1]), "Function" => function})
+                    }
                 }
             };
-            let content = doc.add_object(Stream::new(dictionary! {}, "/S sh\n".repeat(10_000).into_bytes()));
+            let content = doc.add_object(Stream::new(dictionary! {}, (if kind == "transfer" { "/S gs\n" } else { "/S sh\n" }).repeat(10_000).into_bytes()));
             let pages = doc.new_object_id();
             let page = doc.add_object(dictionary! {
                 "Type" => "Page", "Parent" => pages, "MediaBox" => ints([0, 0, 100, 100]), "Contents" => content,
-                "Resources" => dictionary! {"Shading" => dictionary! {"S" => shading}}
+                "Resources" => if kind == "transfer" {
+                    dictionary! {"ExtGState" => dictionary! {"S" => dictionary! {"TR" => shading}}}
+                } else {
+                    dictionary! {"Shading" => dictionary! {"S" => shading}}
+                }
             });
             doc.objects.insert(pages, dictionary! {"Type" => "Pages", "Kids" => vec![Object::Reference(page)], "Count" => 1}.into());
             let catalog = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => pages});
