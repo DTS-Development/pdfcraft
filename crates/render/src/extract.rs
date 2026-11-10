@@ -16,7 +16,7 @@ use hayro::hayro_syntax::page::Rotation;
 use hayro::hayro_syntax::{DecryptionError, LoadPdfError, Pdf};
 
 use crate::raster::panic_message;
-use crate::text::{PageStop, PageText, extract_page_limited};
+use crate::text::{ARRANGE_PAGE_WORK, PageStop, PageText, extract_page_limited, take_arrange_used};
 use crate::{OpenError, PageInfo};
 
 /// The text of one page and where the page sits.
@@ -48,9 +48,9 @@ pub enum ExtractError {
     TooMuchWorkInCall(usize),
 }
 
-/// Content operators one page may run; every page starts with the whole allowance, so a long
-/// document of dense pages is not refused for its length and the error names the page that went
-/// over. An ordinary page runs a few hundred to a few hundred thousand; a large drawing or map
+/// Content operators one page may run; every page starts with the whole allowance, so the error
+/// names the page that went over. (The pages together are held to [`CALL_OPS`], so a long document
+/// of very dense pages can still be refused for its total.) An ordinary page runs a few hundred to a few hundred thousand; a large drawing or map
 /// page a few million (a path is 3 to 5 operators), so 10 million leaves such a page room. A page
 /// of 10 million operators takes about a second to turn away, and a file's cost is bounded by its
 /// page count times that.
@@ -68,6 +68,12 @@ const CALL_OPS: usize = 20_000_000;
 /// Reading 1 GB takes about a second.
 const PAGE_BYTES: usize = 256 << 20;
 const CALL_BYTES: usize = 1 << 30;
+/// Reading-order layout work one call may do in all its pages together, in the units of
+/// `ARRANGE_PAGE_WORK`. About a billion units take a second. The real 937-page document spends 21
+/// million in all (its busiest page 0.9 million); a page of thousands of pieces spends 75-94 million,
+/// so a few hundred such pages, which share one content stream, end the call here instead of after
+/// half a minute.
+const ARRANGE_CALL_WORK: usize = 500_000_000;
 
 /// The work one extraction may do: operators and content bytes, per page and per call.
 #[derive(Clone, Copy)]
@@ -76,9 +82,11 @@ struct Limits {
     call_ops: usize,
     page_bytes: usize,
     call_bytes: usize,
+    page_arrange: usize,
+    call_arrange: usize,
 }
 
-const LIMITS: Limits = Limits { page_ops: PAGE_OPS, call_ops: CALL_OPS, page_bytes: PAGE_BYTES, call_bytes: CALL_BYTES };
+const LIMITS: Limits = Limits { page_ops: PAGE_OPS, call_ops: CALL_OPS, page_bytes: PAGE_BYTES, call_bytes: CALL_BYTES, page_arrange: ARRANGE_PAGE_WORK, call_arrange: ARRANGE_CALL_WORK };
 
 /// Extract the text of `pages` (0-based indices; `None` is every page), in ascending page order
 /// without duplicates. `max_glyphs` bounds the glyphs of all the returned pages together: the
@@ -145,20 +153,23 @@ fn extract_pages_limited(
     let mut glyphs = 0usize;
     let mut ops_left = limits.call_ops;
     let mut bytes_left = limits.call_bytes;
+    let mut arrange_left = limits.call_arrange;
     for index in wanted {
         // The page may use what is left of the glyph room, and its own work allowance or what is
         // left of the call's, whichever is less.
         let allowed = limits.page_ops.min(ops_left);
         let allowed_bytes = limits.page_bytes.min(bytes_left);
-        let call_limited = allowed < limits.page_ops || allowed_bytes < limits.page_bytes;
+        let allowed_arrange = limits.page_arrange.min(arrange_left);
+        let call_limited = allowed < limits.page_ops || allowed_bytes < limits.page_bytes || allowed_arrange < limits.page_arrange;
         let ops = Arc::new(AtomicUsize::new(allowed));
         set_content_byte_budget(Some(allowed_bytes));
         // The interpreter can panic on a damaged page: report it as that page's error.
         let done = catch_unwind(AssertUnwindSafe(|| {
             let info = page_info(&pdf, index);
-            extract_page_limited(&pdf, index, &settings, Default::default(), Some((max_glyphs - glyphs, ops.clone()))).map(|text| (info, text))
+            extract_page_limited(&pdf, index, &settings, Default::default(), Some((max_glyphs - glyphs, ops.clone(), allowed_arrange))).map(|text| (info, text))
         }));
         // The limit lives on this thread: lift it whatever happened.
+        let arrange_used = take_arrange_used();
         let bytes_now = content_byte_budget_left().unwrap_or(0);
         set_content_byte_budget(None);
         let done = done.map_err(|p| ExtractError::Page(index + 1, panic_message(&p)))?;
@@ -172,6 +183,7 @@ fn extract_pages_limited(
             PageStop::TooManyGlyphs => ExtractError::TooManyGlyphs(max_glyphs),
             PageStop::TooMuchWork => work(index + 1),
         })?;
+        arrange_left = arrange_left.saturating_sub(arrange_used);
         ops_left -= allowed - ops.load(Ordering::Relaxed);
         bytes_left -= allowed_bytes - bytes_now;
         glyphs = glyphs.saturating_add(text.glyphs.len());
@@ -360,6 +372,46 @@ mod tests {
         assert!(t.elapsed().as_secs_f32() < 2.0, "took {:?}", t.elapsed());
         // The limit is lifted afterwards: layout on this thread is unlimited again.
         assert!(!crate::text::arrange_is_limited());
+    }
+
+    /// The layout work of a call is limited apart from each page's: pages of many text pieces that
+    /// are each under their own allowance stop at the page where the total runs out, and the error
+    /// says the call, not the page, was over.
+    #[test]
+    fn the_layout_work_limit_of_a_call_names_the_page_that_passes_it() {
+        // 300 pieces 40 points apart stay separate segments, so each page spends a good deal of layout work.
+        let text: String = (0..300).map(|i| format!("BT /F1 10 Tf {} 10 Td (A) Tj ET\n", 5 + i * 40)).collect();
+        let mut doc = Document::with_version("1.7");
+        let font = doc.add_object(dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" });
+        let pages = doc.new_object_id();
+        let content = doc.add_object(Stream::new(dictionary! {}, text.into_bytes()));
+        let kids: Vec<Object> = (0..10)
+            .map(|_| {
+                Object::Reference(doc.add_object(dictionary! {
+                    "Type" => "Page", "Parent" => pages, "MediaBox" => ints([0, 0, 13000, 100]), "Contents" => content,
+                    "Resources" => dictionary! {"Font" => dictionary! {"F1" => font}}
+                }))
+            })
+            .collect();
+        doc.objects.insert(pages, dictionary! {"Type" => "Pages", "Kids" => kids, "Count" => 10}.into());
+        let catalog = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => pages});
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        let bytes = Arc::new(bytes);
+        // What one page spends: read it with room to spare, then allow the call two and a half pages' worth.
+        extract_pages_limited(bytes.clone(), None, Some(&[0]), usize::MAX, LIMITS, |_| Ok(())).unwrap();
+        let one = crate::text::last_arrange_used();
+        assert!(one > 0);
+        let mut read = 0;
+        let limits = Limits { call_arrange: one * 5 / 2, ..LIMITS };
+        let r = extract_pages_limited(bytes.clone(), None, None, usize::MAX, limits, |_| {
+            read += 1;
+            Ok(())
+        });
+        assert!(matches!(r, Err(ExtractError::TooMuchWorkInCall(3))), "{r:?}");
+        assert_eq!(read, 2);
+        assert!(extract_pages_limited(bytes, None, None, usize::MAX, Limits { call_arrange: one * 10 + 10, ..LIMITS }, |_| Ok(())).is_ok());
     }
 
     /// Work that isn't glyphs (and isn't nested paints, which have their own limit): a content

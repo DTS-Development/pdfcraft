@@ -715,7 +715,7 @@ pub(crate) fn extract_page_limited(
     page: usize,
     settings: &InterpreterSettings,
     filter: TextFilter,
-    limits: Option<(usize, Arc<AtomicUsize>)>,
+    limits: Option<(usize, Arc<AtomicUsize>, usize)>,
 ) -> Result<PageText, PageStop> {
     let fail = |why: &str| PageStop::Failed(why.to_string());
     let pages = pdf.pages();
@@ -726,7 +726,7 @@ pub(crate) fn extract_page_limited(
     // as in Acrobat, and match what other extractors report.
     let mut settings = settings.clone();
     let stop = limits.as_ref().map(|_| Arc::new(AtomicBool::new(false)));
-    if let Some((_, ops)) = &limits {
+    if let Some((_, ops, _)) = &limits {
         settings.cancelled = stop.clone();
         settings.op_budget = Some(ops.clone());
     }
@@ -734,17 +734,17 @@ pub(crate) fn extract_page_limited(
     let mut ctx = Context::new(initial, Rect::new(0.0, 0.0, w as f64, h as f64), &cache, p.xref(), settings);
     let mut dev = TextDevice::new();
     dev.filter = filter;
-    if let Some((room, _)) = &limits {
+    if let Some((room, _, _)) = &limits {
         dev.glyph_room = *room;
         dev.stop = stop;
     }
     // Layout below is limited too when the caller limits the page.
-    let arrange_limit = limits.is_some().then(|| ArrangeLimit::set(ARRANGE_WORK));
+    let arrange_limit = limits.as_ref().map(|(_, _, work)| ArrangeLimit::set(*work));
     interpret_page(p, &mut ctx, &mut dev);
     if dev.over_room {
         return Err(PageStop::TooManyGlyphs);
     }
-    if limits.as_ref().is_some_and(|(_, ops)| ops.load(Ordering::Relaxed) == 0) {
+    if limits.as_ref().is_some_and(|(_, ops, _)| ops.load(Ordering::Relaxed) == 0) {
         return Err(PageStop::TooMuchWork);
     }
     // A replacement the content never closed ends with the page.
@@ -884,19 +884,42 @@ struct Flow {
     space_before: Vec<bool>,
 }
 
-/// Work one page's reading-order layout may do when text is extracted for a server call: pair checks
-/// of the segment merge, block lookups and block-order picks, each counted as one. The passes are
-/// quadratic or worse in the number of text segments, so a page made of many thousand tiny pieces
-/// (a drawing that shows one letter per form call) would hold the caller for tens of seconds
-/// while its operators and glyphs both stay inside their limits. A real page needs a few
-/// hundred thousand; 100 million is about half a second.
-const ARRANGE_WORK: usize = 100_000_000;
+/// Work the reading-order layout of one page may do when text is extracted for a server call: pair
+/// checks of the segment merge, block lookups and block-order picks, each counted as one. The
+/// passes are quadratic or worse in the number of text segments, so a page made of many thousand
+/// tiny pieces (a drawing that shows one letter per form call) would hold the caller for tens of
+/// seconds while its operators and glyphs both stay inside their limits. 100 million is about a tenth
+/// of a second. The pages of one call share a smaller allowance ([`ARRANGE_CALL_WORK`]).
+pub(crate) const ARRANGE_PAGE_WORK: usize = 100_000_000;
 
 thread_local! {
     /// Work left for layout on this thread; `None` is no limit (the editor).
     static ARRANGE_LEFT: Cell<Option<usize>> = const { Cell::new(None) };
     /// Set once layout ran out of work; the layout in progress stops and returns nothing.
     static ARRANGE_OVER: Cell<bool> = const { Cell::new(false) };
+    /// Work the last limited layout on this thread used (see [`take_arrange_used`]).
+    static ARRANGE_USED: Cell<usize> = const { Cell::new(0) };
+    /// The allowance the limit in force was set with.
+    static ARRANGE_ALLOWED: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Layout work used by the page limited last on this thread, once; 0 after that.
+pub(crate) fn take_arrange_used() -> usize {
+    let used = ARRANGE_USED.with(|c| c.replace(0));
+    #[cfg(test)]
+    ARRANGE_LAST.with(|c| c.set(used));
+    used
+}
+
+#[cfg(test)]
+thread_local! {
+    static ARRANGE_LAST: Cell<usize> = const { Cell::new(0) };
+}
+
+/// What the last page read on this thread spent (tests only; survives `take_arrange_used`).
+#[cfg(test)]
+pub(crate) fn last_arrange_used() -> usize {
+    ARRANGE_LAST.with(Cell::get)
 }
 
 /// Limits layout on this thread while alive and lifts the limit when dropped, whatever the exit.
@@ -905,6 +928,7 @@ struct ArrangeLimit;
 impl ArrangeLimit {
     fn set(work: usize) -> Self {
         ARRANGE_LEFT.with(|c| c.set(Some(work)));
+        ARRANGE_ALLOWED.with(|c| c.set(work));
         ARRANGE_OVER.with(|c| c.set(false));
         Self
     }
@@ -917,6 +941,8 @@ impl ArrangeLimit {
 
 impl Drop for ArrangeLimit {
     fn drop(&mut self) {
+        let left = ARRANGE_LEFT.with(|c| c.get()).unwrap_or(0);
+        ARRANGE_USED.with(|c| c.set(ARRANGE_ALLOWED.with(Cell::get).saturating_sub(left)));
         ARRANGE_LEFT.with(|c| c.set(None));
         ARRANGE_OVER.with(|c| c.set(false));
     }
