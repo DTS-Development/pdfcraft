@@ -109,4 +109,33 @@ const flat = JSON.parse(m.list(m.flatten(pdf))).map((e) => e.subtype);
 assert.deepEqual(flat, ['Link'], '주석은 굽고 링크만 남는다');
 assert.throws(() => m.flatten(new Uint8Array([1, 2, 3])), /can't be opened/);
 
-console.log('ok: list/exportXfdf/strip/merge/flatten, 한글 서브셋 글꼴', largestStream(merged), 'bytes max stream');
+// 7. 텍스트·좌표 추출: 400x200 쪽 (50,150)에 글자. 보이는 쪽 기준(왼쪽 위 원점, y 아래), 쪽 번호 1부터
+function textPdf(extra) {
+  const content = 'BT /F1 20 Tf 50 150 Td (Hello world) Tj ET';
+  const objs = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 200] ${extra} /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>`,
+    `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+  ];
+  let out = '%PDF-1.7\n';
+  const offs = [];
+  objs.forEach((o, i) => { offs.push(out.length); out += `${i + 1} 0 obj\n${o}\nendobj\n`; });
+  const xref = out.length;
+  out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n` + offs.map((o) => `${String(o).padStart(10, '0')} 00000 n \n`).join('');
+  out += `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return new Uint8Array(Buffer.from(out, 'latin1'));
+}
+const t0 = JSON.parse(m.extractText(textPdf(''), '{"granularity":"word"}'))[0];
+assert.deepEqual([t0.page, t0.width, t0.height, t0.rotation], [1, 400, 200, 0]);
+assert.equal(t0.lines[0].text, 'Hello world');
+assert.deepEqual(t0.lines[0].words.map((w) => w.text), ['Hello', 'world']);
+assert.ok(Math.abs(t0.lines[0].bbox[0] - 50) < 2 && t0.lines[0].bbox[3] > 45 && t0.lines[0].bbox[3] < 55, '왼쪽 위 원점, y 아래');
+const t90 = JSON.parse(m.extractText(textPdf('/Rotate 90'), ''))[0];
+assert.deepEqual([t90.width, t90.height, t90.rotation], [200, 400, 90]);
+assert.throws(() => m.extractText(textPdf(''), '{"pages":[2]}'), /page 2 does not exist/);
+assert.throws(() => m.extractText(textPdf(''), '{"pages":[0]}'), /numbered from 1/);
+assert.throws(() => m.extractText(new Uint8Array([1, 2, 3]), ''), /can't be opened/);
+
+console.log('ok: list/exportXfdf/strip/merge/flatten/extractText, 한글 서브셋 글꼴', largestStream(merged), 'bytes max stream');
