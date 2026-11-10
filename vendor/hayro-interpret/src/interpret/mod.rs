@@ -1016,7 +1016,8 @@ fn interpret_content<'a>(
             .cancelled
             .as_ref()
             .is_some_and(|c| c.load(Ordering::Relaxed))
-            || context.settings.op_budget.as_ref().is_some_and(|b| b.load(Ordering::Relaxed) == 0);
+            || context.settings.op_budget.as_ref().is_some_and(|b| b.load(Ordering::Relaxed) == 0)
+            || crate::context::content_byte_budget_left() == Some(0);
         if !needs_more || cancelled || exhausted {
             break;
         }
@@ -1028,7 +1029,10 @@ fn interpret_content<'a>(
             break;
         }
         let want = window.len().max(CONTENT_WINDOW);
-        if content.read_into(&mut window, want) == 0 {
+        let read = content.read_into(&mut window, want);
+        // PdfCraft patch: content read from a stream counts against the caller's byte limit.
+        crate::context::spend_content_bytes(read);
+        if read == 0 {
             exhausted = true;
         }
     }

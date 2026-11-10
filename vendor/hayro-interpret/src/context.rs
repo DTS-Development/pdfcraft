@@ -33,6 +33,9 @@ pub(crate) const MAX_NESTED_PAINTS: u32 = 50_000;
 
 std::thread_local! {
     static NESTED_PAINTS: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+    // PdfCraft patch: bytes of content streams that may still be decoded and read on this thread,
+    // `None` for no limit (the default: viewing and rendering are unchanged).
+    static BYTES_LEFT: core::cell::Cell<Option<usize>> = const { core::cell::Cell::new(None) };
     static CONTENT_LEFT: core::cell::Cell<usize> = const { core::cell::Cell::new(MAX_PAGE_CONTENT) };
     // PdfCraft patch (18): whether this page's content budget ran out, reported as
     // `InterpreterWarning::ContentTruncated`.
@@ -46,6 +49,24 @@ std::thread_local! {
 /// would have held over 12 GB. A level gives its bytes back when it finishes, so content
 /// painted again and again doesn't use the budget up. Ordinary pages hold a few megabytes.
 pub(crate) const MAX_PAGE_CONTENT: usize = 512 << 20;
+
+/// PdfCraft patch: limit the content bytes this thread may decode and read from now on (`None`
+/// lifts the limit). Unlike the page's content budget, which is given back when a stream is dropped,
+/// this one only runs down: a form painted 50,000 times costs its size 50,000 times, whatever
+/// the operator count. A caller that reads untrusted files sets it for the call and lifts it after.
+pub fn set_content_byte_budget(bytes: Option<usize>) {
+    BYTES_LEFT.with(|b| b.set(bytes));
+}
+
+/// PdfCraft patch: what is left of the limit set by [`set_content_byte_budget`] (`None`: no limit).
+pub fn content_byte_budget_left() -> Option<usize> {
+    BYTES_LEFT.with(core::cell::Cell::get)
+}
+
+/// PdfCraft patch: take `len` bytes off the limit, if there is one.
+pub(crate) fn spend_content_bytes(len: usize) {
+    BYTES_LEFT.with(|b| b.set(b.get().map(|left| left.saturating_sub(len))));
+}
 
 /// PdfCraft patch: a content stream decoded within the page's [`MAX_PAGE_CONTENT`]. The bytes
 /// it decoded count against the budget until it is dropped; a stream without filters is
@@ -72,12 +93,23 @@ impl Drop for DecodedContent<'_> {
 /// [`MAX_PAGE_CONTENT`]. `None` once the budget is spent (the content is skipped).
 pub(crate) fn decode_content<'a>(stream: &Stream<'a>) -> Option<DecodedContent<'a>> {
     let left = CONTENT_LEFT.with(core::cell::Cell::get);
-    if left == 0 {
+    let bytes_left = BYTES_LEFT.with(core::cell::Cell::get);
+    if left == 0 || bytes_left == Some(0) {
         CONTENT_TRUNCATED.with(|truncated| truncated.set(true));
         warn!("page content budget exceeded");
         return None;
     }
-    let data = stream.decoded_within(left).ok()?;
+    // PdfCraft patch: a stream that fails to decode within the cap still cost the cap.
+    let cap = bytes_left.map_or(left, |b| b.min(left));
+    let data = match stream.decoded_within(cap) {
+        Ok(data) => data,
+        Err(_) => {
+            spend_content_bytes(cap);
+            return None;
+        }
+    };
+    // Reading the bytes costs their length, whether they were inflated or borrowed from the file.
+    spend_content_bytes(data.len());
     let held = match &data {
         Cow::Owned(v) => v.len(),
         Cow::Borrowed(_) => 0,
