@@ -87,6 +87,8 @@ fn main() {
                             app.bytes_inbox.clone(),
                             cc.egui_ctx.clone(),
                         );
+                        bridge.listen_view(app.view_inbox.clone(), cc.egui_ctx.clone());
+                        app.host_view = Some(bridge.view_fn());
                         app.host_stamp = Some(bridge.stamp_fn());
                         app.host_annots = Some(bridge.annots_fn());
                         app.host_compare = Some(bridge.compare_fn());
@@ -253,6 +255,17 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   `{ id, replaced, inserted, deleted, visual }` or `pdfcraft:compare-failed` `{ id, error }`
 ///   (to the parent) report the outcome. In this mode the Compare panel has no Mark as
 ///   comments or Report.
+/// - `pdfcraft:goto` (from the parent): `{ id, page, rect? }` scrolls to the page (from 0, as in `stamp-place`), or to
+///   `rect` `{ x, y, width, height }` on it (points on the page as shown, top-left origin; its centre goes to the middle
+///   of the window at the zoom as it is). Answered with `pdfcraft:goto-done` `{ id }` or `pdfcraft:goto-failed`
+///   `{ id, error }` (no document, page out of range, a bad rect).
+/// - `pdfcraft:highlight` (from the parent): `{ id, page, rects, color?, transient }` marks `rects` (a list of the same
+///   `{ x, y, width, height }`) on the page. `transient` must be `true`: the mark is a screen overlay, no annotation, so it
+///   is not saved, not undoable and not in `annots-changed`. `color` is `#rgb`, `#rrggbb` (drawn at 40% opacity)
+///   or `#rrggbbaa`, yellow if missing. It does not scroll (use `goto`). The next `highlight` or `pdfcraft:highlight-clear`
+///   `{}` takes it away. Answered with `pdfcraft:highlight-done` `{ id }` or `pdfcraft:highlight-failed` `{ id, error }`.
+/// - `pdfcraft:opened` (to the parent): once for each `pdfcraft:open`, when a page of that document was first drawn
+///   (`ready` only says the app listens).
 /// - `pdfcraft:dirty` (to the parent): `{ dirty }` whenever unsaved work appears or goes away.
 /// - `pdfcraft:failed` (to the parent): `{ error }` when the app couldn't start.
 ///
@@ -547,6 +560,69 @@ mod host {
         pub fn annots_fn(&self) -> pdfcraft_ui_egui::HostAnnotFn {
             let bridge = self.clone();
             Box::new(move |event| bridge.post_annots(event))
+        }
+
+        pub fn view_fn(&self) -> pdfcraft_ui_egui::HostViewFn {
+            let bridge = self.clone();
+            Box::new(move |event| bridge.post_view(event))
+        }
+
+        /// Hear `pdfcraft:goto`, `pdfcraft:highlight` and `pdfcraft:highlight-clear` from the parent. A request that
+        /// can't be read is answered with its `-failed` message when it has an `id`.
+        pub fn listen_view(&self, views: pdfcraft_ui_egui::ViewInbox, ctx: egui::Context) {
+            let bridge = self.clone();
+            let parent = self.parent.clone();
+            let origin = self.origin.clone();
+            let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
+                if event.origin() != origin || !event.source().is_some_and(|s| js_sys::Object::is(&s, &parent)) {
+                    return;
+                }
+                let data = event.data();
+                let Some(kind) = string(&data, "type") else { return };
+                let Some(name) = kind.strip_prefix("pdfcraft:").filter(|n| matches!(*n, "goto" | "highlight" | "highlight-clear")) else {
+                    return;
+                };
+                let parsed = js_sys::JSON::stringify(&data)
+                    .ok()
+                    .and_then(|s| s.as_string())
+                    .ok_or_else(|| "not plain data".to_string())
+                    .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).map_err(|e| e.to_string()))
+                    .and_then(|value| pdfcraft_ui_egui::ViewCommand::from_json(name, &value));
+                match parsed {
+                    Ok(command) => {
+                        if let Ok(mut q) = views.lock() {
+                            q.push(command);
+                        }
+                        ctx.request_repaint();
+                    }
+                    Err(error) => {
+                        let id = string(&data, "id").unwrap_or_default().chars().take(128).collect();
+                        match name {
+                            "goto" => bridge.post_view(&pdfcraft_ui_egui::ViewEvent::GotoFailed { id, error }),
+                            "highlight" => bridge.post_view(&pdfcraft_ui_egui::ViewEvent::HighlightFailed { id, error }),
+                            _ => eframe::web_sys::console::warn_1(&format!("PdfCraft: {kind} refused: {error}").into()),
+                        }
+                    }
+                }
+            });
+            if self.window.add_event_listener_with_callback("message", on_message.as_ref().unchecked_ref()).is_ok() {
+                // The listener lives as long as the page.
+                on_message.forget();
+            }
+        }
+
+        /// Tell the parent about the view: `pdfcraft:opened`, `goto-done`, `goto-failed`, `highlight-done`, `highlight-failed`.
+        pub fn post_view(&self, event: &pdfcraft_ui_egui::ViewEvent) {
+            let (name, fields) = event.to_message();
+            let mut pairs: Vec<(&str, JsValue)> = vec![("type", format!("pdfcraft:{name}").into())];
+            for key in ["id", "error"] {
+                if let Some(text) = fields.get(key).and_then(|v| v.as_str()) {
+                    pairs.push((key, text.into()));
+                }
+            }
+            if let Some(m) = message(&pairs) {
+                let _ = self.post(&m, None);
+            }
         }
 
         pub fn stamp_fn(&self) -> pdfcraft_ui_egui::HostStampFn {

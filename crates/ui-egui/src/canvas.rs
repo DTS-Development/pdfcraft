@@ -412,6 +412,10 @@ pub struct DocView {
     single_edges: Option<(usize, bool, bool)>,
     /// Briefly outline an annotation after navigating to it from a panel.
     pub flash: Option<(usize, [f32; 4], f64)>,
+    /// The host's transient highlight (`pdfcraft:highlight`): drawn over the page, never part of the file.
+    pub host_highlight: Option<crate::host_view::HostHighlight>,
+    /// A page of this document has been drawn (or failed to be): the host's `opened` waits for it.
+    pub(crate) first_painted: bool,
     /// Compare files: differences shaded on this document's pages (page, user-space box, colour).
     pub compare_marks: Vec<(usize, [f32; 4], Color32)>,
     /// How strongly the marks are shaded (the PPM build matches the viewer's 0.4).
@@ -727,6 +731,8 @@ impl DocView {
             key_scroll: 0.0,
             single_edges: None,
             flash: None,
+            host_highlight: None,
+            first_painted: false,
             compare_marks: Vec::new(),
             compare_alpha: 0.28,
             pages: HashMap::new(),
@@ -868,6 +874,8 @@ impl DocView {
         fresh.grid_zoom = self.grid_zoom;
         // Same document id, so the scroll offset egui keeps for it is still this document's.
         fresh.shown = self.shown;
+        fresh.host_highlight = self.host_highlight.clone();
+        fresh.first_painted = self.first_painted;
         fresh.highlight_fields = self.highlight_fields;
         fresh.notice_dismissed = self.notice_dismissed;
         fresh.snapshot = self.snapshot.clone();
@@ -2958,6 +2966,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
             painter.add(egui::epaint::Shadow { offset: [0, 3], blur: 14, spread: 0, color: t.page_shadow }.as_shape(r, CornerRadius::ZERO));
             painter.rect_filled(r, CornerRadius::ZERO, Color32::WHITE);
             if let Some(err) = view.errors.get(&i) {
+                view.first_painted = true;
                 painter.rect_filled(r, CornerRadius::ZERO, Color32::from_rgb(0xFB, 0xF4, 0xF4));
                 icons::paint(
                     ui,
@@ -2991,6 +3000,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                 }
                 match view.pages.get(&i) {
                     Some(p) => {
+                        view.first_painted = true;
                         if !tiled && p.tag == want_tag {
                             xf.texel_aligned(p.tex.size(), ppp).paint_image(painter, p.tex.id(), 0.0, 0.0, 1.0, 1.0);
                         } else {
@@ -3324,6 +3334,11 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
 
             // Text layer: find matches, selection, I-beam and drag-to-select.
             let to_screen = |g: [f32; 4]| xf.view_rect(g);
+            if let Some(h) = view.host_highlight.as_ref().filter(|h| h.page == i) {
+                for rect in &h.rects {
+                    painter.rect_filled(to_screen(*rect), CornerRadius::same(1), h.color);
+                }
+            }
             if let Some(text) = view.texts.get(&i).cloned() {
                 if let Some(f) = &view.find {
                     for (k, (mp, range)) in f.matches.iter().enumerate() {

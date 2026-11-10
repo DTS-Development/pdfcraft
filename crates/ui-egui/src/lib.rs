@@ -58,6 +58,7 @@ mod host_bytes;
 mod host_compare;
 mod host_lock;
 mod host_stamp;
+mod host_view;
 mod js_ui;
 mod marks_ui;
 mod measure_ui;
@@ -71,6 +72,7 @@ pub use host_bytes::{BytesInbox, BytesPurpose, BytesReply, BytesRequest, HostByt
 pub use host_compare::{CompareCommand, CompareEvent, CompareInbox, HostCompareFn, MAX_COMPARE_BYTES};
 pub use host_lock::{HOST_LOCK, commands_manifest, open_scope, parse_mode, policy_overrides, with_policy};
 pub use host_stamp::{HostStampFn, MAX_PNG_BYTES, SIGN_BOX_SIZE, StampCommand, StampEvent, StampInbox};
+pub use host_view::{HostViewFn, MAX_HIGHLIGHT_RECTS, ViewCommand, ViewEvent, ViewInbox};
 pub use pdfcraft_engine::{AnnotChanges, RejectedAnnot, RemoteAnnot};
 pub use pdfcraft_engine::{EditClass, EditClasses, EditScope, Ownership};
 mod standards_ui;
@@ -665,6 +667,11 @@ pub struct PdfCraftApp {
     /// Stamp requests from the embedding page, and where to report them (web, see [`StampCommand`]).
     pub stamp_inbox: StampInbox,
     pub host_stamp: Option<HostStampFn>,
+    /// View requests from the embedding page (goto, highlight), and where to report them and `opened` (web, see [`ViewCommand`]).
+    pub view_inbox: ViewInbox,
+    pub host_view: Option<HostViewFn>,
+    /// Waiting to tell the page its document was drawn: the views there were before the file was opened.
+    pub(crate) opened_wait: Option<Vec<pdfcraft_engine::DocId>>,
     /// The embedding page's annotation messages, and where to report changes (web, see [`AnnotCommand`]).
     pub annot_inbox: AnnotInbox,
     pub host_annots: Option<HostAnnotFn>,
@@ -1061,6 +1068,9 @@ impl PdfCraftApp {
             compare_taken: false,
             compare_view_sent: None,
             host_stamp: None,
+            view_inbox: Default::default(),
+            host_view: None,
+            opened_wait: None,
             annot_inbox: Default::default(),
             host_annots: None,
             annot_selected_sent: None,
@@ -3299,6 +3309,7 @@ impl eframe::App for PdfCraftApp {
                     }
                 }
                 let activate = replace || !self.startup_superseded;
+                self.expect_opened();
                 let opened = self.open_bytes_with_focus(&name, None, bytes, activate);
                 if shares {
                     self.annot_open_finished(opened.is_ok());
@@ -3346,6 +3357,7 @@ impl eframe::App for PdfCraftApp {
             self.control = Some(control);
         }
         self.host_stamp_tick(ctx);
+        self.host_view_tick(ctx);
         self.host_compare_tick();
         self.host_bytes_tick();
         // The host hid this interface's comments panel: nothing opens it again.
