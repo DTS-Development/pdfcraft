@@ -1544,8 +1544,7 @@ pub enum Edit {
     /// locked) is removed and a custom stamp over `rect` (user space) takes its place, with
     /// `meta` stored as `/PpmStamp`. The stamp is sealed (Locked and LockedContents), so nothing
     /// moves, resizes, edits or deletes it afterwards, and undo and redo history is dropped so
-    /// neither can bring the box back. Replies to the box (anyone's) are removed with it, as deleting
-    /// a comment does everywhere; a reply of someone else's does not refuse the signature.
+    /// neither can bring the box back.
     SignInBox {
         page: usize,
         index: usize,
@@ -2543,11 +2542,9 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
 fn run_edit_checked(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> Result<(), EditError> {
     let Some(actor) = cx.ownership.actor.clone() else { return run_edit(doc, edit, cx) };
     let mut others = pdfcraft_annot::ownership::foreign_snapshot(doc, &actor);
-    // Signing in takes the sign box away, whoever placed it, and its replies with it (see `Edit::SignInBox`).
+    // Signing in takes the sign box away, whoever placed it.
     if let Edit::SignInBox { page, index, .. } = edit {
-        for at in pdfcraft_annot::thread_indices(doc, *page, *index) {
-            others = others.without(doc, *page, at);
-        }
+        others = others.without(doc, *page, *index);
     }
     run_edit(doc, edit, cx)?;
     pdfcraft_annot::ownership::check_foreign_kept(doc, &others)?;

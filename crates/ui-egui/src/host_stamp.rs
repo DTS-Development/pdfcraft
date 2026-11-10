@@ -956,32 +956,6 @@ mod flow_tests {
         assert_rect(note.rect.map(f64::from), [20.0, 230.0, 110.0, 260.0]);
     }
 
-    /// A reply another user put on the sign box does not stop the signature: it goes with the box (as deleting a
-    /// comment takes its replies), and the page hears the delete of both.
-    #[test]
-    fn signing_in_a_box_with_another_users_reply_removes_the_reply_too() {
-        let (mut h, ev, heard) = shared_app();
-        let box_item = pdfcraft_engine::RemoteAnnot { annot_id: "vb".into(), author_id: "u-a".into(), xfdf: REMOTE_BOX.into() };
-        let reply = REMOTE_BOX
-            .replace("<freetext", "<text")
-            .replace("</freetext>", "</text>")
-            .replace("name=\"vb\"", "inreplyto=\"vb\" name=\"vr\"")
-            .replace("title=\"Ada\"", "title=\"Bob\"")
-            .replace("<contents>reviewer</contents>", "<contents>who signs?</contents>");
-        let reply_item = pdfcraft_engine::RemoteAnnot { annot_id: "vr".into(), author_id: "u-b".into(), xfdf: reply };
-        h.state().annot_inbox.lock().unwrap().push(AnnotCommand::Reset { items: vec![box_item, reply_item], seq: 0 });
-        h.run_steps(3);
-        assert_eq!(page_notes(&h).len(), 2, "the box and its reply: {:?}", page_notes(&h));
-        heard.borrow_mut().clear();
-        send(&mut h, sign_in("s1", "vb"));
-        h.run_steps(3);
-        assert_eq!(*ev.borrow(), vec![StampEvent::Placed { id: "s1".into(), page: 0 }]);
-        assert_eq!(page_notes(&h), vec![("Stamp".to_string(), true)], "only the signature is left");
-        let deletes: Vec<String> =
-            heard.borrow().iter().filter_map(|e| if let AnnotEvent::Changed { changes, .. } = e { Some(changes.deletes.clone()) } else { None }).flatten().collect();
-        assert!(deletes.contains(&"vb".to_string()) && deletes.contains(&"vr".to_string()), "both deletes are sent: {deletes:?}");
-    }
-
     /// Nothing is signed in a thing that is not a sign box, or not there; the document stays as it was.
     #[test]
     fn signing_in_something_else_is_refused() {
