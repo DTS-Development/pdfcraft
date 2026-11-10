@@ -15,6 +15,8 @@ use hayro::hayro_interpret::{
 };
 use kurbo::{Affine, BezPath, Rect, Shape};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Semantic exclusions for statistics. Untagged text is retained; no layout guess is made.
 #[derive(Clone, Debug, Default)]
@@ -362,6 +364,12 @@ struct TextDevice {
     excluded_depth: Option<usize>,
     actual_filtered: bool,
     partial_replacement: bool,
+    /// How many more glyphs the caller wants before giving up, and how many were drawn so far.
+    /// Once they pass the room, `stop` is raised so the interpreter ends the page at once.
+    glyph_room: usize,
+    drawn_count: usize,
+    stop: Option<Arc<AtomicBool>>,
+    over_room: bool,
 }
 
 /// An `/ActualText` replacement: the glyph standing for it in `TextDevice::glyphs` (none for an
@@ -435,6 +443,10 @@ impl TextDevice {
             excluded_depth: None,
             actual_filtered: false,
             partial_replacement: false,
+            glyph_room: usize::MAX,
+            drawn_count: 0,
+            stop: None,
+            over_room: false,
         }
     }
 
@@ -636,6 +648,15 @@ impl<'a> Device<'a> for TextDevice {
             Some((_, _, drawn)) => drawn.push((dir, direction, glyph)),
             None => self.glyphs.push((dir, direction, glyph)),
         }
+        // Past the caller's room the page is not read any further: a form that paints itself
+        // many times over would otherwise be drawn to the end before the count was looked at.
+        self.drawn_count += 1;
+        if self.drawn_count > self.glyph_room {
+            self.over_room = true;
+            if let Some(stop) = &self.stop {
+                stop.store(true, Ordering::Relaxed);
+            }
+        }
     }
     fn draw_image(&mut self, _: Image<'a, '_>, _: Affine) {}
     fn pop_clip_path(&mut self) {}
@@ -669,22 +690,64 @@ pub(crate) fn extract_page(pdf: &Pdf, page: usize, settings: &InterpreterSetting
 }
 
 pub(crate) fn extract_page_filtered(pdf: &Pdf, page: usize, settings: &InterpreterSettings, filter: TextFilter) -> Result<PageText, String> {
+    extract_page_limited(pdf, page, settings, filter, None).map_err(|stop| match stop {
+        PageStop::Failed(why) => why,
+        // No limits are set here, so neither can happen.
+        PageStop::TooManyGlyphs | PageStop::TooMuchWork => "the page stopped early".into(),
+    })
+}
+
+/// Why a page's text could not be read.
+pub(crate) enum PageStop {
+    Failed(String),
+    /// The page drew more glyphs than the room given.
+    TooManyGlyphs,
+    /// The page ran more content operators than the budget given.
+    TooMuchWork,
+}
+
+/// [`extract_page_filtered`] with a limit: at most `room` glyphs and `ops` content operators. The
+/// interpreter is stopped the moment either is passed, so a page that is small in the file but
+/// huge when drawn is turned away quickly. `ops` is left with what the page did not use.
+pub(crate) fn extract_page_limited(
+    pdf: &Pdf,
+    page: usize,
+    settings: &InterpreterSettings,
+    filter: TextFilter,
+    limits: Option<(usize, Arc<AtomicUsize>)>,
+) -> Result<PageText, PageStop> {
+    let fail = |why: &str| PageStop::Failed(why.to_string());
     let pages = pdf.pages();
-    let p = pages.get(page).ok_or("the page could not be read")?;
+    let p = pages.get(page).ok_or_else(|| fail("the page could not be read"))?;
     let (w, h) = p.render_dimensions();
     let cache = InterpreterCache::new();
     // Annotation appearances are included: form-field values and comment text are searchable,
     // as in Acrobat, and match what other extractors report.
-    let settings = settings.clone();
+    let mut settings = settings.clone();
+    let stop = limits.as_ref().map(|_| Arc::new(AtomicBool::new(false)));
+    if let Some((_, ops)) = &limits {
+        settings.cancelled = stop.clone();
+        settings.op_budget = Some(ops.clone());
+    }
     let initial = p.initial_transform(true).to_kurbo();
     let mut ctx = Context::new(initial, Rect::new(0.0, 0.0, w as f64, h as f64), &cache, p.xref(), settings);
     let mut dev = TextDevice::new();
     dev.filter = filter;
+    if let Some((room, _)) = &limits {
+        dev.glyph_room = *room;
+        dev.stop = stop;
+    }
     interpret_page(p, &mut ctx, &mut dev);
+    if dev.over_room {
+        return Err(PageStop::TooManyGlyphs);
+    }
+    if limits.as_ref().is_some_and(|(_, ops)| ops.load(Ordering::Relaxed) == 0) {
+        return Err(PageStop::TooMuchWork);
+    }
     // A replacement the content never closed ends with the page.
     dev.finish();
     if dev.partial_replacement {
-        return Err("a replacement text span mixes included and excluded content; disable the exclusions to count this page".into());
+        return Err(fail("a replacement text span mixes included and excluded content; disable the exclusions to count this page"));
     }
     let glyphs = dev.glyphs;
     // Text on a curved path: glyphs that each continue the previous one's line while the

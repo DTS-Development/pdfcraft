@@ -276,7 +276,8 @@ fn card(
     // Others' comments (and ones nobody owns) take replies only; the engine refuses the rest.
     let mine = allowed && doc.can_edit_comment(a.page, a.index);
     // A sign box takes no replies, statuses or marks (the server refuses them too).
-    let sign_box = doc.sign_box_at(a.page, a.index).is_some();
+    // Only a FreeText can be one, so the page tree is not walked for the other cards.
+    let sign_box = a.subtype == "FreeText" && doc.sign_box_at(a.page, a.index).is_some();
     let key = (a.page, a.index);
     let selected = view.comments.selected == Some(key);
     let color = a.color.map(|c| color32(c.map(f64::from))).unwrap_or(t.accent);

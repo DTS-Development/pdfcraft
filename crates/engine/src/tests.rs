@@ -6297,6 +6297,37 @@ mod ownership {
         }
     }
 
+    /// Other page edits can't get around the signature either: reordering, rotating, cropping,
+    /// copying, putting a page in front of it, redacting or sanitizing. The sealed comments are
+    /// compared before and after, so none of them has to be named.
+    #[test]
+    fn page_edits_cannot_get_around_a_signature() {
+        for actor in [Some("u-a"), None] {
+            let (mut s, id) = signed_page(actor);
+            refused(&mut s, id, Edit::ReversePages { pages: vec![0, 1] }, SIGNED);
+            refused(&mut s, id, Edit::RotatePages { pages: vec![0], degrees: 90 }, SIGNED);
+            refused(&mut s, id, Edit::SetPageBox { pages: vec![0], which: PageBox::Crop, spec: BoxSpec::Margins([10.0, 20.0, 30.0, 40.0]) }, SIGNED);
+            refused(&mut s, id, Edit::DuplicatePages { pages: vec![0], at: None }, SIGNED);
+            refused(&mut s, id, Edit::InsertBlankPage { at: 0, width: 200.0, height: 200.0 }, SIGNED);
+            refused(&mut s, id, Edit::Sanitize, SIGNED);
+            // Pages after the signed one, and the unsigned page's own rotation, are untouched.
+            s.apply(id, Edit::InsertBlankPage { at: 2, width: 200.0, height: 200.0 }).unwrap();
+            s.apply(id, Edit::RotatePages { pages: vec![1], degrees: 90 }).unwrap();
+        }
+    }
+
+    /// Without a signature the same edits run as before.
+    #[test]
+    fn page_edits_run_in_a_document_without_a_signature() {
+        let (mut s, id) = session_with(2);
+        s.apply(id, rect_at(0, 10.0)).unwrap();
+        s.apply(id, Edit::ReversePages { pages: vec![0, 1] }).unwrap();
+        s.apply(id, Edit::RotatePages { pages: vec![0], degrees: 90 }).unwrap();
+        s.apply(id, Edit::InsertBlankPage { at: 0, width: 200.0, height: 200.0 }).unwrap();
+        s.apply(id, Edit::DuplicatePages { pages: vec![0], at: None }).unwrap();
+        s.apply(id, Edit::Sanitize).unwrap();
+    }
+
     /// A signature stamp named like a Fill & Sign one would be baked in by Fill & Sign flattening; it is refused.
     #[test]
     fn fill_sign_flattening_keeps_a_signature_stamp() {

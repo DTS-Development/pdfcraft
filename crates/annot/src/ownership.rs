@@ -146,12 +146,16 @@ struct Seen {
 }
 
 fn scan(doc: &Document) -> Vec<Seen> {
+    scan_where(doc, is_protected)
+}
+
+fn scan_where(doc: &Document, keep: impl Fn(&Dict) -> bool) -> Vec<Seen> {
     let Ok(pages) = page_refs(doc) else { return Vec::new() };
     let mut out = Vec::new();
     for (page, p) in pages.iter().enumerate() {
         for entry in annots(doc, *p) {
             let Some(dict) = entry_dict(doc, &entry) else { continue };
-            if is_protected(&dict) {
+            if keep(&dict) {
                 out.push(Seen { page, obj: entry.as_ref(), dict });
             }
         }
@@ -299,23 +303,54 @@ pub fn foreign_snapshot(doc: &Document, actor: &str) -> Foreign {
 /// the answer for any edit that could drop, move or rewrite comments in bulk. It is as strict as
 /// the server's save check on purpose: an edit the server would refuse later must fail now.
 pub fn check_foreign_kept(doc: &Document, before: &Foreign) -> Result<(), AnnotError> {
+    kept(doc, before, scan(doc), false)
+}
+
+/// The sealed comments (signatures) as they are, whoever owns them and whether or not the
+/// session names an actor: what no edit may touch.
+pub fn sealed_snapshot(doc: &Document) -> Foreign {
+    let mut f = Foreign { by_ref: HashMap::new(), inline: Vec::new(), pages: HashMap::new() };
+    for s in scan_where(doc, |d| is_sealed(doc, d)) {
+        let e = essence(doc, &s.dict);
+        f.pages.entry(s.page).or_insert_with(|| page_geometry(doc, s.page));
+        match s.obj {
+            Some(r) => {
+                f.by_ref.insert(r, (s.page, e));
+            }
+            None => f.inline.push((s.page, e)),
+        }
+    }
+    f
+}
+
+/// Every sealed comment in `before` is still there, on the same page (same number), with the same
+/// fields and the same page geometry. A rotated, cropped, reordered or replaced signed page, or
+/// pages put in front of it, all fail here, so no list of page edits has to name them.
+pub fn check_sealed_kept(doc: &Document, before: &Foreign) -> Result<(), AnnotError> {
+    kept(doc, before, scan_where(doc, |d| is_sealed(doc, d)), true)
+}
+
+fn refusal(signed: bool) -> AnnotError {
+    if signed { AnnotError::SignedPage } else { AnnotError::ForeignPage }
+}
+
+fn kept(doc: &Document, before: &Foreign, now: Vec<Seen>, signed: bool) -> Result<(), AnnotError> {
     if before.pages.is_empty() {
         return Ok(());
     }
     if before.pages.iter().any(|(page, geometry)| page_geometry(doc, *page) != *geometry) {
-        return Err(AnnotError::ForeignPage);
+        return Err(refusal(signed));
     }
-    let now = scan(doc);
     let by_ref: HashMap<ObjRef, (usize, Essence)> = now.iter().filter_map(|s| s.obj.map(|r| (r, (s.page, essence(doc, &s.dict))))).collect();
     let mut inline: Vec<(usize, Essence)> = now.iter().filter(|s| s.obj.is_none()).map(|s| (s.page, essence(doc, &s.dict))).collect();
     for (r, was) in &before.by_ref {
         // A comment edited into an inline copy (or promoted to a reference) counts as changed.
         if !by_ref.get(r).is_some_and(|now| now.0 == was.0 && same(&now.1, &was.1)) {
-            return Err(AnnotError::ForeignPage);
+            return Err(refusal(signed));
         }
     }
     for was in &before.inline {
-        let Some(at) = inline.iter().position(|n| n.0 == was.0 && same(&n.1, &was.1)) else { return Err(AnnotError::ForeignPage) };
+        let Some(at) = inline.iter().position(|n| n.0 == was.0 && same(&n.1, &was.1)) else { return Err(refusal(signed)) };
         inline.swap_remove(at);
     }
     Ok(())

@@ -26,7 +26,7 @@ use hayro_syntax::MAX_DECODED_STREAM;
 use kurbo::{Affine, BezPath, Point, Shape};
 use smallvec::smallvec;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pub(crate) mod path;
 pub(crate) mod state;
@@ -137,6 +137,13 @@ pub struct InterpreterSettings {
     /// operator. What was drawn is then incomplete, so only set it when the output will be
     /// thrown away (a viewer's render whose result nobody can receive any more).
     pub cancelled: Option<Arc<AtomicBool>>,
+    /// PdfCraft patch: how many more content operators may run, counted across every form,
+    /// pattern and Type 3 glyph the content paints. Once it reaches 0 interpretation stops, as
+    /// with `cancelled`. Nesting depth alone doesn't bound the work (a form that paints its
+    /// child twice, 22 deep, is millions of paints from a few KB), so a caller that reads
+    /// untrusted files sets it; the caller reads what is left to tell a spent budget from a
+    /// finished page.
+    pub op_budget: Option<Arc<AtomicUsize>>,
     /// PdfCraft patch: a low-detail render for previews (page backdrops, thumbnails). Images
     /// that would cover only a few device pixels are skipped: redrawing them at full detail
     /// costs a decode and a resample each for pixels nobody can see. Never set it for a final
@@ -165,6 +172,7 @@ impl Default for InterpreterSettings {
             watermark: None,
             ocg_overrides: Arc::new(Vec::new()),
             cancelled: None,
+            op_budget: None,
             preview: false,
         }
     }
@@ -418,6 +426,14 @@ fn interpret_window<'a>(
         // PdfCraft patch: stop when the caller cancelled (see `InterpreterSettings::cancelled`).
         if context.settings.cancelled.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
             break;
+        }
+        // PdfCraft patch: one operator off the work budget; stop when none is left.
+        if let Some(budget) = &context.settings.op_budget {
+            let left = budget.load(Ordering::Relaxed);
+            if left == 0 {
+                break;
+            }
+            budget.store(left - 1, Ordering::Relaxed);
         }
         match op {
             TypedInstruction::SaveState(_) => context.save_state(),
@@ -999,7 +1015,8 @@ fn interpret_content<'a>(
             .settings
             .cancelled
             .as_ref()
-            .is_some_and(|c| c.load(Ordering::Relaxed));
+            .is_some_and(|c| c.load(Ordering::Relaxed))
+            || context.settings.op_budget.as_ref().is_some_and(|b| b.load(Ordering::Relaxed) == 0);
         if !needs_more || cancelled || exhausted {
             break;
         }
