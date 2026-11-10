@@ -38,6 +38,7 @@ pub(crate) fn check(doc: &pdfcraft_cos::Document, edit: &Edit, own: &Ownership) 
     match edit {
         Edit::DeletePages { pages } | Edit::MovePages { pages, .. } => owner::check_pages_unsigned(doc, pages)?,
         Edit::Flatten { comments: true, .. } => owner::check_all_pages_unsigned(doc)?,
+        Edit::FlattenFillSign => owner::check_fill_sign_unsigned(doc)?,
         _ => {}
     }
     let Some(actor) = own.actor.as_deref() else { return Ok(()) };

@@ -6297,6 +6297,18 @@ mod ownership {
         }
     }
 
+    /// A signature stamp named like a Fill & Sign one would be baked in by Fill & Sign flattening; it is refused.
+    #[test]
+    fn fill_sign_flattening_keeps_a_signature_stamp() {
+        let (mut s, id) = session_with(1);
+        let add = Edit::AddSignBox { page: 0, rect: [20.0, 200.0, 100.0, 240.0], role: "reviewer".into(), signer: None, label: "sign".into(), author: "Ada".into() };
+        s.apply(id, add).unwrap();
+        let file = MarkFile { name: "q.png".into(), bytes: quadrant_png(), page: 0 };
+        let sign = Edit::SignInBox { page: 0, index: 0, rect: [20.0, 200.0, 100.0, 240.0], name: "Signature".into(), file, author: "Ada".into(), meta: PPM_JSON.into() };
+        s.apply(id, sign).unwrap();
+        refused(&mut s, id, Edit::FlattenFillSign, SIGNED);
+    }
+
     #[test]
     fn every_creation_path_marks_the_owner_and_names_the_comment() {
         let (mut s, id) = session_with(2);

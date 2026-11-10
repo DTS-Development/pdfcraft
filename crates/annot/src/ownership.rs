@@ -111,6 +111,21 @@ pub fn check_pages_unsigned(doc: &Document, pages: &[usize]) -> Result<(), Annot
     Ok(())
 }
 
+/// Is there a sealed comment that Fill & Sign flattening would bake in (a signature stamp named
+/// like a Fill & Sign one: `PCCustomSignature`)? Flattening removes the annotation and with it the
+/// signature's stamp meta, so it is refused like the other page changes.
+pub fn check_fill_sign_unsigned(doc: &Document) -> Result<(), AnnotError> {
+    for p in page_refs(doc)? {
+        for d in annots(doc, p).iter().filter_map(|e| entry_dict(doc, e)) {
+            let hidden = annotation_flags(doc, &d) & (FLAG_HIDDEN | FLAG_NO_VIEW) != 0;
+            if !hidden && is_sealed(doc, &d) && is_fill_sign(doc, &d) {
+                return Err(AnnotError::SignedPage);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// [`check_pages_unsigned`] for every page.
 pub fn check_all_pages_unsigned(doc: &Document) -> Result<(), AnnotError> {
     let n = page_refs(doc)?.len();
