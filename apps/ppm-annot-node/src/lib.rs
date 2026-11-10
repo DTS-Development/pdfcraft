@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use pdfcraft_cos::{Document, SaveOptions, write_full};
 use pdfcraft_edit::{EditError, flatten_export};
-use pdfcraft_render::{ExtractError, OpenError, PageText, extract_pages};
+use pdfcraft_render::{ExtractError, OpenError, PageText, extract_pages_each};
 use pdfcraft_xfdf::{ExportRequest, RemoteItem, apply_remote, export_positions, list_annotations, strip_positions};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -279,23 +279,32 @@ pub fn extract_text_json(pdf: Vec<u8>, options: &str) -> Result<String, String> 
         return Err("bad extract options: pages are numbered from 1".into());
     }
     let pages: Option<Vec<usize>> = opts.pages.as_ref().map(|p| p.iter().map(|&n| page0(n)).collect());
-    let extracted = extract_pages(Arc::new(pdf), None, pages.as_deref(), opts.max_glyphs.unwrap_or(DEFAULT_MAX_GLYPHS)).map_err(|e| match e {
-        ExtractError::Open(OpenError::NeedsPassword) => "the PDF is password-protected".to_string(),
-        ExtractError::Open(e) => format!("the PDF can't be opened: {e}"),
-        other => other.to_string(),
-    })?;
-    let out: Vec<PageTextOut> = extracted
-        .iter()
-        .map(|p| PageTextOut {
+    // Each page becomes its JSON right away and its text is dropped, so the peak is the output
+    // plus one page instead of every page's glyphs and a second copy of them.
+    let mut json = b"[".to_vec();
+    let mut first = true;
+    extract_pages_each(Arc::new(pdf), None, pages.as_deref(), opts.max_glyphs.unwrap_or(DEFAULT_MAX_GLYPHS), |p| {
+        let out = PageTextOut {
             page: p.index + 1,
             width: p.info.width,
             height: p.info.height,
             rotation: p.info.rotation,
             crop_box: p.info.crop,
             lines: lines_of(&p.text, words, glyphs),
-        })
-        .collect();
-    serde_json::to_string(&out).map_err(|e| e.to_string())
+        };
+        if !first {
+            json.push(b',');
+        }
+        first = false;
+        serde_json::to_writer(&mut json, &out).map_err(|e| ExtractError::Page(p.index + 1, e.to_string()))
+    })
+    .map_err(|e| match e {
+        ExtractError::Open(OpenError::NeedsPassword) => "the PDF is password-protected".to_string(),
+        ExtractError::Open(e) => format!("the PDF can't be opened: {e}"),
+        other => other.to_string(),
+    })?;
+    json.push(b']');
+    String::from_utf8(json).map_err(|e| e.to_string())
 }
 
 #[wasm_bindgen]

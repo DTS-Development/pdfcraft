@@ -72,11 +72,13 @@ impl Drop for DecodedContent<'_> {
 /// [`MAX_PAGE_CONTENT`]. `None` once the budget is spent (the content is skipped).
 pub(crate) fn decode_content<'a>(stream: &Stream<'a>) -> Option<DecodedContent<'a>> {
     let left = CONTENT_LEFT.with(core::cell::Cell::get);
-    if left == 0 {
+    let bytes_left = hayro_syntax::content_byte_budget_left();
+    if left == 0 || bytes_left == Some(0) {
         CONTENT_TRUNCATED.with(|truncated| truncated.set(true));
         warn!("page content budget exceeded");
         return None;
     }
+    // (The decode itself takes its cost off the caller's byte limit, see `hayro_syntax::budget`.)
     let data = stream.decoded_within(left).ok()?;
     let held = match &data {
         Cow::Owned(v) => v.len(),

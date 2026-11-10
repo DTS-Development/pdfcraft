@@ -9,13 +9,14 @@
 use std::collections::BTreeSet;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use hayro::hayro_interpret::InterpreterSettings;
+use hayro::hayro_interpret::{InterpreterSettings, content_byte_budget_left, set_content_byte_budget};
 use hayro::hayro_syntax::page::Rotation;
 use hayro::hayro_syntax::{DecryptionError, LoadPdfError, Pdf};
 
 use crate::raster::panic_message;
-use crate::text::{PageText, extract_page_filtered};
+use crate::text::{PageStop, PageText, extract_page_limited};
 use crate::{OpenError, PageInfo};
 
 /// The text of one page and where the page sits.
@@ -39,18 +40,89 @@ pub enum ExtractError {
     Page(usize, String),
     #[error("the text has more than {0} glyphs")]
     TooManyGlyphs(usize),
+    /// The page ran more content operators, or read more content bytes, than one page may.
+    #[error("page {0} needs more work to read than a page may take")]
+    TooMuchWork(usize),
+    /// The pages together passed what one call may do; the number is the page it stopped on.
+    #[error("the document needs more work to read than one call may do (the limit was passed on page {0})")]
+    TooMuchWorkInCall(usize),
 }
+
+/// Content operators one page may run; every page starts with the whole allowance, so a long
+/// document of dense pages is not refused for its length and the error names the page that went
+/// over. An ordinary page runs a few hundred to a few hundred thousand; a large drawing or map
+/// page a few million (a path is 3 to 5 operators), so 10 million leaves such a page room. A page
+/// of 10 million operators takes about a second to turn away, and a file's cost is bounded by its
+/// page count times that.
+const PAGE_OPS: usize = 10_000_000;
+/// Content operators all the pages of one call may run together. Pages that share one heavy
+/// content stream each stay under [`PAGE_OPS`], so hundreds of them filled just below it would
+/// still hold the caller for minutes; 200 million is some twenty full pages, far more than a
+/// document of large drawings needs, and a few tens of seconds of work at most. The page that
+/// passes it is the one named.
+const CALL_OPS: usize = 100_000_000;
+/// Content bytes (inflated or read from the file) one page, and a whole call, may decode and scan.
+/// A form painted over and over is decoded each time, so its size counts each time; the operator
+/// count alone wouldn't see it (a 1 MB blank form painted 50,000 times is a few operators).
+/// Reading 1 GB takes about a second.
+const PAGE_BYTES: usize = 256 << 20;
+const CALL_BYTES: usize = 1 << 30;
+
+/// The work one extraction may do: operators and content bytes, per page and per call.
+#[derive(Clone, Copy)]
+struct Limits {
+    page_ops: usize,
+    call_ops: usize,
+    page_bytes: usize,
+    call_bytes: usize,
+}
+
+const LIMITS: Limits = Limits { page_ops: PAGE_OPS, call_ops: CALL_OPS, page_bytes: PAGE_BYTES, call_bytes: CALL_BYTES };
 
 /// Extract the text of `pages` (0-based indices; `None` is every page), in ascending page order
 /// without duplicates. `max_glyphs` bounds the glyphs of all the returned pages together: the
 /// call fails instead of returning a truncated text. A password-protected document fails with
 /// [`OpenError::NeedsPassword`] (or [`OpenError::WrongPassword`] when `password` is wrong).
+///
+/// Every page is kept until the end; [`extract_pages_each`] hands pages over one by one instead.
 pub fn extract_pages(
     bytes: Arc<Vec<u8>>,
     password: Option<&str>,
     pages: Option<&[usize]>,
     max_glyphs: usize,
 ) -> Result<Vec<ExtractedPage>, ExtractError> {
+    let mut out = Vec::new();
+    extract_pages_each(bytes, password, pages, max_glyphs, |page| {
+        out.push(page);
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+/// [`extract_pages`] that gives each page to `each` as soon as it is read, so only one page's text
+/// is alive at a time: the caller turns it into its output and drops it. An error from `each`
+/// ends the call. `max_glyphs` and the work limit are checked while a page is being read, not
+/// after: the page that passes either is stopped at once with [`ExtractError::TooManyGlyphs`] or
+/// [`ExtractError::TooMuchWork`].
+pub fn extract_pages_each(
+    bytes: Arc<Vec<u8>>,
+    password: Option<&str>,
+    pages: Option<&[usize]>,
+    max_glyphs: usize,
+    each: impl FnMut(ExtractedPage) -> Result<(), ExtractError>,
+) -> Result<(), ExtractError> {
+    extract_pages_limited(bytes, password, pages, max_glyphs, LIMITS, each)
+}
+
+/// [`extract_pages_each`] with the work limits given.
+fn extract_pages_limited(
+    bytes: Arc<Vec<u8>>,
+    password: Option<&str>,
+    pages: Option<&[usize]>,
+    max_glyphs: usize,
+    limits: Limits,
+    mut each: impl FnMut(ExtractedPage) -> Result<(), ExtractError>,
+) -> Result<(), ExtractError> {
     let pdf = catch_unwind(AssertUnwindSafe(|| Pdf::new_with_password(bytes, password.unwrap_or(""))))
         .map_err(|p| OpenError::Invalid(format!("the parser crashed: {}", panic_message(&p))))?
         .map_err(|e| match e {
@@ -69,23 +141,45 @@ pub fn extract_pages(
         return Err(ExtractError::NoSuchPage(bad.saturating_add(1), count));
     }
     let settings = InterpreterSettings::default();
-    let mut out = Vec::with_capacity(wanted.len());
     let mut glyphs = 0usize;
+    let mut ops_left = limits.call_ops;
+    let mut bytes_left = limits.call_bytes;
     for index in wanted {
+        // The page may use what is left of the glyph room, and its own work allowance or what is
+        // left of the call's, whichever is less.
+        let allowed = limits.page_ops.min(ops_left);
+        let allowed_bytes = limits.page_bytes.min(bytes_left);
+        let call_limited = allowed < limits.page_ops || allowed_bytes < limits.page_bytes;
+        let ops = Arc::new(AtomicUsize::new(allowed));
+        set_content_byte_budget(Some(allowed_bytes));
         // The interpreter can panic on a damaged page: report it as that page's error.
         let done = catch_unwind(AssertUnwindSafe(|| {
             let info = page_info(&pdf, index);
-            extract_page_filtered(&pdf, index, &settings, Default::default()).map(|text| (info, text))
-        }))
-        .map_err(|p| ExtractError::Page(index + 1, panic_message(&p)))?;
-        let (info, text) = done.map_err(|why| ExtractError::Page(index + 1, why))?;
+            extract_page_limited(&pdf, index, &settings, Default::default(), Some((max_glyphs - glyphs, ops.clone()))).map(|text| (info, text))
+        }));
+        // The limit lives on this thread: lift it whatever happened.
+        let bytes_now = content_byte_budget_left().unwrap_or(0);
+        set_content_byte_budget(None);
+        let done = done.map_err(|p| ExtractError::Page(index + 1, panic_message(&p)))?;
+        let work = |page: usize| if call_limited { ExtractError::TooMuchWorkInCall(page) } else { ExtractError::TooMuchWork(page) };
+        // A page that ran out of bytes was read without the content it couldn't decode.
+        if bytes_now == 0 {
+            return Err(work(index + 1));
+        }
+        let (info, text) = done.map_err(|stop| match stop {
+            PageStop::Failed(why) => ExtractError::Page(index + 1, why),
+            PageStop::TooManyGlyphs => ExtractError::TooManyGlyphs(max_glyphs),
+            PageStop::TooMuchWork => work(index + 1),
+        })?;
+        ops_left -= allowed - ops.load(Ordering::Relaxed);
+        bytes_left -= allowed_bytes - bytes_now;
         glyphs = glyphs.saturating_add(text.glyphs.len());
         if glyphs > max_glyphs {
             return Err(ExtractError::TooManyGlyphs(max_glyphs));
         }
-        out.push(ExtractedPage { index, info, text });
+        each(ExtractedPage { index, info, text })?;
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Geometry of page `index`, as [`crate::inspect`] reports it (a degenerate size gets a letter-size
@@ -206,5 +300,278 @@ mod tests {
         assert!(matches!(extract_pages(bytes.clone(), None, Some(&[1]), usize::MAX), Err(ExtractError::NoSuchPage(2, 1))));
         assert!(matches!(extract_pages(bytes, None, None, 3), Err(ExtractError::TooManyGlyphs(3))));
         assert!(matches!(extract_pages(Arc::new(b"nope".to_vec()), None, None, 10), Err(ExtractError::Open(_))));
+    }
+
+    /// A page of `depth` nested forms, each painting the next one twice (the second time moved a
+    /// little, so the copies don't overlap): a few KB that draw 2^depth times. The innermost form
+    /// shows "A".
+    fn nested(depth: usize) -> Arc<Vec<u8>> {
+        let mut doc = Document::with_version("1.7");
+        let font = doc.add_object(dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" });
+        let mut child = None;
+        for level in (0..=depth).rev() {
+            let (body, resources) = match child {
+                None => ("BT /F1 10 Tf 10 10 Td (A) Tj ET".to_string(), dictionary! {"Font" => dictionary! {"F1" => font}}),
+                Some(c) => {
+                    let shift = 0.3 * f64::from(1u32 << (level / 2));
+                    let cm = if level % 2 == 0 { format!("{shift:.4} 0") } else { format!("0 {shift:.4}") };
+                    (format!("/C Do q 1 0 0 1 {cm} cm /C Do Q"), dictionary! {"XObject" => dictionary! {"C" => c}, "Font" => dictionary! {"F1" => font}})
+                }
+            };
+            let form = Stream::new(
+                dictionary! {"Type" => "XObject", "Subtype" => "Form", "BBox" => ints([0, 0, 400, 400]), "Resources" => resources},
+                body.into_bytes(),
+            );
+            child = Some(doc.add_object(form));
+        }
+        let content = doc.add_object(Stream::new(dictionary! {}, b"/X0 Do".to_vec()));
+        let pages = doc.new_object_id();
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "MediaBox" => ints([0, 0, 400, 400]), "Contents" => content,
+            "Resources" => dictionary! {"XObject" => dictionary! {"X0" => child.unwrap()}, "Font" => dictionary! {"F1" => font}}
+        });
+        doc.objects.insert(pages, dictionary! {"Type" => "Pages", "Kids" => vec![Object::Reference(page)], "Count" => 1}.into());
+        let catalog = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => pages});
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        Arc::new(bytes)
+    }
+
+    /// 2^22 glyphs from a 5 KB file: the page is stopped as soon as the room is used up, not after
+    /// the interpreter has drawn them all (35 s before the check moved into the interpreter).
+    #[test]
+    fn a_page_that_paints_glyphs_without_end_is_stopped_at_the_limit() {
+        let bytes = nested(22);
+        let t = std::time::Instant::now();
+        let r = extract_pages(bytes, None, None, 1000);
+        assert!(matches!(r, Err(ExtractError::TooManyGlyphs(1000))), "{r:?}");
+        assert!(t.elapsed().as_secs_f32() < 1.0, "took {:?}", t.elapsed());
+    }
+
+    /// Work that isn't glyphs (and isn't nested paints, which have their own limit): a content
+    /// stream of millions of operators, which a small compressed file can inflate to.
+    #[test]
+    fn a_page_with_millions_of_operators_is_stopped_by_the_work_limit() {
+        let bytes = pdf([0, 0, 400, 200], vec![], &"q\nQ\n".repeat(6_000_000));
+        let t = std::time::Instant::now();
+        let r = extract_pages(bytes, None, None, usize::MAX);
+        assert!(matches!(r, Err(ExtractError::TooMuchWork(1))), "{r:?}");
+        assert!(t.elapsed().as_secs_f32() < 5.0, "took {:?}", t.elapsed());
+    }
+
+    /// The allowance is per page: pages that each use most of it are all read, and a page over it
+    /// is the one named, whatever the pages before it used.
+    #[test]
+    fn the_work_limit_is_per_page_and_names_the_page() {
+        let heavy = "q\nQ\n".repeat(4_000_000); // 8 million operators, under the limit
+        let over = "q\nQ\n".repeat(6_000_000);
+        let two = |a: &str, b: &str| {
+            let mut doc = Document::with_version("1.7");
+            let pages = doc.new_object_id();
+            let kids: Vec<Object> = [a, b]
+                .iter()
+                .map(|ops| {
+                    let content = doc.add_object(Stream::new(dictionary! {}, ops.as_bytes().to_vec()));
+                    Object::Reference(doc.add_object(dictionary! {"Type" => "Page", "Parent" => pages, "MediaBox" => ints([0, 0, 100, 100]), "Contents" => content}))
+                })
+                .collect();
+            doc.objects.insert(pages, dictionary! {"Type" => "Pages", "Kids" => kids, "Count" => 2}.into());
+            let catalog = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => pages});
+            doc.trailer.set("Root", catalog);
+            let mut bytes = Vec::new();
+            doc.save_to(&mut bytes).unwrap();
+            Arc::new(bytes)
+        };
+        assert_eq!(extract_pages(two(&heavy, &heavy), None, None, usize::MAX).unwrap().len(), 2);
+        let r = extract_pages(two(&heavy, &over), None, None, usize::MAX);
+        assert!(matches!(r, Err(ExtractError::TooMuchWork(2))), "{r:?}");
+    }
+
+    /// The call's total is limited apart from each page's: pages that are each under their own
+    /// allowance stop at the page where the total runs out.
+    #[test]
+    fn the_work_limit_of_a_call_names_the_page_that_passes_it() {
+        let ops = "q\nQ\n".repeat(100); // 200 operators a page
+        let mut doc = Document::with_version("1.7");
+        let pages = doc.new_object_id();
+        let content = doc.add_object(Stream::new(dictionary! {}, ops.as_bytes().to_vec()));
+        let kids: Vec<Object> = (0..10)
+            .map(|_| Object::Reference(doc.add_object(dictionary! {"Type" => "Page", "Parent" => pages, "MediaBox" => ints([0, 0, 100, 100]), "Contents" => content})))
+            .collect();
+        doc.objects.insert(pages, dictionary! {"Type" => "Pages", "Kids" => kids, "Count" => 10}.into());
+        let catalog = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => pages});
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        let bytes = Arc::new(bytes);
+        // 1100 operators for the call: five pages fit, the sixth has 100 left and passes them.
+        let mut read = 0;
+        let r = extract_pages_limited(bytes.clone(), None, None, usize::MAX, Limits { page_ops: 500, call_ops: 1100, ..LIMITS }, |_| {
+            read += 1;
+            Ok(())
+        });
+        assert!(matches!(r, Err(ExtractError::TooMuchWorkInCall(6))), "{r:?}");
+        assert_eq!(read, 5);
+        assert!(extract_pages_limited(bytes, None, None, usize::MAX, Limits { page_ops: 500, call_ops: 2100, ..LIMITS }, |_| Ok(())).is_ok());
+    }
+
+    /// A page that paints a 1 MB blank form 50,000 times is a few operators but 50 GB of bytes
+    /// to decode and scan: the byte limit stops it within a second (42 s before).
+    #[test]
+    fn a_form_painted_again_and_again_is_stopped_by_the_byte_limit() {
+        let mut doc = Document::with_version("1.7");
+        let mut blank = vec![b' '; 1 << 20];
+        blank.push(b'n');
+        let form = doc.add_object(Stream::new(dictionary! {"Type" => "XObject", "Subtype" => "Form", "BBox" => ints([0, 0, 10, 10])}, blank));
+        let content = doc.add_object(Stream::new(dictionary! {}, "/X Do\n".repeat(50_000).into_bytes()));
+        let pages = doc.new_object_id();
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "MediaBox" => ints([0, 0, 100, 100]), "Contents" => content,
+            "Resources" => dictionary! {"XObject" => dictionary! {"X" => form}}
+        });
+        doc.objects.insert(pages, dictionary! {"Type" => "Pages", "Kids" => vec![Object::Reference(page)], "Count" => 1}.into());
+        let catalog = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => pages});
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        let t = std::time::Instant::now();
+        let r = extract_pages(Arc::new(bytes), None, None, usize::MAX);
+        assert!(matches!(r, Err(ExtractError::TooMuchWork(1))), "{r:?}");
+        assert!(t.elapsed().as_secs_f32() < 1.0, "took {:?}", t.elapsed());
+        // The limit is lifted afterwards: the thread reads without one again.
+        assert_eq!(hayro::hayro_interpret::content_byte_budget_left(), None);
+    }
+
+    /// A page that paints one shading 10,000 times (`sh`), whose data is a 1 MB stream, is a 2 KB
+    /// file and 10 GB of decoding: the byte limit sits where every stream is decoded, so shading
+    /// and function streams are stopped like forms (30 s before).
+    #[test]
+    fn shading_and_function_streams_count_against_the_byte_limit() {
+        let nums = |v: &[i64]| Object::Array(v.iter().map(|n| Object::Integer(*n)).collect());
+        let flate = |dict: lopdf::Dictionary, data: Vec<u8>| {
+            let mut s = Stream::new(dict, data);
+            s.compress().unwrap();
+            s
+        };
+        for kind in ["mesh", "sampled", "postscript", "transfer"] {
+            let mut doc = Document::with_version("1.7");
+            let shading = match kind {
+                "mesh" => doc.add_object(flate(
+                    dictionary! {"ShadingType" => 4, "ColorSpace" => "DeviceGray", "BitsPerCoordinate" => 32,
+                        "BitsPerComponent" => 16, "BitsPerFlag" => 8, "Decode" => nums(&[0, 1, 0, 1, 0, 1])},
+                    vec![0u8; 1 << 20],
+                )),
+                _ => {
+                    let function = if kind == "sampled" || kind == "transfer" {
+                        flate(dictionary! {"FunctionType" => 0, "Domain" => nums(&[0, 1]), "Range" => nums(&[0, 1]),
+                            "Size" => nums(&[1 << 20]), "BitsPerSample" => 8}, vec![0u8; 1 << 20])
+                    } else {
+                        let mut program = vec![b' '; 1 << 20];
+                        program.insert(0, b'{');
+                        program.push(b'}');
+                        flate(dictionary! {"FunctionType" => 4, "Domain" => nums(&[0, 1]), "Range" => nums(&[0, 1])}, program)
+                    };
+                    let function = doc.add_object(function);
+                    if kind == "transfer" {
+                        // Not a shading: the same function stream, reached from `gs /TR`.
+                        function
+                    } else {
+                    doc.add_object(dictionary! {"ShadingType" => 2, "ColorSpace" => "DeviceGray",
+                        "Coords" => ints([0, 0, 1, 1]), "Function" => function})
+                    }
+                }
+            };
+            let content = doc.add_object(Stream::new(dictionary! {}, (if kind == "transfer" { "/S gs\n" } else { "/S sh\n" }).repeat(10_000).into_bytes()));
+            let pages = doc.new_object_id();
+            let page = doc.add_object(dictionary! {
+                "Type" => "Page", "Parent" => pages, "MediaBox" => ints([0, 0, 100, 100]), "Contents" => content,
+                "Resources" => if kind == "transfer" {
+                    dictionary! {"ExtGState" => dictionary! {"S" => dictionary! {"TR" => shading}}}
+                } else {
+                    dictionary! {"Shading" => dictionary! {"S" => shading}}
+                }
+            });
+            doc.objects.insert(pages, dictionary! {"Type" => "Pages", "Kids" => vec![Object::Reference(page)], "Count" => 1}.into());
+            let catalog = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => pages});
+            doc.trailer.set("Root", catalog);
+            let mut bytes = Vec::new();
+            doc.save_to(&mut bytes).unwrap();
+            let t = std::time::Instant::now();
+            let r = extract_pages(Arc::new(bytes), None, None, usize::MAX);
+            assert!(matches!(r, Err(ExtractError::TooMuchWork(1))), "{kind}: {r:?}");
+            // The mesh costs more than its bytes (it is also turned into triangles): 0.8 s alone,
+            // about 1.3 s with the other tests running; 30 s before.
+            assert!(t.elapsed().as_secs_f32() < 3.0, "{kind} took {:?}", t.elapsed());
+            assert_eq!(hayro::hayro_interpret::content_byte_budget_left(), None);
+        }
+    }
+
+    /// A damaged encoded stream among good ones costs only its own size: the document is
+    /// still read, and only the damaged stream is left out.
+    #[test]
+    fn a_damaged_stream_does_not_use_up_the_byte_limit() {
+        let mut doc = Document::with_version("1.7");
+        let mut bad = Stream::new(dictionary! {"Type" => "XObject", "Subtype" => "Form", "BBox" => ints([0, 0, 10, 10]), "Filter" => "ASCIIHexDecode"}, b"zz not hex data".to_vec());
+        bad.allows_compression = false;
+        let bad = doc.add_object(bad);
+        let good = doc.add_object(Stream::new(dictionary! {"Type" => "XObject", "Subtype" => "Form", "BBox" => ints([0, 0, 10, 10])}, b"q Q".to_vec()));
+        let content = doc.add_object(Stream::new(dictionary! {}, "/B Do /G Do\n".repeat(200).into_bytes()));
+        let pages = doc.new_object_id();
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "MediaBox" => ints([0, 0, 100, 100]), "Contents" => content,
+            "Resources" => dictionary! {"XObject" => dictionary! {"B" => bad, "G" => good}}
+        });
+        doc.objects.insert(pages, dictionary! {"Type" => "Pages", "Kids" => vec![Object::Reference(page)], "Count" => 1}.into());
+        let catalog = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => pages});
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        let r = extract_pages(Arc::new(bytes), None, None, usize::MAX);
+        assert!(r.is_ok(), "{r:?}");
+    }
+
+    /// Many pages sharing one content stream: each is under its own allowance, the call's bytes
+    /// run out, and the page it ran out on is named.
+    #[test]
+    fn the_byte_limit_of_a_call_names_the_page_that_passes_it() {
+        let mut doc = Document::with_version("1.7");
+        let pages = doc.new_object_id();
+        let content = doc.add_object(Stream::new(dictionary! {}, " ".repeat(10_000).into_bytes()));
+        let kids: Vec<Object> = (0..500)
+            .map(|_| Object::Reference(doc.add_object(dictionary! {"Type" => "Page", "Parent" => pages, "MediaBox" => ints([0, 0, 100, 100]), "Contents" => content})))
+            .collect();
+        doc.objects.insert(pages, dictionary! {"Type" => "Pages", "Kids" => kids, "Count" => 500}.into());
+        let catalog = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => pages});
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        let mut read = 0;
+        let r = extract_pages_limited(Arc::new(bytes), None, None, usize::MAX, Limits { call_bytes: 55_000, ..LIMITS }, |_| {
+            read += 1;
+            Ok(())
+        });
+        assert!(matches!(r, Err(ExtractError::TooMuchWorkInCall(6))), "{r:?}");
+        assert_eq!(read, 5);
+    }
+
+    /// An ordinary page is not mistaken for either.
+    #[test]
+    fn a_shallow_nesting_is_read_in_full() {
+        let p = extract_pages(nested(3), None, None, 100).unwrap().remove(0);
+        assert!(!p.text.glyphs.is_empty() && p.text.glyphs.len() <= 8, "{}", p.text.glyphs.len());
+    }
+
+    /// Each page is handed over as soon as it is read.
+    #[test]
+    fn pages_are_handed_over_one_at_a_time() {
+        let bytes = pdf([0, 0, 400, 200], vec![], HELLO);
+        let mut seen = Vec::new();
+        extract_pages_each(bytes, None, None, usize::MAX, |p| {
+            seen.push(p.index);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(seen, vec![0]);
     }
 }

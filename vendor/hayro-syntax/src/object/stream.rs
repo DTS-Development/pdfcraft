@@ -230,6 +230,36 @@ impl<'a> Stream<'a> {
         image_params: &ImageDecodeParams,
         max: usize,
     ) -> Result<FilterResult<'a>, DecodeFailure> {
+        // PdfCraft patch: the common point of every stream decode takes its cost off the
+        // caller's byte limit (see `crate::budget`), and never lets one decode pass what is left.
+        let left = crate::budget::content_byte_budget_left();
+        if left == Some(0) {
+            return Err(DecodeFailure::StreamDecode);
+        }
+        let max = left.map_or(max, |l| max.min(l));
+        let raw_len = data.len();
+        match self.decode_filters(data, image_params, max) {
+            Ok(result) => {
+                crate::budget::spend_content_bytes(result.data.len());
+                Ok(result)
+            }
+            Err(e) => {
+                // A decode that reaches its cap returns what it has (and is charged for it above),
+                // so a failure is a damaged stream: it costs the bytes it was given, at least one,
+                // so that failing again and again can't be had for free, and one damaged stream
+                // doesn't use up the document's whole allowance.
+                crate::budget::spend_content_bytes(raw_len.max(1).min(max));
+                Err(e)
+            }
+        }
+    }
+
+    fn decode_filters(
+        &self,
+        data: Cow<'a, [u8]>,
+        image_params: &ImageDecodeParams,
+        max: usize,
+    ) -> Result<FilterResult<'a>, DecodeFailure> {
         let filters_and_params = self.filters_and_params();
         let count = filters_and_params.filters.len();
 

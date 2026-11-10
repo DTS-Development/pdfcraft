@@ -86,6 +86,8 @@ pub(crate) mod math;
 pub(crate) mod sync;
 
 mod data;
+mod budget;
+pub use budget::{content_byte_budget_left, set_content_byte_budget, spend_content_bytes};
 pub(crate) mod filter;
 pub(crate) mod pdf;
 pub(crate) mod trivia;

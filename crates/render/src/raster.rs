@@ -467,6 +467,8 @@ impl PageRenderer {
 
     /// Render one page. Never panics.
     pub fn render(&mut self, req: RenderRequest) -> RenderedPage {
+        // The stream byte limit is for text extraction only: rendering never runs under one.
+        hayro::hayro_interpret::set_content_byte_budget(None);
         let start = Stopwatch::start();
         if self.pdf.is_some() {
             self.stats.render_requests += 1;

@@ -2540,7 +2540,16 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
 /// gone, moved or different afterwards, whatever the edit was (page operations, flattening,
 /// redaction, sanitizing…). The server holds a saved file to the same rule.
 fn run_edit_checked(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> Result<(), EditError> {
-    let Some(actor) = cx.ownership.actor.clone() else { return run_edit(doc, edit, cx) };
+    // A signature is final whoever asks and whether or not an actor is named: comparing the
+    // sealed comments before and after catches every edit that moves, drops, rewrites or
+    // re-pages one (reversing or rotating the pages, cropping one, replacing it, putting pages
+    // in front of it, redacting or sanitizing), without naming those edits one by one.
+    let sealed = pdfcraft_annot::ownership::sealed_snapshot(doc);
+    let Some(actor) = cx.ownership.actor.clone() else {
+        run_edit(doc, edit, cx)?;
+        pdfcraft_annot::ownership::check_sealed_kept(doc, &sealed)?;
+        return Ok(());
+    };
     let mut others = pdfcraft_annot::ownership::foreign_snapshot(doc, &actor);
     // Signing in takes the sign box away, whoever placed it.
     if let Edit::SignInBox { page, index, .. } = edit {
@@ -2548,6 +2557,7 @@ fn run_edit_checked(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut Edit
     }
     run_edit(doc, edit, cx)?;
     pdfcraft_annot::ownership::check_foreign_kept(doc, &others)?;
+    pdfcraft_annot::ownership::check_sealed_kept(doc, &sealed)?;
     Ok(())
 }
 

@@ -36,7 +36,9 @@ pub(crate) fn check(doc: &pdfcraft_cos::Document, edit: &Edit, own: &Ownership) 
     }
     // A page with a signature stays as it is, whoever asks and whether or not an actor is named.
     match edit {
-        Edit::DeletePages { pages } | Edit::MovePages { pages, .. } => owner::check_pages_unsigned(doc, pages)?,
+        // (Every other edit is held to the same by comparing the sealed comments around it, see
+        // `run_edit_checked`; a copy of a signed page adds a signature the original isn't.)
+        Edit::DeletePages { pages } | Edit::MovePages { pages, .. } | Edit::DuplicatePages { pages, .. } => owner::check_pages_unsigned(doc, pages)?,
         Edit::Flatten { comments: true, .. } => owner::check_all_pages_unsigned(doc)?,
         Edit::FlattenFillSign => owner::check_fill_sign_unsigned(doc)?,
         _ => {}

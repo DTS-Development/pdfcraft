@@ -17,7 +17,7 @@ mod structure;
 pub mod text;
 pub mod transition;
 
-pub use extract::{ExtractError, ExtractedPage, extract_pages};
+pub use extract::{ExtractError, ExtractedPage, extract_pages, extract_pages_each};
 pub use hayro::hayro_interpret::ScreenWatermark;
 pub use inspect::{
     Annotation, Attachment, AttachmentSource, DestView, DocInfo, Field, FieldKind, FontInfo, Layer, LayerOp, Link, LinkTarget, OutlineItem, PageInfo,
