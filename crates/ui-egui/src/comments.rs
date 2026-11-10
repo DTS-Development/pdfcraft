@@ -1635,8 +1635,8 @@ pub(crate) fn context_menu(
             let (page, index) = (a.page, a.index);
             // Others' comments (and ones nobody owns) take replies only; the engine refuses the rest.
             let mine = allowed && doc.can_edit_comment(page, index);
-            // A sign box takes no replies, statuses or marks (the server refuses them too).
-            let sign_box = doc.sign_box_at(page, index).is_some();
+            // A sign box or a signature takes no replies, statuses or marks (the server refuses them too).
+            let sign_box = doc.takes_no_reply(page, index);
             attachment_items(ui, view, info, a);
             if ui.add_enabled(mine, egui::Button::new(tl!("Edit text…"))).clicked() {
                 view.comments.composer = Some(Composer {

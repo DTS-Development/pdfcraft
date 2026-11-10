@@ -1887,12 +1887,42 @@ pub fn is_sign_box(d: &Dict) -> bool {
     d.name(b"Subtype") == Some(b"FreeText") && d.get(SIGN_ROLE_KEY.as_bytes()).is_some()
 }
 
-/// Refuse a reply, status or mark on a sign box.
+/// Is `d` a signature of any kind, which takes no replies, statuses or marks (like a sign box):
+/// - sealed (Locked and LockedContents): what signing in a sign box leaves;
+/// - a host signature: a stamp whose `/PpmStamp` is JSON with a `date` and no `templateId`
+///   (what the PPM server calls `ppm-signature`, sealed or not);
+/// - a Fill & Sign drawn signature (an Ink with `/PCFillSign`, or whose subject is "Signature"),
+///   typed signature (stamp `/PCTypedSignature`) or picture signature (stamp `/PCCustomSignature`
+///   with `/PCPictureImage`). Typed text, marks and initials are not signatures.
+///
+/// Keep in step with `isSignature` in craft-node's `annot-fingerprint.ts` and craft-bridge.
+pub fn is_signature(doc: &Document, d: &Dict) -> bool {
+    if is_sealed(doc, d) {
+        return true;
+    }
+    let yes = |key: &[u8]| matches!(d.get(key).map(|o| doc.resolve(o)).as_deref(), Some(Object::Bool(true)));
+    match d.name(b"Subtype") {
+        Some(b"Stamp") => {
+            let host = text_value(doc, d, b"PpmStamp")
+                .and_then(|m| serde_json::from_str::<serde_json::Value>(&m).ok())
+                .is_some_and(|v| v.get("templateId").is_none() && v.get("date").is_some());
+            host || match d.name(b"Name") {
+                Some(b"PCTypedSignature") => true,
+                Some(b"PCCustomSignature") => yes(b"PCPictureImage"),
+                _ => false,
+            }
+        }
+        Some(b"Ink") => yes(b"PCFillSign") || text_value(doc, d, b"Subj").as_deref() == Some("Signature"),
+        _ => false,
+    }
+}
+
+/// Refuse a reply, status or mark on a sign box or a signature.
 fn no_sign_box_reply(doc: &Document, r: ObjRef) -> Result<(), AnnotError> {
-    if doc.get(r).as_dict().is_some_and(is_sign_box) {
-        Err(AnnotError::Invalid("a sign box can't be replied to".into()))
-    } else {
-        Ok(())
+    match doc.get(r).as_dict() {
+        Some(d) if is_sign_box(d) => Err(AnnotError::Invalid("a sign box can't be replied to".into())),
+        Some(d) if is_signature(doc, d) => Err(AnnotError::Invalid("a signature can't be replied to".into())),
+        _ => Ok(()),
     }
 }
 

@@ -901,3 +901,26 @@ fn a_sealed_stamp_keeps_both_lock_flags_through_xfdf() {
     let flags = dst.get(r).as_dict().unwrap().int(b"F").unwrap();
     assert_eq!(flags & (128 | 512), 128 | 512, "flags {flags}");
 }
+
+/// Every kind of signature keeps the markers `pdfcraft_annot::is_signature` reads through the
+/// database form, so the same annotation is still a signature after the server hands it back.
+#[test]
+fn every_kind_of_signature_is_still_a_signature_after_the_database_round_trip() {
+    let mut src = blank();
+    add(&mut src, 0, Shape::Signature { strokes: vec![vec![[10.0, 10.0], [30.0, 20.0], [50.0, 10.0]]] }, "", "sig-ink");
+    add(&mut src, 0, Shape::TypedSignature { rect: [20.0, 400.0, 120.0, 430.0], contours: vec![vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]] }, "", "sig-typed");
+    let (xobject, size) = pdfcraft_create::image_xobject(&mut src, "sig.png", &png(8, 6)).unwrap();
+    let pic = Shape::CustomStamp { rect: [50.0, 50.0, 150.0, 100.0], name: "Signature".into(), picture: xobject, image: true, size };
+    add(&mut src, 0, pic, "", "sig-picture");
+    stamp(&mut src, 0, "sig-host", Some(r#"{"date":"2026-11-10"}"#));
+    stamp(&mut src, 0, "sig-sealed", Some(r#"{"date":"2026-11-10","signBoxId":"b1"}"#));
+    let sealed = summaries(&src).into_iter().find(|s| s.name.as_deref() == Some("sig-sealed")).expect("sealed stamp").index;
+    pdfcraft_annot::seal(&mut src, 0, sealed).unwrap();
+    stamp(&mut src, 0, "plain-stamp", Some(r#"{"date":"2026-11-10","templateId":"t1"}"#));
+    for nm in ["sig-ink", "sig-typed", "sig-picture", "sig-host", "sig-sealed", "plain-stamp"] {
+        let mut dst = blank();
+        round_trip(&src, &mut dst, nm);
+        let d = find_by_name(&dst, nm).and_then(|r| dst.get(r).as_dict().cloned()).expect("applied");
+        assert_eq!(pdfcraft_annot::is_signature(&dst, &d), nm != "plain-stamp", "{nm}");
+    }
+}
