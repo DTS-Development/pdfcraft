@@ -1918,12 +1918,44 @@ pub fn is_signature(doc: &Document, d: &Dict) -> bool {
     }
 }
 
-/// Refuse a reply, status or mark on a sign box or a signature.
+/// Why the annotation `start` takes no reply, status or mark, if it doesn't: it is a sign box or a
+/// signature, or it sits in a thread (the `/IRT` chain) whose ancestor is one. The server's rule
+/// walks the chain the same way. A cycle in `/IRT` ends the walk (nothing found on it).
+fn no_reply_reason(doc: &Document, start: &Dict) -> Option<&'static str> {
+    let mut seen = std::collections::HashSet::new();
+    let mut cur = start.clone();
+    loop {
+        if is_sign_box(&cur) {
+            return Some("a sign box can't be replied to");
+        }
+        if is_signature(doc, &cur) {
+            return Some("a signature can't be replied to");
+        }
+        let Some(Object::Ref(r)) = cur.get(b"IRT").cloned() else { return None };
+        if !seen.insert(r) {
+            return None;
+        }
+        cur = doc.get(r).as_dict().cloned()?;
+    }
+}
+
+/// Does the annotation at `(page, index)` take no replies, statuses or marks (a sign box, a
+/// signature, or anything in a thread under one)? The editor hides those commands with this.
+pub fn takes_no_reply(doc: &Document, page: usize, index: usize) -> bool {
+    let Ok(p) = page_ref(doc, page) else { return false };
+    let d = match annots(doc, p).get(index) {
+        Some(Object::Ref(r)) => doc.get(*r).as_dict().cloned(),
+        Some(Object::Dict(d)) => Some(d.clone()),
+        _ => None,
+    };
+    d.is_some_and(|d| no_reply_reason(doc, &d).is_some())
+}
+
+/// Refuse a reply, status or mark on a sign box, a signature or a thread under one.
 fn no_sign_box_reply(doc: &Document, r: ObjRef) -> Result<(), AnnotError> {
-    match doc.get(r).as_dict() {
-        Some(d) if is_sign_box(d) => Err(AnnotError::Invalid("a sign box can't be replied to".into())),
-        Some(d) if is_signature(doc, d) => Err(AnnotError::Invalid("a signature can't be replied to".into())),
-        _ => Ok(()),
+    match doc.get(r).as_dict().and_then(|d| no_reply_reason(doc, d)) {
+        Some(why) => Err(AnnotError::Invalid(why.into())),
+        None => Ok(()),
     }
 }
 

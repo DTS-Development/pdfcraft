@@ -1880,3 +1880,25 @@ fn every_kind_of_signature_takes_no_reply_status_or_mark_and_other_comments_do()
         add_reply(&mut doc, 0, i, "hi", "Bob", &meta(&format!("r{i}"))).unwrap_or_else(|e| panic!("{name}: {e}"));
     }
 }
+
+#[test]
+fn a_thread_under_a_signature_takes_no_reply_status_or_mark_and_a_cycle_ends() {
+    let mut doc = fixture();
+    // A plain stamp with an older reply, made into a host signature afterwards (a file from before).
+    let st = stamp_like(&mut doc, 0, |_| {});
+    let r1 = add_reply(&mut doc, 0, st, "old", "Bob", &meta("r1")).unwrap();
+    assert!(!takes_no_reply(&doc, 0, st) && !takes_no_reply(&doc, 0, r1));
+    set_extra(&mut doc, 0, st, "PpmStamp", r#"{"date":"2026-11-10"}"#).unwrap();
+    assert!(takes_no_reply(&doc, 0, st));
+    assert!(takes_no_reply(&doc, 0, r1), "the reply sits under a signature");
+    assert!(add_reply(&mut doc, 0, r1, "hi", "Bob", &meta("r2")).is_err());
+    assert!(set_review_state(&mut doc, 0, r1, ReviewState::Accepted, "Bob", &meta("r3")).is_err());
+    assert!(set_marked(&mut doc, 0, r1, true, "Bob", &meta("r4")).is_err());
+    // A comment away from any signature still takes replies, and a loop in /IRT ends the walk.
+    let plain = stamp_like(&mut doc, 0, |_| {});
+    let c1 = add_reply(&mut doc, 0, plain, "a", "Bob", &meta("c1")).unwrap();
+    let (_, c1_ref) = annot_ref(&mut doc, 0, c1).unwrap();
+    doc.update_dict(c1_ref, |d| d.set(b"IRT".to_vec(), Object::Ref(c1_ref))).unwrap();
+    assert!(!takes_no_reply(&doc, 0, c1));
+    add_reply(&mut doc, 0, c1, "b", "Bob", &meta("c2")).unwrap();
+}
