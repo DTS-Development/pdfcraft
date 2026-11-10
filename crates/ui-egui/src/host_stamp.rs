@@ -1042,6 +1042,7 @@ mod flow_tests {
             Edit::DeleteAnnotation { page, index },
             Edit::LockAnnotation { page, index, locked: false },
             Edit::SetAnnotationContents { page, index, text: "x".into() },
+            Edit::ReplyToAnnotation { page, index, text: "hi".into(), author: "alice".into() },
             Edit::SetAnnotationStatus { page, index, state: pdfcraft_engine::ReviewState::Rejected, author: "alice".into() },
             Edit::MarkAnnotation { page, index, marked: true, author: "alice".into() },
         ];

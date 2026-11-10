@@ -1820,3 +1820,85 @@ fn deleting_only_the_annotation_leaves_its_replies_in_the_file() {
     assert!(after.iter().any(|d| d.get(b"IRT").is_some()), "the reply stays, as it was");
     assert!(delete_annotation_only(&mut doc, 0, 99).is_err());
 }
+
+/// Add a Fill & Sign mark (a plain stamp) and rewrite its dictionary into another kind of stamp.
+fn stamp_like(doc: &mut Document, page: usize, edit: impl FnOnce(&mut Dict)) -> usize {
+    let shape = Shape::Mark { rect: [20.0, 500.0, 60.0, 530.0], mark: FillMark::Dot };
+    let style = Style::default_for(&shape);
+    let i = add_annotation(doc, &NewAnnotation { page, shape, style, contents: String::new(), author: "Ada".into() }, &meta("st")).unwrap();
+    let (_, r) = annot_ref(doc, page, i).unwrap();
+    doc.update_dict(r, |d| {
+        d.remove(b"PCFillSign");
+        edit(d)
+    })
+    .unwrap();
+    i
+}
+
+#[test]
+fn every_kind_of_signature_takes_no_reply_status_or_mark_and_other_comments_do() {
+    let mut doc = fixture();
+    let add = |doc: &mut Document, shape: Shape| {
+        let style = Style::default_for(&shape);
+        add_annotation(doc, &NewAnnotation { page: 0, shape, style, contents: String::new(), author: "Ada".into() }, &meta("x")).unwrap()
+    };
+    // Signatures: a drawn one, a typed one, a sealed host stamp, an unsealed host stamp, a picture one.
+    let drawn = add(&mut doc, Shape::Signature { strokes: vec![vec![[10.0, 10.0], [30.0, 20.0], [50.0, 10.0]]] });
+    let typed = add(&mut doc, Shape::TypedSignature { rect: [20.0, 400.0, 120.0, 430.0], contours: vec![vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]] });
+    let sealed = stamp_like(&mut doc, 0, |_| {});
+    set_extra(&mut doc, 0, sealed, "PpmStamp", r#"{"date":"2026-11-10","signBoxId":"b1"}"#).unwrap();
+    seal(&mut doc, 0, sealed).unwrap();
+    let host = stamp_like(&mut doc, 0, |_| {});
+    set_extra(&mut doc, 0, host, "PpmStamp", r#"{"date":"2026-11-10"}"#).unwrap();
+    let picture = stamp_like(&mut doc, 0, |d| {
+        d.set(b"Name".to_vec(), Object::name("PCCustomSignature"));
+        d.set(b"PCPictureImage".to_vec(), Object::Bool(true));
+    });
+    let initials = stamp_like(&mut doc, 0, |d| {
+        d.set(b"Name".to_vec(), Object::name("PCCustomInitials"));
+        d.set(b"PCPictureImage".to_vec(), Object::Bool(true));
+    });
+    // Not signatures: typed text, marks, a picture initials stamp without its picture flag, a plain ink, a template stamp, a stamp with no meta.
+    let text_box = add(&mut doc, Shape::Typewriter { rect: [100.0, 700.0, 200.0, 716.0], font_size: 11.0 });
+    let mark = add(&mut doc, Shape::Mark { rect: [100.0, 600.0, 114.0, 614.0], mark: FillMark::Check });
+    let initials_no_image = stamp_like(&mut doc, 0, |d| d.set(b"Name".to_vec(), Object::name("PCCustomInitials")));
+    let ink = add(&mut doc, Shape::Ink { strokes: vec![vec![[10.0, 10.0], [30.0, 20.0]]] });
+    let template = stamp_like(&mut doc, 0, |_| {});
+    set_extra(&mut doc, 0, template, "PpmStamp", r#"{"date":"2026-11-10","templateId":"t1"}"#).unwrap();
+    let plain = stamp_like(&mut doc, 0, |_| {});
+    let is = |doc: &Document, i: usize| is_signature(doc, &list(doc, 0)[i]);
+    for (name, i) in [("drawn", drawn), ("typed", typed), ("sealed", sealed), ("host", host), ("picture", picture), ("initials", initials)] {
+        assert!(is(&doc, i), "{name} is a signature");
+        let before = list(&doc, 0).len();
+        assert!(add_reply(&mut doc, 0, i, "hi", "Bob", &meta("r1")).is_err(), "{name}: reply");
+        assert!(set_review_state(&mut doc, 0, i, ReviewState::Accepted, "Bob", &meta("r2")).is_err(), "{name}: status");
+        assert!(set_marked(&mut doc, 0, i, true, "Bob", &meta("r3")).is_err(), "{name}: mark");
+        assert_eq!(list(&doc, 0).len(), before, "{name}: nothing was added");
+    }
+    for (name, i) in [("text", text_box), ("mark", mark), ("initials without picture", initials_no_image), ("ink", ink), ("template", template), ("plain", plain)] {
+        assert!(!is(&doc, i), "{name} is not a signature");
+        add_reply(&mut doc, 0, i, "hi", "Bob", &meta(&format!("r{i}"))).unwrap_or_else(|e| panic!("{name}: {e}"));
+    }
+}
+
+#[test]
+fn a_thread_under_a_signature_takes_no_reply_status_or_mark_and_a_cycle_ends() {
+    let mut doc = fixture();
+    // A plain stamp with an older reply, made into a host signature afterwards (a file from before).
+    let st = stamp_like(&mut doc, 0, |_| {});
+    let r1 = add_reply(&mut doc, 0, st, "old", "Bob", &meta("r1")).unwrap();
+    assert!(!takes_no_reply(&doc, 0, st) && !takes_no_reply(&doc, 0, r1));
+    set_extra(&mut doc, 0, st, "PpmStamp", r#"{"date":"2026-11-10"}"#).unwrap();
+    assert!(takes_no_reply(&doc, 0, st));
+    assert!(takes_no_reply(&doc, 0, r1), "the reply sits under a signature");
+    assert!(add_reply(&mut doc, 0, r1, "hi", "Bob", &meta("r2")).is_err());
+    assert!(set_review_state(&mut doc, 0, r1, ReviewState::Accepted, "Bob", &meta("r3")).is_err());
+    assert!(set_marked(&mut doc, 0, r1, true, "Bob", &meta("r4")).is_err());
+    // A comment away from any signature still takes replies, and a loop in /IRT ends the walk.
+    let plain = stamp_like(&mut doc, 0, |_| {});
+    let c1 = add_reply(&mut doc, 0, plain, "a", "Bob", &meta("c1")).unwrap();
+    let (_, c1_ref) = annot_ref(&mut doc, 0, c1).unwrap();
+    doc.update_dict(c1_ref, |d| d.set(b"IRT".to_vec(), Object::Ref(c1_ref))).unwrap();
+    assert!(!takes_no_reply(&doc, 0, c1));
+    add_reply(&mut doc, 0, c1, "b", "Bob", &meta("c2")).unwrap();
+}

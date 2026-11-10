@@ -1887,12 +1887,75 @@ pub fn is_sign_box(d: &Dict) -> bool {
     d.name(b"Subtype") == Some(b"FreeText") && d.get(SIGN_ROLE_KEY.as_bytes()).is_some()
 }
 
-/// Refuse a reply, status or mark on a sign box.
+/// Is `d` a signature of any kind, which takes no replies, statuses or marks (like a sign box):
+/// - sealed (Locked and LockedContents): what signing in a sign box leaves;
+/// - a host signature: a stamp whose `/PpmStamp` is JSON with a `date` and no `templateId`
+///   (what the PPM server calls `ppm-signature`, sealed or not);
+/// - a Fill & Sign drawn signature (an Ink with `/PCFillSign`, or whose subject is "Signature"),
+///   typed signature or initials (stamp `/PCTypedSignature`) or picture signature or initials (stamp
+///   `/PCCustomSignature` or `/PCCustomInitials` with `/PCPictureImage`). Initials count as signatures.
+///   Typed text and marks are not.
+///
+/// Keep in step with `isSignature` in craft-node's `annot-fingerprint.ts` and craft-bridge.
+pub fn is_signature(doc: &Document, d: &Dict) -> bool {
+    if is_sealed(doc, d) {
+        return true;
+    }
+    let yes = |key: &[u8]| matches!(d.get(key).map(|o| doc.resolve(o)).as_deref(), Some(Object::Bool(true)));
+    match d.name(b"Subtype") {
+        Some(b"Stamp") => {
+            let host = text_value(doc, d, b"PpmStamp")
+                .and_then(|m| serde_json::from_str::<serde_json::Value>(&m).ok())
+                .is_some_and(|v| v.get("templateId").is_none() && v.get("date").is_some());
+            host || match d.name(b"Name") {
+                Some(b"PCTypedSignature") => true,
+                Some(b"PCCustomSignature" | b"PCCustomInitials") => yes(b"PCPictureImage"),
+                _ => false,
+            }
+        }
+        Some(b"Ink") => yes(b"PCFillSign") || text_value(doc, d, b"Subj").as_deref() == Some("Signature"),
+        _ => false,
+    }
+}
+
+/// Why the annotation `start` takes no reply, status or mark, if it doesn't: it is a sign box or a
+/// signature, or it sits in a thread (the `/IRT` chain) whose ancestor is one. The server's rule
+/// walks the chain the same way. A cycle in `/IRT` ends the walk (nothing found on it).
+fn no_reply_reason(doc: &Document, start: &Dict) -> Option<&'static str> {
+    let mut seen = std::collections::HashSet::new();
+    let mut cur = start.clone();
+    loop {
+        if is_sign_box(&cur) {
+            return Some("a sign box can't be replied to");
+        }
+        if is_signature(doc, &cur) {
+            return Some("a signature can't be replied to");
+        }
+        let Some(Object::Ref(r)) = cur.get(b"IRT").cloned() else { return None };
+        if !seen.insert(r) {
+            return None;
+        }
+        cur = doc.get(r).as_dict().cloned()?;
+    }
+}
+
+/// Does the annotation at `(page, index)` take no replies, statuses or marks (a sign box, a
+/// signature, or anything in a thread under one)? The editor hides those commands with this.
+pub fn takes_no_reply(doc: &Document, page: usize, index: usize) -> bool {
+    let Ok(p) = page_ref(doc, page) else { return false };
+    let d = match annots(doc, p).get(index) {
+        Some(Object::Ref(r)) => doc.get(*r).as_dict().cloned(),
+        Some(Object::Dict(d)) => Some(d.clone()),
+        _ => None,
+    };
+    d.is_some_and(|d| no_reply_reason(doc, &d).is_some())
+}
+
+/// Refuse a reply, status or mark on a sign box, a signature or a thread under one.
 fn no_sign_box_reply(doc: &Document, r: ObjRef) -> Result<(), AnnotError> {
-    if doc.get(r).as_dict().is_some_and(is_sign_box) {
-        Err(AnnotError::Invalid("a sign box can't be replied to".into()))
-    } else {
-        Ok(())
+    match doc.get(r).as_dict().and_then(|d| no_reply_reason(doc, d)) {
+        Some(why) => Err(AnnotError::Invalid(why.into())),
+        None => Ok(()),
     }
 }
 

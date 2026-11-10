@@ -568,6 +568,14 @@ impl Document {
         sign_box_of(&editor.cos, &dict_at(&editor.cos, page, index)?)
     }
 
+    /// Does the annotation at `(page, index)` take no replies, statuses or marks: a sign box, a
+    /// signature of any kind, or something in a thread under one (`pdfcraft_annot::takes_no_reply`)?
+    /// The editor hides those commands.
+    pub fn takes_no_reply(&self, page: usize, index: usize) -> bool {
+        let Some(editor) = self.editor.as_ref() else { return false };
+        pdfcraft_annot::takes_no_reply(&editor.cos, page, index) || sign_box_at_index(&editor.cos, page, index)
+    }
+
     /// Is the annotation at `(page, index)` a reply to another annotation?
     pub fn annot_is_reply(&self, page: usize, index: usize) -> bool {
         self.editor.as_ref().is_some_and(|e| is_reply_at(&e.cos, page, index))
