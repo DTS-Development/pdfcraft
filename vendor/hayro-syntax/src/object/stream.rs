@@ -237,14 +237,18 @@ impl<'a> Stream<'a> {
             return Err(DecodeFailure::StreamDecode);
         }
         let max = left.map_or(max, |l| max.min(l));
+        let raw_len = data.len();
         match self.decode_filters(data, image_params, max) {
             Ok(result) => {
                 crate::budget::spend_content_bytes(result.data.len());
                 Ok(result)
             }
             Err(e) => {
-                // A decode that failed (often by reaching its cap) still cost the cap.
-                crate::budget::spend_content_bytes(max.min(crate::filter::MAX_DECODED_STREAM));
+                // A decode that reaches its cap returns what it has (and is charged for it above),
+                // so a failure is a damaged stream: it costs the bytes it was given, at least one,
+                // so that failing again and again can't be had for free, and one damaged stream
+                // doesn't use up the document's whole allowance.
+                crate::budget::spend_content_bytes(raw_len.max(1).min(max));
                 Err(e)
             }
         }

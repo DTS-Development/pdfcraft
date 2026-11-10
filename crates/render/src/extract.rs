@@ -507,6 +507,30 @@ mod tests {
         }
     }
 
+    /// A damaged encoded stream among good ones costs only its own size: the document is
+    /// still read, and only the damaged stream is left out.
+    #[test]
+    fn a_damaged_stream_does_not_use_up_the_byte_limit() {
+        let mut doc = Document::with_version("1.7");
+        let mut bad = Stream::new(dictionary! {"Type" => "XObject", "Subtype" => "Form", "BBox" => ints([0, 0, 10, 10]), "Filter" => "ASCIIHexDecode"}, b"zz not hex data".to_vec());
+        bad.allows_compression = false;
+        let bad = doc.add_object(bad);
+        let good = doc.add_object(Stream::new(dictionary! {"Type" => "XObject", "Subtype" => "Form", "BBox" => ints([0, 0, 10, 10])}, b"q Q".to_vec()));
+        let content = doc.add_object(Stream::new(dictionary! {}, "/B Do /G Do\n".repeat(200).into_bytes()));
+        let pages = doc.new_object_id();
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "MediaBox" => ints([0, 0, 100, 100]), "Contents" => content,
+            "Resources" => dictionary! {"XObject" => dictionary! {"B" => bad, "G" => good}}
+        });
+        doc.objects.insert(pages, dictionary! {"Type" => "Pages", "Kids" => vec![Object::Reference(page)], "Count" => 1}.into());
+        let catalog = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => pages});
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        let r = extract_pages(Arc::new(bytes), None, None, usize::MAX);
+        assert!(r.is_ok(), "{r:?}");
+    }
+
     /// Many pages sharing one content stream: each is under its own allowance, the call's bytes
     /// run out, and the page it ran out on is named.
     #[test]
