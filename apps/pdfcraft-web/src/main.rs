@@ -143,10 +143,7 @@ fn block_browser_find() {
     });
     let options = web_sys::AddEventListenerOptions::new();
     options.set_capture(true);
-    if window
-        .add_event_listener_with_callback_and_add_event_listener_options("keydown", handler.as_ref().unchecked_ref(), &options)
-        .is_ok()
-    {
+    if window.add_event_listener_with_callback_and_add_event_listener_options("keydown", handler.as_ref().unchecked_ref(), &options).is_ok() {
         handler.forget();
     }
 }
