@@ -1548,6 +1548,38 @@ mod tests {
         }
     }
 
+    /// A document with one bookmark.
+    fn pdf_with_outline() -> Vec<u8> {
+        build(&[
+            "<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R >>".into(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 300] >>".into(),
+            "<< /Type /Page /Parent 2 0 R >>".into(),
+            "<< /Type /Outlines /First 5 0 R /Last 5 0 R /Count 1 >>".into(),
+            "<< /Title (Sheet1) /Parent 4 0 R /Dest [3 0 R /Fit] >>".into(),
+        ])
+    }
+
+    #[test]
+    fn a_host_build_opens_with_the_right_panel_closed_and_the_rail_still_opens_it() {
+        let open = |lock: bool, docs: usize| {
+            let mut app = PdfCraftApp::new();
+            app.host_lock = lock;
+            app.session.set_open_ownership(host_rules());
+            for i in 0..docs {
+                app.open_bytes(&format!("{i}.pdf"), None, pdf_with_outline()).unwrap();
+            }
+            app
+        };
+        assert!(open(true, 1).right.is_none(), "host: a bookmark does not open the panel");
+        assert!(open(true, 2).right.is_none(), "host: nor does a second tab (an attachment)");
+        assert!(matches!(open(false, 1).right, Some(crate::RightPanel::Bookmarks)), "no lock: as it did");
+        // The user opens it by hand (the rail sets `right`) and it stays open on another open.
+        let mut app = open(true, 1);
+        app.right = Some(crate::RightPanel::Bookmarks);
+        app.open_bytes("1.pdf", None, pdf_with_outline()).unwrap();
+        assert!(matches!(app.right, Some(crate::RightPanel::Bookmarks)));
+    }
+
     /// `parse_mode`, whatever the build: the document gets what the host said.
     fn open_scope_for_test(mode: &str) -> EditScope {
         parse_mode(Some(mode))

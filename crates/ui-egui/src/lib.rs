@@ -1461,7 +1461,9 @@ impl PdfCraftApp {
         // Read mode opens with the panes closed; the rail still opens them (#932). A right panel
         // the user closed stays closed (#1590).
         let opening_mode = self.mode_override.unwrap_or(self.default_mode);
-        if activate && self.right.is_none() && !self.right_panel_closed && opening_mode != Mode::Read {
+        // A host build opens with the panel closed: an outline or comments must not cover the
+        // host's page; the rail still opens it.
+        if activate && self.right.is_none() && !self.right_panel_closed && opening_mode != Mode::Read && !self.host_lock {
             self.right = if !doc.info.annotations.is_empty() {
                 Some(RightPanel::Comments)
             } else if !doc.info.outline.is_empty() {
