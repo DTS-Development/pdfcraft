@@ -1548,10 +1548,10 @@ mod tests {
         }
     }
 
-    /// A document with one bookmark.
+    /// A document with one bookmark that asks for the outline at open (/PageMode /UseOutlines, as a LibreOffice conversion does).
     fn pdf_with_outline() -> Vec<u8> {
         build(&[
-            "<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R >>".into(),
+            "<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R /PageMode /UseOutlines >>".into(),
             "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 300] >>".into(),
             "<< /Type /Page /Parent 2 0 R >>".into(),
             "<< /Type /Outlines /First 5 0 R /Last 5 0 R /Count 1 >>".into(),
@@ -1573,9 +1573,9 @@ mod tests {
         assert!(open(true, 1).right.is_none(), "host: a bookmark does not open the panel");
         assert!(open(true, 2).right.is_none(), "host: nor does a second tab (an attachment)");
         assert!(matches!(open(false, 1).right, Some(crate::RightPanel::Bookmarks)), "no lock: as it did");
-        // The user opens it by hand (the rail sets `right`) and it stays open on another open.
+        // The user opens it by hand through the rail and it stays open on another open.
         let mut app = open(true, 1);
-        app.right = Some(crate::RightPanel::Bookmarks);
+        app.choose_right_panel(Some(crate::RightPanel::Bookmarks));
         app.open_bytes("1.pdf", None, pdf_with_outline()).unwrap();
         assert!(matches!(app.right, Some(crate::RightPanel::Bookmarks)));
     }
