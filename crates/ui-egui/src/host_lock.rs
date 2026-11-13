@@ -1500,9 +1500,8 @@ mod tests {
             h.run_steps(4);
             assert!(h.state().tab_strip_shown());
             assert!(h.query_by_label("0.pdf").is_some() || h.query_by_label("Combine files").is_some(), "the tabs are there");
-            ["Discord", "Home", "Open"].iter().all(|l| h.query_by_label(l).is_none())
-                && h.query_by_label("Keyboard shortcuts").is_none()
-                && h.query_by_label("Display theme").is_none()
+            ["Discord", "Home", "Open", "Keyboard shortcuts"].iter().all(|l| h.query_by_label(l).is_none())
+                && h.query_by_label_contains("Display theme").is_none()
         };
         assert!(tabs_only(2, false), "two tabs: tabs only");
         assert!(tabs_only(1, true), "a document and the combine tab: tabs only");
@@ -1510,6 +1509,17 @@ mod tests {
         assert!(!discord(true, 0), "host without a document: no strip");
         assert!(!discord(true, 2), "two tabs (an attachment): the tabs stay, Discord does not");
         assert!(discord(false, 1), "a build without the lock draws it as it did");
+        // The names the host test looks for are the real ones: a build without the lock has them.
+        let mut app = PdfCraftApp::new();
+        app.host_lock = false;
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("0.pdf", None, pdf()).unwrap();
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_| app);
+        h.run_steps(4);
+        for l in ["Discord", "Home", "Open", "Keyboard shortcuts"] {
+            assert!(h.query_by_label(l).is_some(), "{l} is in the strip of a build without the lock");
+        }
+        assert!(h.query_by_label_contains("Display theme").is_some(), "the theme button is found by its tip");
     }
 
     /// The markup and drawing tools are plain buttons: one click picks one, and a tool the policy
