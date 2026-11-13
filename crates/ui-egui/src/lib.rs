@@ -1209,7 +1209,8 @@ impl PdfCraftApp {
     fn apply_initial_view(&mut self, index: usize, v: &pdfcraft_engine::InitialView) {
         use pdfcraft_engine::{InitialLayout as L, Magnification as M, Navigation as N};
         let pages = self.session.get(self.views[index].id).map_or(0, |d| d.info.pages.len());
-        if self.active == Some(index) {
+        // A host build opens with the panel closed whatever the document asks for (/PageMode).
+        if self.active == Some(index) && !self.host_lock {
             match v.navigation {
                 N::PageOnly => {}
                 N::Bookmarks => self.right = Some(RightPanel::Bookmarks),
@@ -1461,7 +1462,9 @@ impl PdfCraftApp {
         // Read mode opens with the panes closed; the rail still opens them (#932). A right panel
         // the user closed stays closed (#1590).
         let opening_mode = self.mode_override.unwrap_or(self.default_mode);
-        if activate && self.right.is_none() && !self.right_panel_closed && opening_mode != Mode::Read {
+        // A host build opens with the panel closed: an outline or comments must not cover the
+        // host's page; the rail still opens it.
+        if activate && self.right.is_none() && !self.right_panel_closed && opening_mode != Mode::Read && !self.host_lock {
             self.right = if !doc.info.annotations.is_empty() {
                 Some(RightPanel::Comments)
             } else if !doc.info.outline.is_empty() {

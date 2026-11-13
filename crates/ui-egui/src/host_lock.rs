@@ -1548,6 +1548,72 @@ mod tests {
         }
     }
 
+    /// A document with one bookmark that asks for the outline at open (/PageMode /UseOutlines, as a LibreOffice conversion does).
+    fn pdf_with_outline() -> Vec<u8> {
+        build(&[
+            "<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R /PageMode /UseOutlines >>".into(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 300] >>".into(),
+            "<< /Type /Page /Parent 2 0 R >>".into(),
+            "<< /Type /Outlines /First 5 0 R /Last 5 0 R /Count 1 >>".into(),
+            "<< /Title (Sheet1) /Parent 4 0 R /Dest [3 0 R /Fit] >>".into(),
+        ])
+    }
+
+    /// A document with no bookmark, an optional /PageMode and an optional comment (a Text annotation).
+    fn pdf_plain(page_mode: Option<&str>, comment: bool) -> Vec<u8> {
+        let mode = page_mode.map_or(String::new(), |m| format!(" /PageMode /{m}"));
+        let annots = if comment { " /Annots [4 0 R]" } else { "" };
+        let mut objs = vec![
+            format!("<< /Type /Catalog /Pages 2 0 R{mode} >>"),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 300] >>".to_string(),
+            format!("<< /Type /Page /Parent 2 0 R{annots} >>"),
+        ];
+        if comment {
+            objs.push("<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] /Contents (note) >>".to_string());
+        }
+        build(&objs)
+    }
+
+    #[test]
+    fn a_host_build_keeps_the_panel_closed_for_comments_and_other_page_modes() {
+        let open = |lock: bool, bytes: Vec<u8>| {
+            let mut app = PdfCraftApp::new();
+            app.host_lock = lock;
+            app.session.set_open_ownership(host_rules());
+            app.open_bytes("0.pdf", None, bytes).unwrap();
+            app.right
+        };
+        // Comments only, no bookmark.
+        assert!(open(true, pdf_plain(None, true)).is_none(), "host: a comment does not open the panel");
+        assert_eq!(open(false, pdf_plain(None, true)), Some(crate::RightPanel::Comments), "no lock: Comments opens as it did");
+        // The other first-view panels a document can ask for.
+        for mode in ["UseThumbs", "UseAttachments"] {
+            assert!(open(true, pdf_plain(Some(mode), false)).is_none(), "host: /PageMode /{mode} stays closed");
+        }
+        assert!(open(false, pdf_plain(Some("UseThumbs"), false)).is_some(), "no lock: /UseThumbs opens a panel as it did");
+    }
+
+    #[test]
+    fn a_host_build_opens_with_the_right_panel_closed_and_the_rail_still_opens_it() {
+        let open = |lock: bool, docs: usize| {
+            let mut app = PdfCraftApp::new();
+            app.host_lock = lock;
+            app.session.set_open_ownership(host_rules());
+            for i in 0..docs {
+                app.open_bytes(&format!("{i}.pdf"), None, pdf_with_outline()).unwrap();
+            }
+            app
+        };
+        assert!(open(true, 1).right.is_none(), "host: a bookmark does not open the panel");
+        assert!(open(true, 2).right.is_none(), "host: nor does a second tab (an attachment)");
+        assert!(matches!(open(false, 1).right, Some(crate::RightPanel::Bookmarks)), "no lock: as it did");
+        // The user opens it by hand through the rail and it stays open on another open.
+        let mut app = open(true, 1);
+        app.choose_right_panel(Some(crate::RightPanel::Bookmarks));
+        app.open_bytes("1.pdf", None, pdf_with_outline()).unwrap();
+        assert!(matches!(app.right, Some(crate::RightPanel::Bookmarks)));
+    }
+
     /// `parse_mode`, whatever the build: the document gets what the host said.
     fn open_scope_for_test(mode: &str) -> EditScope {
         parse_mode(Some(mode))
