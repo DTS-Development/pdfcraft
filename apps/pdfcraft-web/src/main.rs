@@ -124,9 +124,10 @@ fn main() {
 /// and eframe leaves to the browser, which would open its own find bar next to the editor's. Copy, paste
 /// and the rest are not blocked.
 #[cfg(any(target_arch = "wasm32", test))]
-fn blocks_browser_default(command: bool, alt: bool, key: &str, code: &str) -> bool {
+fn blocks_browser_default(ctrl: bool, meta: bool, alt: bool, key: &str, code: &str) -> bool {
     // `key` follows the layout (a Korean layout reports "ㄹ" or "Process"), `code` is the physical key.
-    command && !alt && (key.eq_ignore_ascii_case("f") || key.eq_ignore_ascii_case("g") || code == "KeyF" || code == "KeyG")
+    // Ctrl+Cmd together is left alone: Chrome on a Mac uses Ctrl+Cmd+F for full screen.
+    (ctrl != meta) && !alt && (key.eq_ignore_ascii_case("f") || key.eq_ignore_ascii_case("g") || code == "KeyF" || code == "KeyG")
 }
 
 /// Listens for keydown in the capture phase and cancels only the browser's default for those keys.
@@ -136,7 +137,7 @@ fn block_browser_find() {
     use eframe::wasm_bindgen::{JsCast, closure::Closure};
     let Some(window) = web_sys::window() else { return };
     let handler = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |event: web_sys::KeyboardEvent| {
-        if blocks_browser_default(event.ctrl_key() || event.meta_key(), event.alt_key(), &event.key(), &event.code()) {
+        if blocks_browser_default(event.ctrl_key(), event.meta_key(), event.alt_key(), &event.key(), &event.code()) {
             event.prevent_default();
         }
     });
@@ -933,26 +934,33 @@ mod tests {
 
     #[test]
     fn blocks_find_and_find_next() {
-        assert!(blocks_browser_default(true, false, "f", ""));
-        assert!(blocks_browser_default(true, false, "F", ""));
-        assert!(blocks_browser_default(true, false, "g", ""));
-        assert!(blocks_browser_default(true, false, "G", ""));
+        assert!(blocks_browser_default(true, false, false, "f", ""));
+        assert!(blocks_browser_default(true, false, false, "F", ""));
+        assert!(blocks_browser_default(true, false, false, "g", ""));
+        assert!(blocks_browser_default(true, false, false, "G", ""));
     }
 
     #[test]
     fn blocks_find_on_korean_layout_by_physical_key() {
-        assert!(blocks_browser_default(true, false, "ㄹ", "KeyF"));
-        assert!(blocks_browser_default(true, false, "Process", "KeyF"));
-        assert!(blocks_browser_default(true, false, "ㅎ", "KeyG"));
-        assert!(!blocks_browser_default(true, false, "ㅊ", "KeyC"));
+        assert!(blocks_browser_default(true, false, false, "ㄹ", "KeyF"));
+        assert!(blocks_browser_default(true, false, false, "Process", "KeyF"));
+        assert!(blocks_browser_default(true, false, false, "ㅎ", "KeyG"));
+        assert!(!blocks_browser_default(true, false, false, "ㅊ", "KeyC"));
+    }
+
+    #[test]
+    fn blocks_either_ctrl_or_meta_but_not_both() {
+        assert!(blocks_browser_default(false, true, false, "f", "KeyF"));
+        assert!(blocks_browser_default(true, false, false, "g", "KeyG"));
+        assert!(!blocks_browser_default(true, true, false, "f", "KeyF"));
     }
 
     #[test]
     fn leaves_other_keys_alone() {
-        assert!(!blocks_browser_default(false, false, "f", "KeyF"));
-        assert!(!blocks_browser_default(true, false, "c", "KeyC"));
-        assert!(!blocks_browser_default(true, false, "v", "KeyV"));
-        assert!(!blocks_browser_default(true, false, "x", "KeyX"));
-        assert!(!blocks_browser_default(true, true, "f", "KeyF"));
+        assert!(!blocks_browser_default(false, false, false, "f", "KeyF"));
+        assert!(!blocks_browser_default(true, false, false, "c", "KeyC"));
+        assert!(!blocks_browser_default(true, false, false, "v", "KeyV"));
+        assert!(!blocks_browser_default(true, false, false, "x", "KeyX"));
+        assert!(!blocks_browser_default(true, false, true, "f", "KeyF"));
     }
 }
