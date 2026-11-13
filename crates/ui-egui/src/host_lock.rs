@@ -1559,6 +1559,40 @@ mod tests {
         ])
     }
 
+    /// A document with no bookmark, an optional /PageMode and an optional comment (a Text annotation).
+    fn pdf_plain(page_mode: Option<&str>, comment: bool) -> Vec<u8> {
+        let mode = page_mode.map_or(String::new(), |m| format!(" /PageMode /{m}"));
+        let annots = if comment { " /Annots [4 0 R]" } else { "" };
+        let mut objs = vec![
+            format!("<< /Type /Catalog /Pages 2 0 R{mode} >>"),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 300] >>".to_string(),
+            format!("<< /Type /Page /Parent 2 0 R{annots} >>"),
+        ];
+        if comment {
+            objs.push("<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] /Contents (note) >>".to_string());
+        }
+        build(&objs)
+    }
+
+    #[test]
+    fn a_host_build_keeps_the_panel_closed_for_comments_and_other_page_modes() {
+        let open = |lock: bool, bytes: Vec<u8>| {
+            let mut app = PdfCraftApp::new();
+            app.host_lock = lock;
+            app.session.set_open_ownership(host_rules());
+            app.open_bytes("0.pdf", None, bytes).unwrap();
+            app.right
+        };
+        // Comments only, no bookmark.
+        assert!(open(true, pdf_plain(None, true)).is_none(), "host: a comment does not open the panel");
+        assert_eq!(open(false, pdf_plain(None, true)), Some(crate::RightPanel::Comments), "no lock: Comments opens as it did");
+        // The other first-view panels a document can ask for.
+        for mode in ["UseThumbs", "UseAttachments"] {
+            assert!(open(true, pdf_plain(Some(mode), false)).is_none(), "host: /PageMode /{mode} stays closed");
+        }
+        assert!(open(false, pdf_plain(Some("UseThumbs"), false)).is_some(), "no lock: /UseThumbs opens a panel as it did");
+    }
+
     #[test]
     fn a_host_build_opens_with_the_right_panel_closed_and_the_rail_still_opens_it() {
         let open = |lock: bool, docs: usize| {
