@@ -576,7 +576,7 @@ impl PdfCraftApp {
     /// Whether the top tab strip is drawn. A host build shows its one document without it (the
     /// host picks the document; Discord, help and theme do not belong on its screen). With more
     /// than one tab, an attachment or the combine tab, the strip stays: it is the way back to the
-    /// other document, and file.close is locked there. A window that draws its own frame needs the
+    /// other document, and file.close is locked there; it then holds the tabs alone (chrome::tab_strip leaves Home, Open, theme, help and Discord out of a host build). A window that draws its own frame needs the
     /// strip for the window buttons.
     pub(crate) fn tab_strip_shown(&self) -> bool {
         !self.host_lock || self.views.len() > 1 || self.combine_tab.open || self.draws_window_frame()
@@ -1480,12 +1480,35 @@ mod tests {
             let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_| app);
             h.run_steps(4);
             let shown = h.query_by_label("Discord").is_some();
-            assert_eq!(shown, h.state().tab_strip_shown(), "the strip is drawn exactly when it is meant to be");
+            assert_eq!(shown, h.state().tab_strip_shown() && !lock, "Discord is drawn only with the strip of a build without the lock");
             shown
         };
+        // The strip that comes back for a second tab is the tabs alone.
+        let tabs_only = |docs: usize, combine: bool| {
+            let mut app = PdfCraftApp::new();
+            app.host_lock = true;
+            app.host_save = Some(Box::new(|_, _, _, _| Ok(())));
+            app.set_option("language", "en").unwrap();
+            app.session.set_open_ownership(host_rules());
+            for i in 0..docs {
+                app.open_bytes(&format!("{i}.pdf"), None, pdf()).unwrap();
+            }
+            if combine {
+                app.open_combine_tab();
+            }
+            let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_| app);
+            h.run_steps(4);
+            assert!(h.state().tab_strip_shown());
+            assert!(h.query_by_label("0.pdf").is_some() || h.query_by_label("Combine files").is_some(), "the tabs are there");
+            ["Discord", "Home", "Open"].iter().all(|l| h.query_by_label(l).is_none())
+                && h.query_by_label("Keyboard shortcuts").is_none()
+                && h.query_by_label("Display theme").is_none()
+        };
+        assert!(tabs_only(2, false), "two tabs: tabs only");
+        assert!(tabs_only(1, true), "a document and the combine tab: tabs only");
         assert!(!discord(true, 1), "one host document: no strip");
         assert!(!discord(true, 0), "host without a document: no strip");
-        assert!(discord(true, 2), "two tabs (an attachment): the way back stays");
+        assert!(!discord(true, 2), "two tabs (an attachment): the tabs stay, Discord does not");
         assert!(discord(false, 1), "a build without the lock draws it as it did");
     }
 
