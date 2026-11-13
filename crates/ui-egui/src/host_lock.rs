@@ -573,6 +573,15 @@ impl PdfCraftApp {
         self.host_lock
     }
 
+    /// Whether the top tab strip is drawn. A host build shows its one document without it (the
+    /// host picks the document; Discord, help and theme do not belong on its screen). With more
+    /// than one tab, an attachment or the combine tab, the strip stays: it is the way back to the
+    /// other document, and file.close is locked there; it then holds the tabs alone (chrome::tab_strip leaves Home, Open, theme, help and Discord out of a host build). A window that draws its own frame needs the
+    /// strip for the window buttons.
+    pub(crate) fn tab_strip_shown(&self) -> bool {
+        !self.host_lock || self.views.len() > 1 || self.combine_tab.open || self.draws_window_frame()
+    }
+
     /// The scope of the active document; a viewer's when there is none.
     fn host_scope(&self) -> EditScope {
         self.active_ids().and_then(|(_, id)| self.session.get(id)).map_or(EditScope::Viewer, |d| d.ownership().scope)
@@ -1452,6 +1461,65 @@ mod tests {
         let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_| app);
         h.run_steps(4);
         h
+    }
+
+    /// A host build draws no tab strip for its one document (Discord, help and theme go with it),
+    /// keeps it for more than one tab, and a plain build always draws it.
+    #[test]
+    fn a_host_build_hides_the_tab_strip_for_a_single_document() {
+        use egui_kittest::kittest::Queryable;
+        let discord = |lock: bool, docs: usize| {
+            let mut app = PdfCraftApp::new();
+            app.host_lock = lock;
+            app.host_save = Some(Box::new(|_, _, _, _| Ok(())));
+            app.set_option("language", "en").unwrap();
+            app.session.set_open_ownership(host_rules());
+            for i in 0..docs {
+                app.open_bytes(&format!("{i}.pdf"), None, pdf()).unwrap();
+            }
+            let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_| app);
+            h.run_steps(4);
+            let shown = h.query_by_label("Discord").is_some();
+            assert_eq!(shown, h.state().tab_strip_shown() && !lock, "Discord is drawn only with the strip of a build without the lock");
+            shown
+        };
+        // The strip that comes back for a second tab is the tabs alone.
+        let tabs_only = |docs: usize, combine: bool| {
+            let mut app = PdfCraftApp::new();
+            app.host_lock = true;
+            app.host_save = Some(Box::new(|_, _, _, _| Ok(())));
+            app.set_option("language", "en").unwrap();
+            app.session.set_open_ownership(host_rules());
+            for i in 0..docs {
+                app.open_bytes(&format!("{i}.pdf"), None, pdf()).unwrap();
+            }
+            if combine {
+                app.open_combine_tab();
+            }
+            let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_| app);
+            h.run_steps(4);
+            assert!(h.state().tab_strip_shown());
+            assert!(h.query_by_label("0.pdf").is_some() || h.query_by_label("Combine files").is_some(), "the tabs are there");
+            ["Discord", "Home", "Open", "Keyboard shortcuts"].iter().all(|l| h.query_by_label(l).is_none())
+                && h.query_by_label_contains("Display theme").is_none()
+        };
+        assert!(tabs_only(2, false), "two tabs: tabs only");
+        assert!(tabs_only(1, true), "a document and the combine tab: tabs only");
+        assert!(!discord(true, 1), "one host document: no strip");
+        assert!(!discord(true, 0), "host without a document: no strip");
+        assert!(!discord(true, 2), "two tabs (an attachment): the tabs stay, Discord does not");
+        assert!(discord(false, 1), "a build without the lock draws it as it did");
+        // The names the host test looks for are the real ones: a build without the lock has them.
+        let mut app = PdfCraftApp::new();
+        app.host_lock = false;
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("0.pdf", None, pdf()).unwrap();
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_| app);
+        h.run_steps(4);
+        for l in ["Discord", "Home", "Open", "Keyboard shortcuts"] {
+            assert!(h.query_by_label(l).is_some(), "{l} is in the strip of a build without the lock");
+        }
+        assert!(h.query_by_label_contains("Display theme").is_some(), "the theme button is found by its tip");
     }
 
     /// The markup and drawing tools are plain buttons: one click picks one, and a tool the policy

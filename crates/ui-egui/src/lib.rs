@@ -3476,7 +3476,9 @@ impl eframe::App for PdfCraftApp {
         if self.draws_window_frame() {
             window_controls::resize_edges(&ctx);
         }
-        chrome::tab_strip(self, ui);
+        if self.tab_strip_shown() {
+            chrome::tab_strip(self, ui);
+        }
         chrome::mode_bar(self, ui);
         if self.active.is_some() {
             chrome::right_rail(self, ui);
