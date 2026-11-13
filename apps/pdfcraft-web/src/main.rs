@@ -65,6 +65,8 @@ fn main() {
                     // eframe never raises a close request on a browser reload or tab close, so `guard_quit` never
                     // prompts; ask the browser to confirm instead while a document has unsaved work (#812).
                     warn_before_unload(app.unsaved_flag.clone());
+                    #[cfg(feature = "host-lock")]
+                    block_browser_find();
                     // `?host=parent`: a same-origin page embedding PdfCraft in an iframe (such
                     // as the Nextcloud app) passes files in and takes saves back (`host` below).
                     if query_param("host").as_deref() == Some("parent")
@@ -116,6 +118,34 @@ fn main() {
             }
         }
     });
+}
+
+/// Whether a keydown is one the editor uses itself (Cmd/Ctrl+F find, Cmd/Ctrl+G and Shift+G next/previous)
+/// and eframe leaves to the browser, which would open its own find bar next to the editor's. Copy, paste
+/// and the rest are not blocked.
+#[cfg(any(target_arch = "wasm32", test))]
+fn blocks_browser_default(ctrl: bool, meta: bool, alt: bool, key: &str, code: &str) -> bool {
+    // `key` follows the layout (a Korean layout reports "ㄹ" or "Process"), `code` is the physical key.
+    // Ctrl+Cmd together is left alone: Chrome on a Mac uses Ctrl+Cmd+F for full screen.
+    (ctrl != meta) && !alt && (key.eq_ignore_ascii_case("f") || key.eq_ignore_ascii_case("g") || code == "KeyF" || code == "KeyG")
+}
+
+/// Listens for keydown in the capture phase and cancels only the browser's default for those keys.
+/// It never stops propagation, so egui still receives the key.
+#[cfg(all(target_arch = "wasm32", feature = "host-lock"))]
+fn block_browser_find() {
+    use eframe::wasm_bindgen::{JsCast, closure::Closure};
+    let Some(window) = web_sys::window() else { return };
+    let handler = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |event: web_sys::KeyboardEvent| {
+        if blocks_browser_default(event.ctrl_key(), event.meta_key(), event.alt_key(), &event.key(), &event.code()) {
+            event.prevent_default();
+        }
+    });
+    let options = web_sys::AddEventListenerOptions::new();
+    options.set_capture(true);
+    if window.add_event_listener_with_callback_and_add_event_listener_options("keydown", handler.as_ref().unchecked_ref(), &options).is_ok() {
+        handler.forget();
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -893,4 +923,41 @@ mod host {
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
     eprintln!("pdfcraft-web targets wasm32: run `trunk serve` or `trunk build --release` in apps/pdfcraft-web");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::blocks_browser_default;
+
+    #[test]
+    fn blocks_find_and_find_next() {
+        assert!(blocks_browser_default(true, false, false, "f", ""));
+        assert!(blocks_browser_default(true, false, false, "F", ""));
+        assert!(blocks_browser_default(true, false, false, "g", ""));
+        assert!(blocks_browser_default(true, false, false, "G", ""));
+    }
+
+    #[test]
+    fn blocks_find_on_korean_layout_by_physical_key() {
+        assert!(blocks_browser_default(true, false, false, "ㄹ", "KeyF"));
+        assert!(blocks_browser_default(true, false, false, "Process", "KeyF"));
+        assert!(blocks_browser_default(true, false, false, "ㅎ", "KeyG"));
+        assert!(!blocks_browser_default(true, false, false, "ㅊ", "KeyC"));
+    }
+
+    #[test]
+    fn blocks_either_ctrl_or_meta_but_not_both() {
+        assert!(blocks_browser_default(false, true, false, "f", "KeyF"));
+        assert!(blocks_browser_default(true, false, false, "g", "KeyG"));
+        assert!(!blocks_browser_default(true, true, false, "f", "KeyF"));
+    }
+
+    #[test]
+    fn leaves_other_keys_alone() {
+        assert!(!blocks_browser_default(false, false, false, "f", "KeyF"));
+        assert!(!blocks_browser_default(true, false, false, "c", "KeyC"));
+        assert!(!blocks_browser_default(true, false, false, "v", "KeyV"));
+        assert!(!blocks_browser_default(true, false, false, "x", "KeyX"));
+        assert!(!blocks_browser_default(true, false, true, "f", "KeyF"));
+    }
 }
