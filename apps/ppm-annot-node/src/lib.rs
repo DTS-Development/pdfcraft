@@ -321,13 +321,18 @@ pub const DECRYPT_UNSUPPORTED: &str = "unsupported security: ";
 /// password fails with [`DECRYPT_NEEDS_PASSWORD`], an unsupported handler with [`DECRYPT_UNSUPPORTED`].
 /// The permissions of the original (printing, editing limits) are gone from the result.
 pub fn decrypt_pdf(pdf: Vec<u8>) -> Result<Vec<u8>, String> {
-    let mut doc = match Document::open(Arc::new(pdf.clone())) {
+    // Share the input through an Arc so an unencrypted PDF can be handed back without copying it.
+    let bytes = Arc::new(pdf);
+    let mut doc = match Document::open(Arc::clone(&bytes)) {
         Ok(d) => d,
         Err(CosError::NeedsPassword | CosError::WrongPassword) => return Err(format!("{DECRYPT_NEEDS_PASSWORD}the PDF needs a user password")),
         Err(CosError::Security(why)) => return Err(format!("{DECRYPT_UNSUPPORTED}{why}")),
         Err(e) => return Err(format!("the PDF can't be opened: {e}")),
     };
-    let Some(handler) = doc.security() else { return Ok(pdf) };
+    let Some(handler) = doc.security() else {
+        drop(doc);
+        return Ok(Arc::try_unwrap(bytes).unwrap_or_else(|shared| shared.to_vec()));
+    };
     // The standard handler only has these versions; anything else would be read with a guessed
     // algorithm and come out as garbage without an error.
     let d = handler.dict();
