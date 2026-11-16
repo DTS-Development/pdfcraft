@@ -108,6 +108,9 @@ assert.throws(() => m.merge(pdf, JSON.stringify([{ annotId: 'bad', authorId: 'u'
 const flat = JSON.parse(m.list(m.flatten(pdf))).map((e) => e.subtype);
 assert.deepEqual(flat, ['Link'], '주석은 굽고 링크만 남는다');
 assert.throws(() => m.flatten(new Uint8Array([1, 2, 3])), /can't be opened/);
+// decrypt: 암호 없는 PDF는 그대로, PDF가 아니면 오류(암호 PDF 시험은 Rust 단위 시험과 dts-craft의 pdf-export 시험이 한다)
+assert.deepEqual(Buffer.from(m.decrypt(pdf)), Buffer.from(pdf));
+assert.throws(() => m.decrypt(new Uint8Array([1, 2, 3])), /can't be opened/);
 
 // 7. 텍스트·좌표 추출: 400x200 쪽 (50,150)에 글자. 보이는 쪽 기준(왼쪽 위 원점, y 아래), 쪽 번호 1부터
 function textPdf(extra) {
@@ -138,4 +141,4 @@ assert.throws(() => m.extractText(textPdf(''), '{"pages":[2]}'), /page 2 does no
 assert.throws(() => m.extractText(textPdf(''), '{"pages":[0]}'), /numbered from 1/);
 assert.throws(() => m.extractText(new Uint8Array([1, 2, 3]), ''), /can't be opened/);
 
-console.log('ok: list/exportXfdf/strip/merge/flatten/extractText, 한글 서브셋 글꼴', largestStream(merged), 'bytes max stream');
+console.log('ok: list/exportXfdf/strip/merge/flatten/decrypt/extractText, 한글 서브셋 글꼴', largestStream(merged), 'bytes max stream');

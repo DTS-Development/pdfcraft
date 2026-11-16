@@ -1,6 +1,6 @@
 //! The PPM server's view of a PDF's annotations, for Node (`wasm-bindgen --target nodejs`).
 //!
-//! Six functions, bytes as `Uint8Array` and everything else as JSON text. Pages are 1-based
+//! Seven functions, bytes as `Uint8Array` and everything else as JSON text. Pages are 1-based
 //! everywhere here (as in the list); `index` is the entry's place in that page's `/Annots` array,
 //! every subtype counted, so annotations without `/NM` are addressed the same way.
 //!
@@ -9,6 +9,7 @@
 //! * `strip(pdf, [{page, index}])` → PDF without those annotations and their pop-ups
 //! * `merge(pdf, [{annotId, authorId, xfdf}])` → PDF with them added, appearances drawn
 //! * `flatten(pdf)` → PDF with every comment and form field baked into the pages
+//! * `decrypt(pdf)` → the PDF without its `/Encrypt` when it opens with the empty user password (the input as is when it is not encrypted)
 //! * `extractText(pdf, options)` → `[{page, width, height, rotation, cropBox, lines: [{text, bbox, words?, glyphs?}]}]`,
 //!   boxes in the editor's page view space (points, top-left origin, y down, `/Rotate` and crop box applied)
 //!
@@ -17,7 +18,7 @@
 
 use std::sync::Arc;
 
-use pdfcraft_cos::{Document, SaveOptions, write_full};
+use pdfcraft_cos::{CosError, Document, SaveOptions, write_full};
 use pdfcraft_edit::{EditError, flatten_export};
 use pdfcraft_render::{ExtractError, OpenError, PageText, extract_pages_each};
 use pdfcraft_xfdf::{ExportRequest, RemoteItem, apply_remote, export_positions, list_annotations, strip_positions};
@@ -307,6 +308,41 @@ pub fn extract_text_json(pdf: Vec<u8>, options: &str) -> Result<String, String> 
     String::from_utf8(json).map_err(|e| e.to_string())
 }
 
+/// Prefix of the error when `decrypt` needs a password the caller does not have (the user password
+/// is not empty); the caller tells this apart from a broken PDF by it.
+pub const DECRYPT_NEEDS_PASSWORD: &str = "password required: ";
+/// Prefix of the error when `decrypt` meets a security handler it cannot open (public-key, unknown
+/// versions, malformed `/Encrypt`).
+pub const DECRYPT_UNSUPPORTED: &str = "unsupported security: ";
+
+/// Removes the password protection of a PDF that opens with the empty user password (owner-password
+/// only, any R2-R6 handler) and writes it back in full, so strings and streams are stored plain.
+/// A PDF without `/Encrypt` comes back unchanged and is not rewritten. A PDF that needs a user
+/// password fails with [`DECRYPT_NEEDS_PASSWORD`], an unsupported handler with [`DECRYPT_UNSUPPORTED`].
+/// The permissions of the original (printing, editing limits) are gone from the result.
+pub fn decrypt_pdf(pdf: Vec<u8>) -> Result<Vec<u8>, String> {
+    // Share the input through an Arc so an unencrypted PDF can be handed back without copying it.
+    let bytes = Arc::new(pdf);
+    let mut doc = match Document::open(Arc::clone(&bytes)) {
+        Ok(d) => d,
+        Err(CosError::NeedsPassword | CosError::WrongPassword) => return Err(format!("{DECRYPT_NEEDS_PASSWORD}the PDF needs a user password")),
+        Err(CosError::Security(why)) => return Err(format!("{DECRYPT_UNSUPPORTED}{why}")),
+        Err(e) => return Err(format!("the PDF can't be opened: {e}")),
+    };
+    let Some(handler) = doc.security() else {
+        drop(doc);
+        return Ok(Arc::try_unwrap(bytes).unwrap_or_else(|shared| shared.to_vec()));
+    };
+    // The standard handler only has these versions; anything else would be read with a guessed
+    // algorithm and come out as garbage without an error.
+    let d = handler.dict();
+    if !matches!(d.v, 1 | 2 | 4 | 5) || !(2..=6).contains(&d.r) {
+        return Err(format!("{DECRYPT_UNSUPPORTED}version {} revision {}", d.v, d.r));
+    }
+    doc.remove_encryption();
+    save(&doc)
+}
+
 #[wasm_bindgen]
 pub fn list(pdf: Vec<u8>) -> Result<String, JsError> {
     list_json(pdf).map_err(|e| JsError::new(&e))
@@ -330,6 +366,11 @@ pub fn merge(pdf: Vec<u8>, items: &str) -> Result<Vec<u8>, JsError> {
 #[wasm_bindgen(js_name = flatten)]
 pub fn flatten_bytes(pdf: Vec<u8>) -> Result<Vec<u8>, JsError> {
     flatten_pdf(pdf).map_err(|e| JsError::new(&e))
+}
+
+#[wasm_bindgen]
+pub fn decrypt(pdf: Vec<u8>) -> Result<Vec<u8>, JsError> {
+    decrypt_pdf(pdf).map_err(|e| JsError::new(&e))
 }
 
 #[wasm_bindgen(js_name = extractText)]
@@ -460,5 +501,76 @@ mod tests {
         assert!(extract_text_json(pdf.clone(), r#"{"maxGlyphs":5}"#).unwrap_err().contains("more than 5 glyphs"));
         assert_eq!(extract_text_json(pdf, r#"{"pages":[1,1]}"#).map(|s| s.len() > 2), Ok(true));
         assert!(extract_text_json(b"not a pdf".to_vec(), "").is_err());
+    }
+
+    /// `bytes` encrypted with `algorithm` (user password `user`, owner password `owner`).
+    fn encrypted(bytes: Vec<u8>, algorithm: pdfcraft_cos::Algorithm, user: &str, owner: &str, encrypt_metadata: bool) -> Vec<u8> {
+        let mut doc = Document::open(Arc::new(bytes)).unwrap();
+        let params =
+            pdfcraft_cos::NewEncryption { algorithm, user_password: user, owner_password: owner, permissions: 0, encrypt_metadata, seed: [7; 32] };
+        doc.set_encryption(&params).unwrap();
+        write_full(&doc, &SaveOptions::default()).unwrap()
+    }
+
+    fn has(hay: &[u8], needle: &[u8]) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
+    fn decrypt_opens_owner_only_pdfs_for_every_handler() {
+        use pdfcraft_cos::Algorithm::*;
+        for alg in [Rc4_40, Rc4_128, Aes128, Aes256] {
+            for encrypt_metadata in [true, false] {
+                let enc = encrypted(text_sample(0), alg, "", "owner-pw", encrypt_metadata);
+                assert!(has(&enc, b"/Encrypt"), "{alg:?}: sample is not encrypted");
+                assert!(!has(&enc, b"Hello world"), "{alg:?}: content is not encrypted");
+                let out = decrypt_pdf(enc).unwrap();
+                assert!(!has(&out, b"/Encrypt"), "{alg:?}: /Encrypt left");
+                let text = extract_text_json(out, "{}").unwrap();
+                assert!(text.contains("Hello world") && text.contains("Second line"), "{alg:?}: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn decrypt_keeps_annotations_of_an_encrypted_pdf() {
+        let enc = encrypted(sample(), pdfcraft_cos::Algorithm::Aes128, "", "owner-pw", true);
+        let list: Vec<serde_json::Value> = serde_json::from_str(&list_json(decrypt_pdf(enc).unwrap()).unwrap()).unwrap();
+        let kinds: Vec<&str> = list.iter().filter_map(|e| e["subtype"].as_str()).collect();
+        assert_eq!(kinds, ["Link", "Square"]);
+    }
+
+    #[test]
+    fn decrypt_returns_a_plain_pdf_unchanged() {
+        let plain = sample();
+        assert_eq!(decrypt_pdf(plain.clone()).unwrap(), plain);
+    }
+
+    #[test]
+    fn decrypt_refuses_a_pdf_that_needs_a_user_password() {
+        use pdfcraft_cos::Algorithm::*;
+        for alg in [Rc4_40, Rc4_128, Aes128, Aes256] {
+            let enc = encrypted(sample(), alg, "secret", "owner-pw", true);
+            let err = decrypt_pdf(enc).unwrap_err();
+            assert!(err.starts_with(DECRYPT_NEEDS_PASSWORD), "{alg:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn decrypt_fails_cleanly_on_bad_input() {
+        assert!(decrypt_pdf(b"not a pdf".to_vec()).unwrap_err().starts_with("the PDF can't be opened"));
+    }
+
+    #[test]
+    fn decrypt_refuses_handlers_it_cannot_open() {
+        let enc = encrypted(sample(), pdfcraft_cos::Algorithm::Rc4_128, "", "o", false);
+        // same-length edits on the bytes, so the xref offsets stay valid
+        for (from, to) in [("/R 3", "/R 9"), ("/V 2", "/V 9"), ("/Filter /Standard", "/Filter /Standarx")] {
+            let at = enc.windows(from.len()).position(|w| w == from.as_bytes()).unwrap_or_else(|| panic!("{from} not in the /Encrypt dictionary"));
+            let mut bad = enc.clone();
+            bad[at..at + to.len()].copy_from_slice(to.as_bytes());
+            let err = decrypt_pdf(bad).err().unwrap_or_else(|| panic!("{from} -> {to} was accepted"));
+            assert!(err.starts_with(DECRYPT_UNSUPPORTED), "{from} -> {to}: {err}");
+        }
     }
 }
