@@ -3266,6 +3266,36 @@ trailer << /Root 1 0 R >>
         assert!([(75, 25), (25, 25), (75, 75), (25, 75)].iter().all(|&(x, y)| px(&shown, x, y) == green), "keep does nothing while comments show");
     }
 
+    /// `keep_signatures` follows the engine's signature rule: also an unsealed host signature stamp, a typed
+    /// signature, a picture signature and a Fill & Sign signature stay, but not a stamp made from a template.
+    #[test]
+    fn keeping_signatures_follows_the_engines_rule() {
+        let pdf = b"%PDF-1.7
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Annots [4 0 R 5 0 R 6 0 R 7 0 R 9 0 R 10 0 R] >> endobj
+4 0 obj << /Type /Annot /Subtype /Stamp /F 4 /PpmStamp ({\"date\":\"2026-11-17\"}) /Rect [0 80 20 100] /AP << /N 8 0 R >> >> endobj
+5 0 obj << /Type /Annot /Subtype /Stamp /F 4 /Name /PCTypedSignature /Rect [20 80 40 100] /AP << /N 8 0 R >> >> endobj
+6 0 obj << /Type /Annot /Subtype /Ink /F 4 /PCFillSign true /Rect [40 80 60 100] /AP << /N 8 0 R >> >> endobj
+7 0 obj << /Type /Annot /Subtype /Ink /F 4 /Subj (Signature) /Rect [60 80 80 100] /AP << /N 8 0 R >> >> endobj
+9 0 obj << /Type /Annot /Subtype /Stamp /F 4 /PpmStamp ({\"templateId\":\"t\",\"date\":\"x\"}) /Rect [0 40 20 60] /AP << /N 8 0 R >> >> endobj
+10 0 obj << /Type /Annot /Subtype /Ink /F 4 /Subj (Note) /Rect [20 40 40 60] /AP << /N 8 0 R >> >> endobj
+8 0 obj << /Type /XObject /Subtype /Form /BBox [0 0 30 30] /Length 24 >> stream
+0 1 0 rg 0 0 30 30 re f
+endstream endobj
+trailer << /Root 1 0 R >>
+%%EOF";
+        let mut r = PageRenderer::new(Arc::new(pdf.to_vec()), RenderConfig { hide_comments: true, keep_signatures: true, ..RenderConfig::default() });
+        let page = r.render(RenderRequest { page: 0, kind: RequestKind::Pixels, tile: None, scale: 1.0, tag: 0, ..Default::default() });
+        let px = |x: u32, y: u32| page.rgba[((y * page.width + x) * 4) as usize..][..4].to_vec();
+        let (green, white) = (vec![0, 255, 0, 255], vec![255, 255, 255, 255]);
+        for x in [10, 30, 50, 70] {
+            assert_eq!(px(x, 10), green, "a signature stays at x {x}");
+        }
+        assert_eq!(px(10, 50), white, "a template stamp is hidden");
+        assert_eq!(px(30, 50), white, "an ordinary ink comment is hidden");
+    }
+
     /// A reply (`/IRT`, `/RT` absent or `/R`) is not drawn when replies are hidden; its parent, an
     /// annotation grouped with its parent (`/RT /Group`) and an annotation without `/IRT` still are.
     #[test]

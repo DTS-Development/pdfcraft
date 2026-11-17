@@ -7153,7 +7153,20 @@ mod annot_sync {
         assert!(s.set_annotation_custom_data(pairs("k", &"v".repeat(2001))).is_err());
         assert!(s.set_annotation_custom_data((0..65).map(|i| (format!("k{i}"), "v".into())).collect()).is_err());
         assert!(s.set_annotation_custom_data(vec![("a".into(), "1".into()), ("a".into(), "2".into())]).is_err());
+        assert!(s.set_annotation_custom_data((0..6).map(|i| (format!("k{i}"), "v".repeat(2000))).collect()).is_err(), "too much in all");
         assert!(s.set_annotation_custom_data(host_pairs()).is_ok());
+    }
+
+    /// The most customData allows still goes out: the worst characters (`\"`) escape to the longest XFDF.
+    #[test]
+    fn the_biggest_host_custom_data_still_goes_out() {
+        let (mut s, id) = sharing("alice");
+        let pairs: Vec<(String, String)> = (0..5).map(|i| (format!("k{i}"), "\"".repeat(1990))).collect();
+        s.set_annotation_custom_data(pairs).unwrap();
+        s.apply(id, rect(0, 10.0)).unwrap();
+        let up = only(s.take_annot_changes(id));
+        assert!(up.xfdf.contains("trn-custom-data") && up.xfdf.len() < 200_000, "{}", up.xfdf.len());
+        assert!(s.take_annot_problems(id).is_empty());
     }
 
     #[test]

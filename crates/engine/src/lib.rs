@@ -3220,6 +3220,9 @@ impl From<pdfcraft_sign::SignError> for EditError {
 pub const MAX_CUSTOM_KEYS: usize = 64;
 pub const MAX_CUSTOM_KEY_CHARS: usize = 100;
 pub const MAX_CUSTOM_VALUE_CHARS: usize = 2000;
+/// All keys and values together. Escaped for the XFDF a character grows to 7 bytes at worst, so this keeps a comment's
+/// XFDF far below the 200,000 limit: a comment that is too big to send is never made.
+pub const MAX_CUSTOM_TOTAL_CHARS: usize = 10_000;
 
 #[derive(Default)]
 pub struct Session {
@@ -3595,10 +3598,14 @@ impl Session {
     /// Put these key/value pairs on the comments and answers the user creates from now on, until
     /// replaced (an empty list stops). They reach the XFDF as `<trn-custom-data>`. At most
     /// [`MAX_CUSTOM_KEYS`] pairs, keys of 1 to [`MAX_CUSTOM_KEY_CHARS`] characters, values of at most
-    /// [`MAX_CUSTOM_VALUE_CHARS`]; keys starting with `ppm` (any case) are PdfCraft's own and refused.
+    /// [`MAX_CUSTOM_VALUE_CHARS`], [`MAX_CUSTOM_TOTAL_CHARS`] in all; keys starting with `ppm` (any case) are PdfCraft's own and refused.
     pub fn set_annotation_custom_data(&mut self, pairs: Vec<(String, String)>) -> Result<(), String> {
         if pairs.len() > MAX_CUSTOM_KEYS {
             return Err(format!("customData has more than {MAX_CUSTOM_KEYS} keys"));
+        }
+        let total: usize = pairs.iter().map(|(k, v)| k.chars().count() + v.chars().count()).sum();
+        if total > MAX_CUSTOM_TOTAL_CHARS {
+            return Err(format!("customData is more than {MAX_CUSTOM_TOTAL_CHARS} characters in all"));
         }
         let mut seen = std::collections::HashSet::new();
         for (k, v) in &pairs {
