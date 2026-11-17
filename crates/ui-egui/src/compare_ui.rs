@@ -37,6 +37,8 @@ pub struct CompareState {
     pub overlay_view: Option<crate::canvas::DocView>,
     /// PPM: the overlay couldn't be built.
     pub overlay_failed: bool,
+    /// PPM: the host's overlay colours (the viewer's own when it names none).
+    pub overlay_style: pdfcraft_engine::compare::OverlayStyle,
 }
 
 /// The PPM build follows the viewer's compare screen: the current file on the left, the chosen
@@ -348,6 +350,7 @@ impl PdfCraftApp {
                     overlay: None,
                     overlay_view: None,
                     overlay_failed: false,
+                    overlay_style: Default::default(),
                 });
                 self.right = Some(RightPanel::Compare);
                 self.notify(if n == 0 {
@@ -439,7 +442,10 @@ impl PdfCraftApp {
             return;
         }
         match self.session.compare_overlay_job(c.new, c.old, ppm::OVERLAY_DPI) {
-            Ok(job) => c.overlay_job = Some(job),
+            Ok(mut job) => {
+                job.set_style(c.overlay_style);
+                c.overlay_job = Some(job);
+            }
             Err(e) => {
                 c.overlay_failed = true;
                 self.notify_error(e);

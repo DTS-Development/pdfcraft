@@ -292,9 +292,10 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 /// - `pdfcraft:stamp-armed` `{ id }`, `pdfcraft:stamp-placed` `{ id, page }`,
 ///   `pdfcraft:stamp-cancelled` `{ id }` and `pdfcraft:stamp-failed` `{ id, error }` (to the
 ///   parent) report how a stamp request went.
-/// - `pdfcraft:compare` (from the parent): `{ id, old: { name, bytes }, new: { name, bytes }, mode?, policy? }`
+/// - `pdfcraft:compare` (from the parent): `{ id, old: { name, bytes }, new: { name, bytes }, mode?, policy?, overlay? }`
 ///   opens the old file in a background tab and the new file as the active one, then runs the
-///   Compare Files comparison. A window compares once; `pdfcraft:compare-done`
+///   Compare Files comparison. `overlay` is `{ colorA?, colorB?, opacity? }`: the ink of the old and the new
+///   file in the overlay (`#rgb`/`#rrggbb`) and how strong it is (0 to 1); a value that can't be read fails the compare. A window compares once; `pdfcraft:compare-done`
 ///   `{ id, replaced, inserted, deleted, visual }` or `pdfcraft:compare-failed` `{ id, error }`
 ///   (to the parent) report the outcome. In this mode the Compare panel has no Mark as
 ///   comments or Report.
@@ -835,7 +836,15 @@ mod host {
         // The same rules as an open: `mode` and `policy`, and the narrowest without them.
         let scope = pdfcraft_ui_egui::open_scope(string(data, "mode").as_deref());
         let ownership = pdfcraft_ui_egui::with_policy(pdfcraft_ui_egui::Ownership { scope, ..Default::default() }, policy_overrides(data));
-        Ok(pdfcraft_ui_egui::CompareCommand { id, old: compare_file(data, "old")?, new: compare_file(data, "new")?, ownership })
+        let overlay = js_sys::Reflect::get(data, &JsValue::from_str("overlay")).unwrap_or(JsValue::UNDEFINED);
+        let overlay = if overlay.is_undefined() || overlay.is_null() {
+            None
+        } else {
+            let json = js_sys::JSON::stringify(&overlay).ok().and_then(|s| s.as_string()).ok_or_else(|| "overlay is not plain data".to_string())?;
+            let value = serde_json::from_str::<serde_json::Value>(&json).map_err(|e| e.to_string())?;
+            Some(pdfcraft_ui_egui::overlay_style_from_json(&value)?)
+        };
+        Ok(pdfcraft_ui_egui::CompareCommand { id, old: compare_file(data, "old")?, new: compare_file(data, "new")?, ownership, overlay })
     }
 
     /// Read a `pdfcraft:stamp-add` message; the error is what the parent is told.

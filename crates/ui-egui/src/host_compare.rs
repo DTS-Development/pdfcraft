@@ -24,6 +24,28 @@ pub struct CompareCommand {
     pub old: (String, Vec<u8>),
     pub new: (String, Vec<u8>),
     pub ownership: pdfcraft_engine::Ownership,
+    /// How the overlay is inked (`overlay` of the message); the viewer's colours when none.
+    pub overlay: Option<pdfcraft_engine::compare::OverlayStyle>,
+}
+
+/// Read the host's `overlay` object: `colorA` (the old file's ink), `colorB` (the new file's ink),
+/// `opacity` (0 to 1). A value of the wrong type or out of range is an error, never ignored.
+pub fn overlay_style_from_json(v: &serde_json::Value) -> Result<pdfcraft_engine::compare::OverlayStyle, String> {
+    let obj = v.as_object().ok_or("overlay must be an object")?;
+    let mut style = pdfcraft_engine::compare::OverlayStyle::default();
+    let rgb = |value: &serde_json::Value, name: &str| -> Result<[u8; 3], String> {
+        let text = value.as_str().ok_or_else(|| format!("{name} must be a string"))?;
+        Ok(crate::watermark::parse_rgb(text).map_err(|_| format!("{name} must be #rgb or #rrggbb"))?.map(|c| (c * 255.0).round() as u8))
+    };
+    for (key, value) in obj {
+        match key.as_str() {
+            "colorA" => style.chosen = rgb(value, "colorA")?,
+            "colorB" => style.current = rgb(value, "colorB")?,
+            "opacity" => style.strength = value.as_f64().filter(|n| (0.0..=1.0).contains(n)).ok_or("opacity must be a number from 0 to 1")? as f32,
+            other => return Err(format!("unknown overlay field {other}")),
+        }
+    }
+    Ok(style)
 }
 
 /// What the host is told.
@@ -84,7 +106,7 @@ impl PdfCraftApp {
                 self.fail_compare(&command.id, "busy: this window already compares");
             } else {
                 self.compare_taken = true;
-                match self.start_host_compare(command.old, command.new, command.ownership) {
+                match self.start_host_compare(command.old, command.new, command.ownership, command.overlay) {
                     Ok((replaced, inserted, deleted, visual)) => {
                         self.emit_compare(CompareEvent::Done { id: command.id.clone(), replaced, inserted, deleted, visual });
                         // The host starts from side by side, so only a change from that is told.
@@ -103,6 +125,7 @@ impl PdfCraftApp {
         old: (String, Vec<u8>),
         new: (String, Vec<u8>),
         ownership: pdfcraft_engine::Ownership,
+        overlay: Option<pdfcraft_engine::compare::OverlayStyle>,
     ) -> Result<(usize, usize, usize, usize), String> {
         // A prompt or a host file still on its way in is not ours to take over.
         if self.password_prompt.is_some() || self.annot_open_waiting || self.host_open_pending() {
@@ -136,6 +159,9 @@ impl PdfCraftApp {
         self.end_compare();
         self.compare_old = Some(self.views[before].id);
         self.run_compare();
+        if let (Some(style), Some(c)) = (overlay, self.compare.as_mut()) {
+            c.overlay_style = style;
+        }
         let Some(s) = self.compare.as_ref() else { return Err("the comparison failed".into()) };
         Ok((s.result.count(Kind::Replaced), s.result.count(Kind::Inserted), s.result.count(Kind::Deleted), s.visual.len()))
     }
@@ -154,6 +180,30 @@ mod tests {
     use super::*;
     use crate::RightPanel;
 
+    #[test]
+    fn the_overlay_style_is_read_strictly() {
+        let style = overlay_style_from_json(&serde_json::json!({ "colorA": "#00f", "colorB": "#ff8000", "opacity": 0.5 })).unwrap();
+        assert_eq!((style.chosen, style.current, style.strength), ([0, 0, 255], [255, 128, 0], 0.5));
+        assert_eq!(overlay_style_from_json(&serde_json::json!({})).unwrap(), Default::default());
+        for bad in [
+            serde_json::json!({ "colorA": "red" }),
+            serde_json::json!({ "colorB": 3 }),
+            serde_json::json!({ "opacity": 1.5 }),
+            serde_json::json!({ "color": "#fff" }),
+            serde_json::json!([]),
+        ] {
+            assert!(overlay_style_from_json(&bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_hosts_overlay_style_reaches_the_overlay_build() {
+        let (mut h, _) = app(true);
+        let style = pdfcraft_engine::compare::OverlayStyle { current: [0, 200, 0], chosen: [200, 0, 200], strength: 0.5 };
+        send(&mut h, CompareCommand { overlay: Some(style), ..command("c1") });
+        assert_eq!(h.state().compare.as_ref().unwrap().overlay_style, style);
+    }
+
     fn text_pdf(text: &str) -> Vec<u8> {
         Session::new().create_from_text("t", text).unwrap().to_vec()
     }
@@ -164,6 +214,7 @@ mod tests {
             old: ("old.pdf".into(), text_pdf("Delivery within five days. Returns accepted.")),
             new: ("new.pdf".into(), text_pdf("Delivery within three days. Returns accepted for a week.")),
             ownership: Default::default(),
+            overlay: None,
         }
     }
 

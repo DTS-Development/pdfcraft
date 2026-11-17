@@ -94,7 +94,7 @@ impl WatermarkStyle {
 }
 
 /// `#rgb` or `#rrggbb`.
-fn parse_rgb(text: &str) -> Result<[f32; 3], String> {
+pub(crate) fn parse_rgb(text: &str) -> Result<[f32; 3], String> {
     let bad = || "color must be #rgb or #rrggbb".to_string();
     let hex = text.strip_prefix('#').ok_or_else(bad)?;
     if !hex.is_ascii() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {

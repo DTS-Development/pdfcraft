@@ -127,6 +127,21 @@ pub const OVERLAY_CURRENT: [u8; 3] = [255, 0, 0];
 pub const OVERLAY_CHOSEN: [u8; 3] = [0, 90, 255];
 pub const OVERLAY_SAME: [u8; 3] = [140, 140, 140];
 
+/// How an overlay is inked: the current file's colour, the chosen file's colour, and how strong
+/// every mark is (1 as dark as the ink was, 0 invisible). Both-files ink stays [`OVERLAY_SAME`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OverlayStyle {
+    pub current: [u8; 3],
+    pub chosen: [u8; 3],
+    pub strength: f32,
+}
+
+impl Default for OverlayStyle {
+    fn default() -> Self {
+        Self { current: OVERLAY_CURRENT, chosen: OVERLAY_CHOSEN, strength: 1.0 }
+    }
+}
+
 /// Below this ink (0 white .. 1 black) a pixel counts as paper, so page tints don't show.
 const INK_FLOOR: f32 = 0.12;
 
@@ -143,6 +158,19 @@ fn ink(px: &[u8]) -> f32 {
 /// corner (page origins align, nothing is stretched): ink only in `current` red, only in `chosen`
 /// blue, in both gray, each as dark as the ink was. `out` is reused from page to page.
 pub fn overlay_page_into(out: &mut Vec<u8>, current: (&[u8], u32, u32), chosen: (&[u8], u32, u32), width: u32, height: u32) {
+    overlay_page_styled_into(out, current, chosen, width, height, &OverlayStyle::default());
+}
+
+/// [`overlay_page_into`] with the host's colours and strength.
+pub fn overlay_page_styled_into(
+    out: &mut Vec<u8>,
+    current: (&[u8], u32, u32),
+    chosen: (&[u8], u32, u32),
+    width: u32,
+    height: u32,
+    style: &OverlayStyle,
+) {
+    let strength = style.strength.clamp(0.0, 1.0);
     out.clear();
     out.resize(width as usize * height as usize * 4, 255);
     fn row<'a>(img: (&'a [u8], u32, u32), y: u32) -> &'a [u8] {
@@ -163,9 +191,10 @@ pub fn overlay_page_into(out: &mut Vec<u8>, current: (&[u8], u32, u32), chosen: 
             }
             let (rgb, k) = match (a > 0.0, b > 0.0) {
                 (true, true) => (OVERLAY_SAME, a.max(b)),
-                (true, false) => (OVERLAY_CURRENT, a),
-                _ => (OVERLAY_CHOSEN, b),
+                (true, false) => (style.current, a),
+                _ => (style.chosen, b),
             };
+            let k = k * strength;
             for (c, v) in rgb.iter().enumerate() {
                 line[x * 4 + c] = (255.0 - (255.0 - f32::from(*v)) * k).round() as u8;
             }
@@ -227,9 +256,15 @@ pub struct OverlayJob {
     pages: pdfcraft_create::ImagePages,
     /// The composite's pixels, reused for every page.
     canvas: Vec<u8>,
+    style: OverlayStyle,
 }
 
 impl OverlayJob {
+    /// Ink the pages with these colours (before the first [`Self::step`]).
+    pub fn set_style(&mut self, style: OverlayStyle) {
+        self.style = style;
+    }
+
     /// (pages done, pages in all).
     pub fn progress(&self) -> (usize, usize) {
         (self.next, self.total)
@@ -250,7 +285,7 @@ impl OverlayJob {
             return Err(EditError::Invalid(e.to_string()));
         }
         let (w, h) = (x.width.max(y.width), x.height.max(y.height));
-        overlay_page_into(&mut self.canvas, (&x.rgba, x.width, x.height), (&y.rgba, y.width, y.height), w, h);
+        overlay_page_styled_into(&mut self.canvas, (&x.rgba, x.width, x.height), (&y.rgba, y.width, y.height), w, h, &self.style);
         // The canvas is opaque, so premultiplied or not it is the same pixels.
         let zlib = rgb_png_data(&self.canvas, w, h).map_err(EditError::Invalid)?;
         self.pages.add_png_data((w, h), zlib)?;
@@ -298,6 +333,7 @@ impl Session {
             chosen_pages: b.info.pages.len(),
             pages: pdfcraft_create::ImagePages::new(ImageResolution::Dpi(f64::from(72.0 * scale)))?,
             canvas: Vec::new(),
+            style: OverlayStyle::default(),
         })
     }
 
@@ -433,6 +469,25 @@ mod overlay_tests {
         assert_eq!(px(&out, 2), OVERLAY_CHOSEN, "only in the chosen file");
         assert_eq!(px(&out, 3), [255, 255, 255], "paper stays white");
         assert!(out.chunks(4).all(|p| p[3] == 255));
+    }
+
+    #[test]
+    fn the_host_picks_the_colours_and_a_strength_that_fades_the_ink() {
+        let (cur, chosen) = (strip(&[0, 1]), strip(&[1, 2]));
+        let style = OverlayStyle { current: [0, 200, 0], chosen: [200, 0, 200], strength: 1.0 };
+        let mut out = Vec::new();
+        overlay_page_styled_into(&mut out, (&cur, 4, 1), (&chosen, 4, 1), 4, 1, &style);
+        assert_eq!((px(&out, 0), px(&out, 1), px(&out, 2)), ([0, 200, 0], OVERLAY_SAME, [200, 0, 200]));
+        // No style means the viewer's colours.
+        assert_eq!(overlay_page((&cur, 4, 1), (&chosen, 4, 1), 4, 1), {
+            overlay_page_styled_into(&mut out, (&cur, 4, 1), (&chosen, 4, 1), 4, 1, &OverlayStyle::default());
+            out.clone()
+        });
+        // Half strength: halfway between paper and the colour; none: paper.
+        overlay_page_styled_into(&mut out, (&cur, 4, 1), (&chosen, 4, 1), 4, 1, &OverlayStyle { strength: 0.5, ..style });
+        assert_eq!(px(&out, 0), [128, 228, 128]);
+        overlay_page_styled_into(&mut out, (&cur, 4, 1), (&chosen, 4, 1), 4, 1, &OverlayStyle { strength: 0.0, ..style });
+        assert!((0..4).all(|i| px(&out, i) == [255, 255, 255]));
     }
 
     #[test]

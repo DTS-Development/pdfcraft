@@ -69,7 +69,7 @@ mod sign_ui;
 mod stamps_ui;
 pub use host_annots::{AnnotCommand, AnnotEvent, AnnotInbox, HostAnnotFn};
 pub use host_bytes::{BytesInbox, BytesPurpose, BytesReply, BytesRequest, HostBytesFn};
-pub use host_compare::{CompareCommand, CompareEvent, CompareInbox, HostCompareFn, MAX_COMPARE_BYTES};
+pub use host_compare::{CompareCommand, CompareEvent, CompareInbox, HostCompareFn, MAX_COMPARE_BYTES, overlay_style_from_json};
 pub use host_lock::{HOST_LOCK, commands_manifest, open_scope, parse_mode, policy_overrides, with_policy};
 pub use host_stamp::{HostStampFn, MAX_PNG_BYTES, SIGN_BOX_SIZE, StampCommand, StampEvent, StampInbox};
 pub use host_view::{HostViewFn, MAX_HIGHLIGHT_RECTS, PageSize, ViewCommand, ViewEvent, ViewInbox};
