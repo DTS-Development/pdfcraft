@@ -507,6 +507,9 @@ pub struct DocView {
     /// Edit text: the lines per page (with the document generation they were read at), and the
     /// line being edited.
     pub(crate) edit_lines: HashMap<usize, (u64, Vec<pdfcraft_engine::TextBlock>)>,
+    /// Comments hidden but signatures kept: the sign boxes and sealed signatures per page, read once per document
+    /// generation and annotation count (finding a sign box walks the page tree, too dear to repeat every frame).
+    pub(crate) kept_cache: HashMap<usize, ((u64, usize), Vec<usize>)>,
     pub line_editor: Option<crate::edit_text_ui::LineEditor>,
     /// The box a click switched to while another paragraph was being edited: it opens once the
     /// queued edit has applied, so its index and geometry come from the document it now is (#2022).
@@ -781,6 +784,7 @@ impl DocView {
             pending_edit: None,
             host_stamp_outcome: None,
             edit_lines: HashMap::new(),
+            kept_cache: HashMap::new(),
             line_editor: None,
             pending_text_open: None,
             text_background: Default::default(),
@@ -3091,11 +3095,20 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
             // Comments: tools, selection, moving and resizing come before text selection.
             // Hidden but kept: sign boxes and sealed signatures stay selectable, so signing can go on.
             let kept: Vec<usize> = if comments_hidden && doc.keeps_signatures() {
-                info.annotations
-                    .iter()
-                    .filter(|a| a.page == i && !a.is_reply() && (a.sealed || doc.sign_box_at(i, a.index).is_some()))
-                    .map(|a| a.index)
-                    .collect()
+                let key = (doc.edit_generation(), info.annotations.len());
+                match view.kept_cache.get(&i) {
+                    Some((k, v)) if *k == key => v.clone(),
+                    _ => {
+                        let v: Vec<usize> = info
+                            .annotations
+                            .iter()
+                            .filter(|a| a.page == i && !a.is_reply() && (a.sealed || doc.sign_box_at(i, a.index).is_some()))
+                            .map(|a| a.index)
+                            .collect();
+                        view.kept_cache.insert(i, (key, v.clone()));
+                        v
+                    }
+                }
             } else {
                 Vec::new()
             };
