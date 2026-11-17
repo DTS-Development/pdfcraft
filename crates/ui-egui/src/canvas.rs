@@ -2107,6 +2107,11 @@ impl DocView {
     }
 }
 
+/// Hidden comments have no hover popup (it would give away who wrote them); the sign boxes and signatures kept visible do.
+fn hover_allowed(comments_hidden: bool, kept: &[usize], index: usize) -> bool {
+    !comments_hidden || kept.contains(&index)
+}
+
 /// The hover popup for an annotation. Replies and Fill & Sign marks (typed text, checks, signatures)
 /// show none: they are page content being edited, not comments.
 fn annotation_hover_text(a: &pdfcraft_render::Annotation) -> Option<String> {
@@ -3612,7 +3617,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                 // freehand, where it would cover the next stroke (#429).
                 let freehand = matches!(tool, QuickTool::Comment(comments::CommentTool::Ink | comments::CommentTool::Eraser));
                 let gesturing = view.comments.gesture.is_some() || freehand;
-                for a in info.annotations.iter().filter(|a| a.page == i && !gesturing) {
+                for a in info.annotations.iter().filter(|a| a.page == i && !gesturing && hover_allowed(comments_hidden, &kept, a.index)) {
                     let sr = xf.user_rect(info, i, a.rect);
                     let hidden = prefs.hide_empty_highlight_hover && a.subtype == "Highlight" && a.contents.as_deref().is_none_or(str::is_empty);
                     if sr.contains(p)
@@ -5502,6 +5507,14 @@ mod tests {
             intent: None,
             fill_sign,
         }
+    }
+
+    #[test]
+    fn hidden_comments_have_no_hover_popup_except_the_kept_ones() {
+        assert!(hover_allowed(false, &[], 3), "shown: every comment");
+        assert!(!hover_allowed(true, &[], 3), "hidden, nothing kept");
+        assert!(!hover_allowed(true, &[1, 2], 3), "hidden, this one not kept");
+        assert!(hover_allowed(true, &[1, 3], 3), "hidden, kept");
     }
 
     #[test]

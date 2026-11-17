@@ -864,6 +864,41 @@ mod flow_tests {
         assert!(click_center(&mut h, false).is_none(), "not kept: hidden, nothing to pick");
     }
 
+    /// The kept list is cached per document generation and annotation count; every change that can alter it
+    /// (a move, a resize, a second box, an undo) must show up in the key, so the list is read again.
+    #[test]
+    fn the_kept_list_is_read_again_after_every_kind_of_change() {
+        let add = |h: &mut Harness<'static, PdfCraftApp>, id: &str| {
+            send(h, StampCommand::AddSignBox { id: id.into(), role: "r".into(), signer: None, label: "x".into(), size: None, page: None, at: None })
+        };
+        let (mut h, _) = app(true);
+        add(&mut h, "a");
+        send(&mut h, StampCommand::AnnotsVisible { visible: false, keep_signatures: true });
+        h.run_steps(3);
+        let (i, doc) = h.state().active_ids().unwrap();
+        let key = |h: &Harness<'static, PdfCraftApp>| h.state().views[i].kept_cache.get(&0).cloned().expect("the page was read");
+        let (k0, kept0) = key(&h);
+        assert_eq!(kept0.len(), 1);
+        assert_eq!(k0.0, h.state().session.get(doc).unwrap().edit_generation());
+        // A move and a resize (what a drag does) keep the count but change the generation.
+        let index = kept0[0];
+        h.state_mut().session.apply(doc, pdfcraft_engine::Edit::MoveAnnotation { page: 0, index, dx: 5.0, dy: 5.0 }).unwrap();
+        h.run_steps(3);
+        let (k1, _) = key(&h);
+        assert_ne!(k1, k0, "a move is a new generation");
+        h.state_mut().session.apply(doc, pdfcraft_engine::Edit::ResizeAnnotation { page: 0, index, rect: [10.0, 10.0, 120.0, 60.0] }).unwrap();
+        h.run_steps(3);
+        let (k2, _) = key(&h);
+        assert_ne!(k2, k1, "a resize is a new generation");
+        // A second box adds to the list; undo takes it away again.
+        add(&mut h, "b");
+        h.run_steps(3);
+        assert_eq!(key(&h).1.len(), 2);
+        h.state_mut().session.undo(doc).unwrap();
+        h.run_steps(3);
+        assert_eq!(key(&h).1.len(), 1, "undo is seen");
+    }
+
     #[test]
     fn a_sign_box_request_can_give_its_size_and_place() {
         let (mut h, ev) = app(true);
