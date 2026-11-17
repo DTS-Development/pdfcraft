@@ -5219,6 +5219,25 @@ impl Session {
         true
     }
 
+    /// Hide or show every comment like [`Self::set_hide_comments`], and say whether signatures (sealed comments)
+    /// and sign boxes stay drawn while they are hidden. Returns whether anything changed.
+    pub fn set_comments_visibility(&mut self, id: DocId, hide: bool, keep_signatures: bool) -> bool {
+        let Some(doc) = self.docs.iter_mut().find(|d| d.id == id) else { return false };
+        if doc.config.hide_comments == hide && doc.config.keep_signatures == keep_signatures {
+            return false;
+        }
+        doc.config.hide_comments = hide;
+        doc.config.keep_signatures = keep_signatures;
+        doc.renderer = RenderPool::new(doc.display.clone(), render_threads(), doc.config.clone());
+        doc.generation += 1;
+        true
+    }
+
+    /// Whether hidden comments leave signatures and sign boxes drawn.
+    pub fn keeps_signatures(&self, id: DocId) -> bool {
+        self.docs.iter().find(|d| d.id == id).is_some_and(|d| d.config.keep_signatures)
+    }
+
     /// Set the screen watermark drawn under the document's annotations (`None` clears it).
     /// Returns whether anything changed; callers must drop cached rasters for the document.
     pub fn set_watermark(&mut self, id: DocId, watermark: Option<Arc<ScreenWatermark>>) -> bool {

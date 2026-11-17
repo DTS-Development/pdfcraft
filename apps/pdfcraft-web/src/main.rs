@@ -270,12 +270,25 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   null means none; without it the box is as before) in the middle of the
 ///   page being read at once, selected; reported with `pdfcraft:stamp-placed` `{ id, page }`, or
 ///   `pdfcraft:stamp-failed` when it is refused. It is never armed, so there is nothing to cancel.
+///   Optional `width` and `height` (points, both or neither, each at least 10 and not more than the page) replace
+///   the 180 x 60 size; `page` (from 0) replaces the page being read; `x` and `y` (both or neither) put the box's
+///   top-left corner there in points on the page as shown (as in `stamp-place`), otherwise it is centred. A box
+///   that does not lie inside the page is refused.
 /// - `pdfcraft:watermark` (from the parent): `{ text }` shows a diagonal watermark on each page
 ///   on the screen, under its annotations (WebViewer's `setWatermark({ diagonal })`: one 48 pt line
 ///   in the middle of the page along its diagonal, `rgba(120, 120, 120, 0.3)`). Like the host's own
 ///   viewer, which has no print or image export, no output takes it: not the saved file, not an
 ///   image export, not Print as Image. A blank or
 ///   missing `text` takes it away. It stays until changed, over documents opened later too.
+///   An optional `style` `{ fontSize?, color?, opacity?, rotation? }` changes the look: `fontSize` in points (8 to
+///   400, default 48; the line height follows it), `color` `#rgb` or `#rrggbb` (default `#787878`), `opacity` 0 to 1
+///   (default 0.3), `rotation` in degrees clockwise as shown (-360 to 360) or `"diagonal"` (default, the page's own
+///   diagonal). A `style` that can't be read (unknown field, wrong type, out of range) takes the watermark away.
+/// - `pdfcraft:annots-visible` (from the parent): `{ visible, keepSignatures? }` hides (`false`) or shows the comments
+///   on the screen of every document, also those opened later, until it is sent again. It draws only: the document,
+///   undo, `annots-changed` and what is synced stay as they are, and while hidden the comments can't be picked or
+///   drawn (the same as the menu's Hide all comments, which still works per document afterwards). Form fields and
+///   links stay. With `keepSignatures: true` signatures (sealed comments) and sign boxes stay drawn too.
 /// - `pdfcraft:stamp-armed` `{ id }`, `pdfcraft:stamp-placed` `{ id, page }`,
 ///   `pdfcraft:stamp-cancelled` `{ id }` and `pdfcraft:stamp-failed` `{ id, error }` (to the
 ///   parent) report how a stamp request went.
@@ -294,6 +307,12 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   is not saved, not undoable and not in `annots-changed`. `color` is `#rgb`, `#rrggbb` (drawn at 40% opacity)
 ///   or `#rrggbbaa`, yellow if missing. It does not scroll (use `goto`). The next `highlight` or `pdfcraft:highlight-clear`
 ///   `{}` takes it away. Answered with `pdfcraft:highlight-done` `{ id }` or `pdfcraft:highlight-failed` `{ id, error }`.
+/// - `pdfcraft:page-info` (from the parent): `{ id }` is answered with `pdfcraft:page-info-done`
+///   `{ id, current, pages: [{ width, height, rotation }] }` (`current` from 0 like every page here; `width` and
+///   `height` in points on the page as shown, turned by `rotation`, the page's `/Rotate`, and upright like the
+///   rects of `goto`) or `pdfcraft:page-info-failed` `{ id, error }` (no document).
+///   `pdfcraft:page-changed` `{ page }` (to the parent, page from 0) follows the page being read: once when the
+///   first page of a document is drawn, then whenever it changes or another document comes to the front.
 /// - `pdfcraft:opened` (to the parent): once for each `pdfcraft:open`, when a page of that document was first drawn
 ///   (`ready` only says the app listens).
 /// - `pdfcraft:dirty` (to the parent): `{ dirty }` whenever unsaved work appears or goes away.
@@ -472,10 +491,45 @@ mod host {
                     Some("pdfcraft:watermark") => {
                         // A text of the wrong type counts as none: the watermark goes, never a stale one stays.
                         let text = string(&data, "text");
+                        // A `style` that can't be read counts as no watermark too, with the reason in the console.
+                        let style = js_sys::Reflect::get(&data, &JsValue::from_str("style")).unwrap_or(JsValue::UNDEFINED);
+                        let (text, style) = if style.is_undefined() || style.is_null() {
+                            (text, None)
+                        } else {
+                            let parsed = js_sys::JSON::stringify(&style)
+                                .ok()
+                                .and_then(|s| s.as_string())
+                                .ok_or_else(|| "style is not plain data".to_string())
+                                .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).map_err(|e| e.to_string()))
+                                .and_then(|value| pdfcraft_ui_egui::WatermarkStyle::from_json(&value));
+                            match parsed {
+                                Ok(style) => (text, Some(style)),
+                                Err(error) => {
+                                    eframe::web_sys::console::warn_1(&format!("PdfCraft: pdfcraft:watermark style refused: {error}").into());
+                                    (None, None)
+                                }
+                            }
+                        };
                         if let Ok(mut q) = stamps.lock() {
-                            q.push(pdfcraft_ui_egui::StampCommand::Watermark { text });
+                            q.push(pdfcraft_ui_egui::StampCommand::Watermark { text, style });
                         }
                         ctx.request_repaint();
+                        return;
+                    }
+                    Some("pdfcraft:annots-visible") => {
+                        // `visible` must be a boolean; anything else leaves things as they are (the host's call is refused by its own checks).
+                        let flag = |key: &str| js_sys::Reflect::get(&data, &JsValue::from_str(key)).ok().and_then(|v| v.as_bool());
+                        if let Some(visible) = flag("visible") {
+                            if let Ok(mut q) = stamps.lock() {
+                                q.push(pdfcraft_ui_egui::StampCommand::AnnotsVisible {
+                                    visible,
+                                    keep_signatures: flag("keepSignatures").unwrap_or(false),
+                                });
+                            }
+                            ctx.request_repaint();
+                        } else {
+                            eframe::web_sys::console::warn_1(&"PdfCraft: pdfcraft:annots-visible refused: visible must be a boolean".into());
+                        }
                         return;
                     }
                     Some("pdfcraft:stamp-cancel") => {
@@ -597,7 +651,7 @@ mod host {
             Box::new(move |event| bridge.post_view(event))
         }
 
-        /// Hear `pdfcraft:goto`, `pdfcraft:highlight` and `pdfcraft:highlight-clear` from the parent. A request that
+        /// Hear `pdfcraft:goto`, `pdfcraft:highlight`, `pdfcraft:highlight-clear` and `pdfcraft:page-info` from the parent. A request that
         /// can't be read is answered with its `-failed` message when it has an `id`.
         pub fn listen_view(&self, views: pdfcraft_ui_egui::ViewInbox, ctx: egui::Context) {
             let bridge = self.clone();
@@ -609,7 +663,8 @@ mod host {
                 }
                 let data = event.data();
                 let Some(kind) = string(&data, "type") else { return };
-                let Some(name) = kind.strip_prefix("pdfcraft:").filter(|n| matches!(*n, "goto" | "highlight" | "highlight-clear")) else {
+                let Some(name) = kind.strip_prefix("pdfcraft:").filter(|n| matches!(*n, "goto" | "highlight" | "highlight-clear" | "page-info"))
+                else {
                     return;
                 };
                 let parsed = js_sys::JSON::stringify(&data)
@@ -630,6 +685,7 @@ mod host {
                         match name {
                             "goto" => bridge.post_view(&pdfcraft_ui_egui::ViewEvent::GotoFailed { id, error }),
                             "highlight" => bridge.post_view(&pdfcraft_ui_egui::ViewEvent::HighlightFailed { id, error }),
+                            "page-info" => bridge.post_view(&pdfcraft_ui_egui::ViewEvent::PageInfoFailed { id, error }),
                             _ => eframe::web_sys::console::warn_1(&format!("PdfCraft: {kind} refused: {error}").into()),
                         }
                     }
@@ -641,7 +697,7 @@ mod host {
             }
         }
 
-        /// Tell the parent about the view: `pdfcraft:opened`, `goto-done`, `goto-failed`, `highlight-done`, `highlight-failed`.
+        /// Tell the parent about the view: `pdfcraft:opened`, `goto-done`, `goto-failed`, `highlight-done`, `highlight-failed`, `page-info-done`, `page-info-failed`, `page-changed`.
         pub fn post_view(&self, event: &pdfcraft_ui_egui::ViewEvent) {
             let (name, fields) = event.to_message();
             let mut pairs: Vec<(&str, JsValue)> = vec![("type", format!("pdfcraft:{name}").into())];
@@ -649,6 +705,25 @@ mod host {
                 if let Some(text) = fields.get(key).and_then(|v| v.as_str()) {
                     pairs.push((key, text.into()));
                 }
+            }
+            // Numbers (`current`, `page`) and the page list of `page-info-done`.
+            for key in ["current", "page"] {
+                if let Some(n) = fields.get(key).and_then(|v| v.as_f64()) {
+                    pairs.push((key, n.into()));
+                }
+            }
+            if let Some(list) = fields.get("pages").and_then(|v| v.as_array()) {
+                let array = js_sys::Array::new();
+                for p in list {
+                    let item = js_sys::Object::new();
+                    for key in ["width", "height", "rotation"] {
+                        if let Some(n) = p.get(key).and_then(|v| v.as_f64()) {
+                            let _ = js_sys::Reflect::set(&item, &JsValue::from_str(key), &JsValue::from_f64(n));
+                        }
+                    }
+                    array.push(&item);
+                }
+                pairs.push(("pages", array.into()));
             }
             if let Some(m) = message(&pairs) {
                 let _ = self.post(&m, None);
@@ -856,7 +931,27 @@ mod host {
             v if v.is_undefined() || v.is_null() => None,
             v => Some(v.as_string().ok_or("signer must be a string")?).filter(|s| !s.is_empty()),
         };
-        Ok(pdfcraft_ui_egui::StampCommand::AddSignBox { id: text("id")?, role: text("role")?, signer, label: text("label")? })
+        // `width`/`height` come together, `x`/`y` come together; missing or null means the default. Pages count from 0.
+        let get = |key: &str| js_sys::Reflect::get(data, &JsValue::from_str(key)).unwrap_or(JsValue::UNDEFINED);
+        let given = |key: &str| !get(key).is_undefined() && !get(key).is_null();
+        let number = |key: &str| get(key).as_f64().ok_or_else(|| format!("{key} must be a number"));
+        let pair = |a: &str, b: &str| match (given(a), given(b)) {
+            (true, true) => Ok(Some((number(a)?, number(b)?))),
+            (false, false) => Ok(None),
+            _ => Err(format!("{a} and {b} must be given together")),
+        };
+        let size = pair("width", "height")?;
+        let at = pair("x", "y")?;
+        let page = if given("page") {
+            let p = number("page")?;
+            if !(p.is_finite() && p >= 0.0 && p.fract() == 0.0 && p <= f64::from(u32::MAX)) {
+                return Err("page must be a whole number from 0".into());
+            }
+            Some(p as usize)
+        } else {
+            None
+        };
+        Ok(pdfcraft_ui_egui::StampCommand::AddSignBox { id: text("id")?, role: text("role")?, signer, label: text("label")?, size, page, at })
     }
 
     /// Read a `pdfcraft:annots-*` message; the error says what was wrong with it.

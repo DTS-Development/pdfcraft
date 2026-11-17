@@ -542,7 +542,7 @@ mod tests {
             h.state().views.iter().map(|v| h.state().session.save_bytes(v.id).unwrap()).collect()
         };
         let before = saved(&h);
-        h.state().stamp_inbox.lock().unwrap().push(StampCommand::Watermark { text: Some("CONFIDENTIAL".into()) });
+        h.state().stamp_inbox.lock().unwrap().push(StampCommand::Watermark { text: Some("CONFIDENTIAL".into()), style: None });
         h.state_mut().show_overlay(true);
         h.run_steps(6);
         let state = h.state();

@@ -7738,6 +7738,7 @@ fn the_screen_watermark_is_not_in_image_exports_or_raster_prints() {
         outline: kurbo::Rect::new(-60.0, -60.0, 60.0, 60.0).to_path(0.1),
         rgb: [0.0; 3],
         alpha: 1.0,
+        rotation: None,
     });
     assert!(s.set_watermark(id, Some(mark)));
     assert_eq!(s.watermark_key(id), Some("m"));

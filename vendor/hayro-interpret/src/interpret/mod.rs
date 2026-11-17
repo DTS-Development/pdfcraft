@@ -59,6 +59,9 @@ pub struct ScreenWatermark {
     pub rgb: [f32; 3],
     /// Fill opacity, 0..1.
     pub alpha: f32,
+    /// PdfCraft patch: turn of the text in degrees, clockwise as shown, about the page centre; `None`
+    /// keeps the page's own diagonal.
+    pub rotation: Option<f32>,
 }
 
 #[derive(Clone)]
@@ -124,6 +127,9 @@ pub struct InterpreterSettings {
     /// PdfCraft patch: hide comments (markup annotations) but keep form fields (`/Widget`)
     /// and links, for the viewer's "Hide all comments".
     pub hide_comments: bool,
+    /// PdfCraft patch: with `hide_comments`, still draw signatures (sealed: Locked and LockedContents)
+    /// and sign boxes (`/PpmSignRole`).
+    pub keep_signatures: bool,
     /// PdfCraft patch: skip the annotations that are replies (`/IRT` naming the annotation
     /// replied to, `/RT` absent or `/R`; a `/RT /Group` annotation is part of its parent, not a
     /// reply), so a reply is only in the comments list and not drawn over its parent.
@@ -168,6 +174,7 @@ impl Default for InterpreterSettings {
             warning_sink: Arc::new(|_| {}),
             render_annotations: true,
             hide_comments: false,
+            keep_signatures: false,
             hide_replies: false,
             watermark: None,
             ocg_overrides: Arc::new(Vec::new()),
@@ -225,6 +232,8 @@ pub fn interpret_page<'a>(
             // PdfCraft patch: "Hide all comments" keeps widgets and links.
             if context.settings.hide_comments
                 && !matches!(annot.get::<hayro_syntax::object::Name<'_>>(SUBTYPE).as_deref(), Some(b"Widget" | b"Link"))
+                && !(context.settings.keep_signatures
+                    && (flags & (128 | 512) == (128 | 512) || annot.contains_key(b"PpmSignRole")))
             {
                 continue;
             }
@@ -344,7 +353,10 @@ fn draw_watermark<'a>(
     let view_to_user = page.initial_transform(true).to_kurbo().inverse();
     let place = view_to_user
         * Affine::translate((width / 2.0, height / 2.0))
-        * Affine::rotate(-(height / width).atan());
+        * Affine::rotate(match watermark.rotation {
+            Some(degrees) => f64::from(degrees).to_radians(),
+            None => -(height / width).atan(),
+        });
     context.save_state();
     context.pre_concat_affine(place);
     let state = &mut context.get_mut().graphics_state;
