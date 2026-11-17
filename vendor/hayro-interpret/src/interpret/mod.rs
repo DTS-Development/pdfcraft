@@ -59,6 +59,9 @@ pub struct ScreenWatermark {
     pub rgb: [f32; 3],
     /// Fill opacity, 0..1.
     pub alpha: f32,
+    /// PdfCraft patch: turn of the text in degrees, clockwise as shown, about the page centre; `None`
+    /// keeps the page's own diagonal.
+    pub rotation: Option<f32>,
 }
 
 #[derive(Clone)]
@@ -124,6 +127,9 @@ pub struct InterpreterSettings {
     /// PdfCraft patch: hide comments (markup annotations) but keep form fields (`/Widget`)
     /// and links, for the viewer's "Hide all comments".
     pub hide_comments: bool,
+    /// PdfCraft patch: with `hide_comments`, still draw signatures (sealed: Locked and LockedContents)
+    /// and sign boxes (`/PpmSignRole`).
+    pub keep_signatures: bool,
     /// PdfCraft patch: skip the annotations that are replies (`/IRT` naming the annotation
     /// replied to, `/RT` absent or `/R`; a `/RT /Group` annotation is part of its parent, not a
     /// reply), so a reply is only in the comments list and not drawn over its parent.
@@ -168,6 +174,7 @@ impl Default for InterpreterSettings {
             warning_sink: Arc::new(|_| {}),
             render_annotations: true,
             hide_comments: false,
+            keep_signatures: false,
             hide_replies: false,
             watermark: None,
             ocg_overrides: Arc::new(Vec::new()),
@@ -225,6 +232,7 @@ pub fn interpret_page<'a>(
             // PdfCraft patch: "Hide all comments" keeps widgets and links.
             if context.settings.hide_comments
                 && !matches!(annot.get::<hayro_syntax::object::Name<'_>>(SUBTYPE).as_deref(), Some(b"Widget" | b"Link"))
+                && !(context.settings.keep_signatures && (annot.contains_key(b"PpmSignRole") || is_signature_annotation(&annot, flags)))
             {
                 continue;
             }
@@ -344,7 +352,10 @@ fn draw_watermark<'a>(
     let view_to_user = page.initial_transform(true).to_kurbo().inverse();
     let place = view_to_user
         * Affine::translate((width / 2.0, height / 2.0))
-        * Affine::rotate(-(height / width).atan());
+        * Affine::rotate(match watermark.rotation {
+            Some(degrees) => f64::from(degrees).to_radians(),
+            None => -(height / width).atan(),
+        });
     context.save_state();
     context.pre_concat_affine(place);
     let state = &mut context.get_mut().graphics_state;
@@ -1043,5 +1054,48 @@ fn interpret_content<'a>(
     // PdfCraft patch (18): say that content was skipped, so a truncated page isn't a clean render.
     if cut || content.truncated() || crate::context::content_was_truncated() {
         (context.settings.warning_sink)(InterpreterWarning::ContentTruncated);
+    }
+}
+
+/// PdfCraft patch: whether an annotation is a signature, by the same rule as the engine's `is_signature`
+/// (`crates/annot`: sealed, a host signature stamp, a typed or picture signature, a Fill & Sign signature).
+/// "Hide all comments" with `keep_signatures` leaves these drawn. Keep in step with that function.
+/// This is an approximation without a JSON parser: `"date"` / `"templateId"` are looked for anywhere in `/PpmStamp`, where the
+/// engine reads the top-level keys only (the metadata the host writes has both at the top level, so they agree).
+fn is_signature_annotation(annot: &Dict<'_>, flags: u32) -> bool {
+    use hayro_syntax::object::Name;
+    if flags & (128 | 512) == (128 | 512) {
+        return true;
+    }
+    let yes = |key: &[u8]| annot.get::<bool>(key) == Some(true);
+    match annot.get::<Name<'_>>(SUBTYPE).as_deref() {
+        Some(b"Stamp") => {
+            let host = annot.get::<hayro_syntax::object::String<'_>>(b"PpmStamp").is_some_and(|m| {
+                let text = pdf_text(m.as_bytes());
+                text.contains("\"date\"") && !text.contains("\"templateId\"")
+            });
+            host || match annot.get::<Name<'_>>(b"Name" as &[u8]).as_deref() {
+                Some(b"PCTypedSignature") => true,
+                Some(b"PCCustomSignature" | b"PCCustomInitials") => yes(b"PCPictureImage"),
+                _ => false,
+            }
+        }
+        Some(b"Ink") => {
+            yes(b"PCFillSign")
+                || annot.get::<hayro_syntax::object::String<'_>>(b"Subj").is_some_and(|t| pdf_text(t.as_bytes()).trim_matches(|c: char| c.is_whitespace() || c == '\0') == "Signature")
+        }
+        _ => false,
+    }
+}
+
+/// A PDF text string as Rust text: UTF-16BE with a byte-order mark, UTF-8 with one, or Latin-1 as a stand-in for PDFDocEncoding.
+fn pdf_text(bytes: &[u8]) -> String {
+    if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        let units: Vec<u16> = rest.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+        String::from_utf16_lossy(&units)
+    } else if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        String::from_utf8_lossy(rest).into_owned()
+    } else {
+        bytes.iter().map(|&b| b as char).collect()
     }
 }

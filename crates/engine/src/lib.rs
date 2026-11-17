@@ -781,6 +781,11 @@ impl Document {
         self.config.hide_comments
     }
 
+    /// Whether hidden comments leave signatures and sign boxes drawn (and selectable).
+    pub fn keeps_signatures(&self) -> bool {
+        self.config.keep_signatures
+    }
+
     pub fn can_undo(&self) -> Option<&str> {
         self.undo_label().map(Label::as_str)
     }
@@ -2452,6 +2457,8 @@ struct EditCtx {
     /// log and the undo label.
     renamed_fields: Vec<(String, String)>,
     ownership: Ownership,
+    /// The host's values for the comments this edit creates ([`Session::set_annotation_custom_data`]).
+    custom_data: Vec<(String, String)>,
 }
 
 impl EditCtx {
@@ -2479,6 +2486,7 @@ impl EditCtx {
             count: 0,
             renamed_fields: Vec::new(),
             ownership: Ownership::default(),
+            custom_data: Vec::new(),
         }
     }
 
@@ -2531,7 +2539,10 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
     });
     run_edit_body(doc, edit, cx)?;
     if let Some((actor, known)) = claim {
-        pdfcraft_annot::ownership::claim_new(doc, &known, &actor, &mut || cx.meta().id)?;
+        // The host's values go on the comments and answers it creates, not on copied pages' or imported ones.
+        let custom = if owner_guard::takes_custom_data(edit) { std::mem::take(&mut cx.custom_data) } else { Vec::new() };
+        pdfcraft_annot::ownership::claim_new_with(doc, &known, &actor, &mut || cx.meta().id, &custom)?;
+        cx.custom_data = custom;
     }
     Ok(())
 }
@@ -3210,8 +3221,18 @@ impl From<pdfcraft_sign::SignError> for EditError {
     }
 }
 
+/// Limits of [`Session::set_annotation_custom_data`].
+pub const MAX_CUSTOM_KEYS: usize = 64;
+pub const MAX_CUSTOM_KEY_CHARS: usize = 100;
+pub const MAX_CUSTOM_VALUE_CHARS: usize = 2000;
+/// All keys and values together. Escaped for the XFDF a character grows to 7 bytes at worst, so this keeps a comment's
+/// XFDF far below the 200,000 limit: a comment that is too big to send is never made.
+pub const MAX_CUSTOM_TOTAL_CHARS: usize = 10_000;
+
 #[derive(Default)]
 pub struct Session {
+    /// Host key/value pairs put on the comments and answers its user creates from now on (empty: none).
+    annotation_custom_data: Vec<(String, String)>,
     docs: Vec<Document>,
     next_id: u64,
     /// Seconds since the Unix epoch, injected so saves are deterministic in tests.
@@ -3577,6 +3598,37 @@ impl Session {
             doc.init_annot_sync();
         }
         self.ownership = ownership;
+    }
+
+    /// Put these key/value pairs on the comments and answers the user creates from now on, until
+    /// replaced (an empty list stops). They reach the XFDF as `<trn-custom-data>`. At most
+    /// [`MAX_CUSTOM_KEYS`] pairs, keys of 1 to [`MAX_CUSTOM_KEY_CHARS`] characters, values of at most
+    /// [`MAX_CUSTOM_VALUE_CHARS`], [`MAX_CUSTOM_TOTAL_CHARS`] in all; keys starting with `ppm` (any case) are PdfCraft's own and refused.
+    pub fn set_annotation_custom_data(&mut self, pairs: Vec<(String, String)>) -> Result<(), String> {
+        if pairs.len() > MAX_CUSTOM_KEYS {
+            return Err(format!("customData has more than {MAX_CUSTOM_KEYS} keys"));
+        }
+        let total: usize = pairs.iter().map(|(k, v)| k.chars().count() + v.chars().count()).sum();
+        if total > MAX_CUSTOM_TOTAL_CHARS {
+            return Err(format!("customData is more than {MAX_CUSTOM_TOTAL_CHARS} characters in all"));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for (k, v) in &pairs {
+            if k.is_empty() || k.chars().count() > MAX_CUSTOM_KEY_CHARS {
+                return Err(format!("a customData key must be 1 to {MAX_CUSTOM_KEY_CHARS} characters"));
+            }
+            if k.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("ppm")) {
+                return Err(format!("customData key {k:?} is reserved (keys starting with \"ppm\")"));
+            }
+            if v.chars().count() > MAX_CUSTOM_VALUE_CHARS {
+                return Err(format!("a customData value is at most {MAX_CUSTOM_VALUE_CHARS} characters"));
+            }
+            if !seen.insert(k) {
+                return Err(format!("customData key {k:?} is repeated"));
+            }
+        }
+        self.annotation_custom_data = pairs;
+        Ok(())
     }
 
     /// [`Session::set_ownership`] for the documents opened from now on only; the ones already
@@ -3984,6 +4036,7 @@ impl Session {
         let today = self.today();
         let js_off = self.js_off;
         let entropy = self.entropy;
+        let custom_data = self.annotation_custom_data.clone();
         let doc = self.doc_mut(id)?;
         doc.edit_notices.clear();
         let name = doc.name.clone();
@@ -3995,6 +4048,7 @@ impl Session {
         cx.pages = doc.info.pages.len();
         cx.today = today;
         cx.ownership = doc.ownership.clone();
+        cx.custom_data = custom_data;
         // The host's read-only setting holds before anything else, also for edits that would do nothing.
         if cx.ownership.read_only {
             return Err(EditError::HostReadOnly);
@@ -5217,6 +5271,25 @@ impl Session {
         doc.renderer = RenderPool::new(doc.display.clone(), render_threads(), doc.config.clone());
         doc.generation += 1;
         true
+    }
+
+    /// Hide or show every comment like [`Self::set_hide_comments`], and say whether signatures (sealed comments)
+    /// and sign boxes stay drawn while they are hidden. Returns whether anything changed.
+    pub fn set_comments_visibility(&mut self, id: DocId, hide: bool, keep_signatures: bool) -> bool {
+        let Some(doc) = self.docs.iter_mut().find(|d| d.id == id) else { return false };
+        if doc.config.hide_comments == hide && doc.config.keep_signatures == keep_signatures {
+            return false;
+        }
+        doc.config.hide_comments = hide;
+        doc.config.keep_signatures = keep_signatures;
+        doc.renderer = RenderPool::new(doc.display.clone(), render_threads(), doc.config.clone());
+        doc.generation += 1;
+        true
+    }
+
+    /// Whether hidden comments leave signatures and sign boxes drawn.
+    pub fn keeps_signatures(&self, id: DocId) -> bool {
+        self.docs.iter().find(|d| d.id == id).is_some_and(|d| d.config.keep_signatures)
     }
 
     /// Set the screen watermark drawn under the document's annotations (`None` clears it).

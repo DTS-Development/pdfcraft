@@ -59,6 +59,8 @@ pub struct RenderConfig {
     pub layers: Arc<Vec<(i32, i32, bool)>>,
     /// View ▸ Hide all comments: markup annotations aren't drawn (fields and links still are).
     pub hide_comments: bool,
+    /// With `hide_comments`, signatures (sealed comments) and sign boxes stay drawn.
+    pub keep_signatures: bool,
     /// Replies (an annotation with `/IRT`, not `/RT /Group`) aren't drawn: they are in the
     /// comments list only, as in the host's own viewer.
     pub hide_replies: bool,
@@ -80,6 +82,7 @@ impl RenderConfig {
         InterpreterSettings {
             ocg_overrides: self.layers.clone(),
             hide_comments: self.hide_comments,
+            keep_signatures: self.keep_signatures,
             hide_replies: self.hide_replies,
             watermark: self.watermark.clone(),
             font_resolver: Arc::new(move |query| japanese_fallback(query).or_else(|| standard(query))),
@@ -3228,6 +3231,71 @@ trailer << /Root 1 0 R >>
         assert_eq!(px(&hidden, 20, 80), vec![255, 0, 0, 255], "fields stay");
     }
 
+    #[test]
+    fn hiding_comments_can_keep_signatures_and_sign_boxes() {
+        let pdf = b"%PDF-1.7
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Annots [4 0 R 5 0 R 6 0 R 7 0 R] >> endobj
+4 0 obj << /Type /Annot /Subtype /Square /F 644 /Rect [60 60 90 90] /AP << /N 8 0 R >> >> endobj
+5 0 obj << /Type /Annot /Subtype /FreeText /F 4 /PpmSignRole (r) /Rect [10 60 40 90] /AP << /N 8 0 R >> >> endobj
+6 0 obj << /Type /Annot /Subtype /Square /F 4 /Rect [60 10 90 40] /AP << /N 8 0 R >> >> endobj
+7 0 obj << /Type /Annot /Subtype /Square /F 132 /Rect [10 10 40 40] /AP << /N 8 0 R >> >> endobj
+8 0 obj << /Type /XObject /Subtype /Form /BBox [0 0 30 30] /Length 24 >> stream
+0 1 0 rg 0 0 30 30 re f
+endstream endobj
+trailer << /Root 1 0 R >>
+%%EOF";
+        let render = |hide: bool, keep: bool| {
+            let mut r =
+                PageRenderer::new(Arc::new(pdf.to_vec()), RenderConfig { hide_comments: hide, keep_signatures: keep, ..RenderConfig::default() });
+            r.render(RenderRequest { page: 0, kind: RequestKind::Pixels, tile: None, scale: 1.0, tag: 0, ..Default::default() })
+        };
+        let px = |p: &RenderedPage, x: u32, y: u32| p.rgba[((y * p.width + x) * 4) as usize..][..4].to_vec();
+        let (green, white) = (vec![0, 255, 0, 255], vec![255, 255, 255, 255]);
+        // Top right: sealed (Locked + LockedContents). Top left: sign box. Bottom right: plain comment.
+        // Bottom left: locked only, not sealed.
+        let kept = render(true, true);
+        assert_eq!(px(&kept, 75, 25), green, "a sealed comment (signature) stays");
+        assert_eq!(px(&kept, 25, 25), green, "a sign box stays");
+        assert_eq!(px(&kept, 75, 75), white, "a plain comment is hidden");
+        assert_eq!(px(&kept, 25, 75), white, "a locked comment that is not sealed is hidden");
+        let hidden = render(true, false);
+        assert!([(75, 25), (25, 25), (75, 75), (25, 75)].iter().all(|&(x, y)| px(&hidden, x, y) == white), "all hidden without keep");
+        let shown = render(false, true);
+        assert!([(75, 25), (25, 25), (75, 75), (25, 75)].iter().all(|&(x, y)| px(&shown, x, y) == green), "keep does nothing while comments show");
+    }
+
+    /// `keep_signatures` follows the engine's signature rule: also an unsealed host signature stamp, a typed
+    /// signature, a picture signature and a Fill & Sign signature stay, but not a stamp made from a template.
+    #[test]
+    fn keeping_signatures_follows_the_engines_rule() {
+        let pdf = b"%PDF-1.7
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Annots [4 0 R 5 0 R 6 0 R 7 0 R 9 0 R 10 0 R] >> endobj
+4 0 obj << /Type /Annot /Subtype /Stamp /F 4 /PpmStamp ({\"date\":\"2026-11-17\"}) /Rect [0 80 20 100] /AP << /N 8 0 R >> >> endobj
+5 0 obj << /Type /Annot /Subtype /Stamp /F 4 /Name /PCTypedSignature /Rect [20 80 40 100] /AP << /N 8 0 R >> >> endobj
+6 0 obj << /Type /Annot /Subtype /Ink /F 4 /PCFillSign true /Rect [40 80 60 100] /AP << /N 8 0 R >> >> endobj
+7 0 obj << /Type /Annot /Subtype /Ink /F 4 /Subj (Signature) /Rect [60 80 80 100] /AP << /N 8 0 R >> >> endobj
+9 0 obj << /Type /Annot /Subtype /Stamp /F 4 /PpmStamp ({\"templateId\":\"t\",\"date\":\"x\"}) /Rect [0 40 20 60] /AP << /N 8 0 R >> >> endobj
+10 0 obj << /Type /Annot /Subtype /Ink /F 4 /Subj (Note) /Rect [20 40 40 60] /AP << /N 8 0 R >> >> endobj
+8 0 obj << /Type /XObject /Subtype /Form /BBox [0 0 30 30] /Length 24 >> stream
+0 1 0 rg 0 0 30 30 re f
+endstream endobj
+trailer << /Root 1 0 R >>
+%%EOF";
+        let mut r = PageRenderer::new(Arc::new(pdf.to_vec()), RenderConfig { hide_comments: true, keep_signatures: true, ..RenderConfig::default() });
+        let page = r.render(RenderRequest { page: 0, kind: RequestKind::Pixels, tile: None, scale: 1.0, tag: 0, ..Default::default() });
+        let px = |x: u32, y: u32| page.rgba[((y * page.width + x) * 4) as usize..][..4].to_vec();
+        let (green, white) = (vec![0, 255, 0, 255], vec![255, 255, 255, 255]);
+        for x in [10, 30, 50, 70] {
+            assert_eq!(px(x, 10), green, "a signature stays at x {x}");
+        }
+        assert_eq!(px(10, 50), white, "a template stamp is hidden");
+        assert_eq!(px(30, 50), white, "an ordinary ink comment is hidden");
+    }
+
     /// A reply (`/IRT`, `/RT` absent or `/R`) is not drawn when replies are hidden; its parent, an
     /// annotation grouped with its parent (`/RT /Group`) and an annotation without `/IRT` still are.
     #[test]
@@ -3291,6 +3359,7 @@ trailer << /Root 1 0 R >>
             outline: kurbo::Rect::new(-30.0, -30.0, 30.0, 30.0).to_path(0.1),
             rgb: [120.0 / 255.0; 3],
             alpha: 0.3,
+            rotation: None,
         });
         let render = |rotate: u32, watermark: Option<Arc<ScreenWatermark>>| {
             let mut r = PageRenderer::new(Arc::new(pdf(rotate)), RenderConfig { watermark, ..RenderConfig::default() });
@@ -5991,7 +6060,13 @@ trailer << /Root 1 0 R >>
         let pdf = Arc::new(
             b"%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 50] >> endobj\n3 0 obj << /Type /Page /Parent 2 0 R >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF".to_vec(),
         );
-        let mark = Arc::new(ScreenWatermark { key: "m".into(), outline: kurbo::Rect::new(-20.0, -10.0, 20.0, 10.0).to_path(0.1), rgb: [0.0; 3], alpha: 1.0 });
+        let mark = Arc::new(ScreenWatermark {
+            key: "m".into(),
+            outline: kurbo::Rect::new(-20.0, -10.0, 20.0, 10.0).to_path(0.1),
+            rgb: [0.0; 3],
+            alpha: 1.0,
+            rotation: None,
+        });
         let request = |tag| RenderRequest { page: 0, kind: RequestKind::Pixels, tile: None, scale: 1.0, tag, preview: false };
         let plain = PageRenderer::new(pdf.clone(), RenderConfig::default()).render(request(0));
         let mut marked = PageRenderer::new(pdf.clone(), RenderConfig { watermark: Some(mark.clone()), ..Default::default() });

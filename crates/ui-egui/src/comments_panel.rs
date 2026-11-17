@@ -89,8 +89,29 @@ pub fn count(info: &DocInfo) -> usize {
     info.annotations.iter().filter(|a| a.state.is_none()).count()
 }
 
+/// The author filter's entries: the stored name is the key (two people with the same shown name stay two
+/// entries), the name shown is the label.
+fn filter_authors(info: &DocInfo) -> Vec<(String, String)> {
+    let mut authors: Vec<String> = info.annotations.iter().filter(|a| !a.is_reply()).map(|a| a.author.clone().unwrap_or_default()).collect();
+    authors.sort();
+    authors.dedup();
+    authors
+        .into_iter()
+        .map(|a| {
+            let label = crate::bidi::visual_auto(&crate::author_display::shown(&a)).into_owned();
+            (a, label)
+        })
+        .collect()
+}
+
+/// The group of an author-sorted list: the stored name, so people sharing a shown name are not merged.
+fn author_group(a: &Annotation) -> String {
+    a.author.clone().unwrap_or_else(|| "Unknown author".into())
+}
+
 fn matches(a: &Annotation, q: &str) -> bool {
-    any_contains([a.author.as_deref(), a.contents.as_deref(), Some(kind_label(a))].into_iter().flatten(), q)
+    let shown = a.author.as_deref().map(crate::author_display::shown);
+    any_contains([a.author.as_deref(), shown.as_deref(), a.contents.as_deref(), Some(kind_label(a))].into_iter().flatten(), q)
 }
 
 /// Whether one of `fields` contains `q` in any case, Turkish dotted and dotless i included.
@@ -174,7 +195,11 @@ pub(crate) fn show(
     let sort = cv.sort;
     match sort {
         SortBy::Page => {}
-        SortBy::Author => roots.sort_by_key(|a| a.author.clone().unwrap_or_default().to_lowercase()),
+        // By the name shown, then the stored one: the same shown name from two people stays two groups, side by side.
+        SortBy::Author => roots.sort_by_cached_key(|a| {
+            let stored = a.author.clone().unwrap_or_default();
+            (crate::author_display::shown(&stored).to_lowercase(), stored)
+        }),
         SortBy::Date => roots.sort_by(|a, b| b.modified.cmp(&a.modified)),
         SortBy::Type => roots.sort_by_key(|a| kind_label(a).to_string()),
         SortBy::Color => roots.sort_by_key(|a| color_key(a)),
@@ -190,7 +215,7 @@ pub(crate) fn show(
                 let label = info.pages.get(a.page).map(|p| p.label.as_str()).unwrap_or("?");
                 Some(crate::i18n::fmt(tl!("Page {label}"), &[("label", label)]))
             }
-            SortBy::Author => Some(a.author.clone().unwrap_or_else(|| "Unknown author".into())),
+            SortBy::Author => Some(author_group(a)),
             SortBy::Type => Some(kind_label(a).to_string()),
             SortBy::Color => Some(if a.color.is_some() { format!("#{}", color_key(a)) } else { "No colour".into() }),
             SortBy::Date => None,
@@ -212,7 +237,11 @@ pub(crate) fn show(
                 ui.add_space(6.0);
                 let title = g.clone().unwrap_or_default();
                 // Catalog labels are already in display order; an author's name is put in it here.
-                let shown = if sort == SortBy::Author && a.author.is_some() { crate::bidi::visual_auto(&title) } else { tl!(&title).into() };
+                let shown: std::borrow::Cow<str> = if sort == SortBy::Author && a.author.is_some() {
+                    crate::bidi::visual_auto(&crate::author_display::shown(&title)).into_owned().into()
+                } else {
+                    tl!(&title).into()
+                };
                 ui.label(egui::RichText::new(shown).font(theme::semibold(12.5)).color(t.text_muted));
                 group = g;
             }
@@ -306,7 +335,7 @@ fn card(
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 avatar(ui, t, Some(subtype_icon(&a.subtype)), None, color);
-                let author = a.author.as_deref().map_or_else(|| tl!("Unknown author").into(), crate::bidi::visual_auto);
+                let author = a.author.as_deref().map_or_else(|| tl!("Unknown author").into(), |n| crate::bidi::visual_auto(&crate::author_display::shown(n)).into_owned());
                 ui.label(egui::RichText::new(author).font(theme::semibold(12.5)).color(t.text));
                 if let Some(m) = &a.modified {
                     ui.add(egui::Label::new(egui::RichText::new(m).font(theme::regular(11.0)).color(t.text_faint)).truncate());
@@ -363,13 +392,13 @@ fn card(
                 // The ownership checks walk the page tree: only the selected card, the one with menus, pays for them.
                 let (can_edit, can_delete) = if selected { reply_rights(doc, r, allowed) } else { (false, false) };
                 let resp = ui.horizontal(|ui| {
-                    avatar(ui, t, None, Some(&initials(r.author.as_deref().unwrap_or("?"))), t.text_faint);
+                    avatar(ui, t, None, Some(&initials(&r.author.as_deref().map_or(std::borrow::Cow::Borrowed("?"), crate::author_display::shown))), t.text_faint);
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 2.0;
                         // The "…" menu is only for a reply the user may change; others' replies have none.
                         let mut menu = None;
                         ui.horizontal(|ui| {
-                            let author = r.author.as_deref().map_or_else(|| tl!("Reply").into(), crate::bidi::visual_auto);
+                            let author = r.author.as_deref().map_or_else(|| tl!("Reply").into(), |n| crate::bidi::visual_auto(&crate::author_display::shown(n)).into_owned());
                             ui.label(egui::RichText::new(author).font(theme::semibold(12.0)));
                             if let Some(m) = &r.modified {
                                 ui.add(egui::Label::new(egui::RichText::new(m).font(theme::regular(11.0)).color(t.text_faint)).truncate());
@@ -577,9 +606,7 @@ pub(crate) fn header_controls(ui: &mut egui::Ui, info: &DocInfo, view: &mut DocV
     let mut types: Vec<String> = info.annotations.iter().filter(|a| !a.is_reply()).map(|a| kind_label(a).to_string()).collect();
     types.sort();
     types.dedup();
-    let mut authors: Vec<String> = info.annotations.iter().filter(|a| !a.is_reply()).map(|a| a.author.clone().unwrap_or_default()).collect();
-    authors.sort();
-    authors.dedup();
+    let authors = filter_authors(info);
     let mut colors: Vec<(String, Option<[f32; 3]>)> = info.annotations.iter().filter(|a| !a.is_reply()).map(|a| (color_key(a), a.color)).collect();
     colors.sort_by(|a, b| a.0.cmp(&b.0));
     colors.dedup_by(|a, b| a.0 == b.0);
@@ -650,9 +677,8 @@ pub(crate) fn header_controls(ui: &mut egui::Ui, info: &DocInfo, view: &mut DocV
         }
         ui.separator();
         ui.label(egui::RichText::new(tl!("Author")).small());
-        for a in &authors {
-            let name = crate::bidi::visual_auto(a);
-            toggle(ui, &mut cv.hidden_authors, a, if a.is_empty() { tl!("Unknown author") } else { &name });
+        for (a, name) in &authors {
+            toggle(ui, &mut cv.hidden_authors, a, if a.is_empty() { tl!("Unknown author") } else { name });
         }
         ui.separator();
         ui.label(egui::RichText::new(tl!("Status")).small());
@@ -706,6 +732,42 @@ mod filter {
         assert!(any_contains(["IRMAK"], "ırmak"));
         assert!(any_contains(["Note"], "NOTE"));
         assert!(!any_contains(["Ayşe Yılmaz"], "mehmet"));
+    }
+}
+
+#[cfg(test)]
+mod author_shown {
+    use super::{author_group, filter_authors, matches};
+    use pdfcraft_engine::{Edit, NewAnnotation, NoteIcon, Session, Shape, Style};
+    use std::sync::Arc;
+
+    /// Two people with the same display name stay two authors (the key is the stored name); the search finds
+    /// a comment by the name shown and by the stored one.
+    #[test]
+    fn same_display_name_is_two_authors_and_search_takes_both_names() {
+        let _guard = crate::author_display::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::author_display::set("#", 1);
+        let mut s = Session::new().with_clock(|| 1_700_000_000);
+        let bytes = Session::new().create_blank(200.0, 300.0, 1).expect("blank").to_vec();
+        let id = s.open("t.pdf", None, Arc::new(bytes), None).expect("opens");
+        for (i, who) in ["u1#Kim#A", "u2#Kim#B"].into_iter().enumerate() {
+            let at = [50.0 + 30.0 * i as f64, 50.0];
+            let style = Style { color: [1.0, 0.8, 0.0], opacity: 1.0, width: 1.0, fill: None };
+            let note = NewAnnotation { page: 0, shape: Shape::Note { at, icon: NoteIcon::Comment }, style, contents: "n".into(), author: who.into() };
+            s.apply(id, Edit::AddAnnotation(note)).expect("note");
+        }
+        let notes = s.get(id).expect("doc").info.annotations.clone();
+        let names: Vec<&str> = notes.iter().filter_map(|a| a.author.as_deref()).collect();
+        assert_eq!(names, ["u1#Kim#A", "u2#Kim#B"], "stored as given");
+        let shown: Vec<String> = names.iter().map(|n| crate::author_display::shown(n).into_owned()).collect();
+        assert_eq!(shown, ["Kim", "Kim"]);
+        let info_like = pdfcraft_render::DocInfo { annotations: notes.clone(), ..s.get(id).expect("doc").info.clone() };
+        let entries = filter_authors(&info_like);
+        assert_eq!(entries, [("u1#Kim#A".to_string(), "Kim".to_string()), ("u2#Kim#B".to_string(), "Kim".to_string())], "two entries");
+        assert_ne!(author_group(&notes[0]), author_group(&notes[1]), "two groups");
+        assert!(matches(&notes[0], "kim") && matches(&notes[1], "kim"), "by the name shown");
+        assert!(matches(&notes[0], "u1") && !matches(&notes[1], "u1"), "by the stored name");
+        crate::author_display::set("", 0);
     }
 }
 

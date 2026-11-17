@@ -507,6 +507,9 @@ pub struct DocView {
     /// Edit text: the lines per page (with the document generation they were read at), and the
     /// line being edited.
     pub(crate) edit_lines: HashMap<usize, (u64, Vec<pdfcraft_engine::TextBlock>)>,
+    /// Comments hidden but signatures kept: the sign boxes and sealed signatures per page, read once per document
+    /// generation and annotation count (finding a sign box walks the page tree, too dear to repeat every frame).
+    pub(crate) kept_cache: HashMap<usize, ((u64, usize), Vec<usize>)>,
     pub line_editor: Option<crate::edit_text_ui::LineEditor>,
     /// The box a click switched to while another paragraph was being edited: it opens once the
     /// queued edit has applied, so its index and geometry come from the document it now is (#2022).
@@ -781,6 +784,7 @@ impl DocView {
             pending_edit: None,
             host_stamp_outcome: None,
             edit_lines: HashMap::new(),
+            kept_cache: HashMap::new(),
             line_editor: None,
             pending_text_open: None,
             text_background: Default::default(),
@@ -2103,13 +2107,18 @@ impl DocView {
     }
 }
 
+/// Hidden comments have no hover popup (it would give away who wrote them); the sign boxes and signatures kept visible do.
+fn hover_allowed(comments_hidden: bool, kept: &[usize], index: usize) -> bool {
+    !comments_hidden || kept.contains(&index)
+}
+
 /// The hover popup for an annotation. Replies and Fill & Sign marks (typed text, checks, signatures)
 /// show none: they are page content being edited, not comments.
 fn annotation_hover_text(a: &pdfcraft_render::Annotation) -> Option<String> {
     if a.is_reply() || a.fill_sign {
         return None;
     }
-    let who = a.author.clone().unwrap_or_else(|| a.subtype.clone());
+    let who = a.author.as_deref().map_or_else(|| a.subtype.clone(), |n| crate::author_display::shown(n).into_owned());
     let body = a.contents.clone().unwrap_or_default();
     Some(if body.is_empty() { who } else { format!("{who}\n{body}") })
 }
@@ -3089,7 +3098,26 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
             painter.rect_stroke(r, CornerRadius::ZERO, Stroke::new(0.5, t.border.gamma_multiply(0.8)), egui::StrokeKind::Outside);
 
             // Comments: tools, selection, moving and resizing come before text selection.
-            let pcx = comments::PageCx { page: i, xf: &xf, info, tool, prefs, allowed, hidden: comments_hidden, redact_mark };
+            // Hidden but kept: sign boxes and sealed signatures stay selectable, so signing can go on.
+            let kept: Vec<usize> = if comments_hidden && doc.keeps_signatures() {
+                let key = (doc.edit_generation(), info.annotations.len());
+                match view.kept_cache.get(&i) {
+                    Some((k, v)) if *k == key => v.clone(),
+                    _ => {
+                        let v: Vec<usize> = info
+                            .annotations
+                            .iter()
+                            .filter(|a| a.page == i && !a.is_reply() && (a.sealed || doc.sign_box_at(i, a.index).is_some()))
+                            .map(|a| a.index)
+                            .collect();
+                        view.kept_cache.insert(i, (key, v.clone()));
+                        v
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+            let pcx = comments::PageCx { page: i, xf: &xf, info, tool, prefs, allowed, hidden: comments_hidden, kept: &kept, redact_mark };
             if let QuickTool::Measure(measure_tool) = tool {
                 crate::measure_ui::page_input(ui, &resp, doc, view, &pcx, measure_tool, units);
             }
@@ -3589,7 +3617,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                 // freehand, where it would cover the next stroke (#429).
                 let freehand = matches!(tool, QuickTool::Comment(comments::CommentTool::Ink | comments::CommentTool::Eraser));
                 let gesturing = view.comments.gesture.is_some() || freehand;
-                for a in info.annotations.iter().filter(|a| a.page == i && !gesturing) {
+                for a in info.annotations.iter().filter(|a| a.page == i && !gesturing && hover_allowed(comments_hidden, &kept, a.index)) {
                     let sr = xf.user_rect(info, i, a.rect);
                     let hidden = prefs.hide_empty_highlight_hover && a.subtype == "Highlight" && a.contents.as_deref().is_none_or(str::is_empty);
                     if sr.contains(p)
@@ -4128,7 +4156,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         app.notify_error(why);
     }
     if (open_signature || open_initials) && app.host_allows("sign.fill.signature") {
-        app.signature_draft = crate::fill_sign::SigDraft::new(open_initials, &app.comment_prefs.author);
+        app.signature_draft = crate::fill_sign::SigDraft::new(open_initials, &crate::author_display::shown(&app.comment_prefs.author));
         app.dialog = Some(crate::Dialog::Signature);
     }
     if open_boxes && app.host_allows("page.boxes") {
@@ -5479,6 +5507,14 @@ mod tests {
             intent: None,
             fill_sign,
         }
+    }
+
+    #[test]
+    fn hidden_comments_have_no_hover_popup_except_the_kept_ones() {
+        assert!(hover_allowed(false, &[], 3), "shown: every comment");
+        assert!(!hover_allowed(true, &[], 3), "hidden, nothing kept");
+        assert!(!hover_allowed(true, &[1, 2], 3), "hidden, this one not kept");
+        assert!(hover_allowed(true, &[1, 3], 3), "hidden, kept");
     }
 
     #[test]

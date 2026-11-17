@@ -40,6 +40,12 @@ pub enum StampCommand {
         role: String,
         signer: Option<String>,
         label: String,
+        /// Width and height together in points as shown, or `None` for [`SIGN_BOX_SIZE`].
+        size: Option<(f64, f64)>,
+        /// 0-based page, or `None` for the page being read.
+        page: Option<usize>,
+        /// Top-left corner in points on the page as shown (like `Place`), or `None` for the middle.
+        at: Option<(f64, f64)>,
     },
     /// A stamp put at given coordinates at once (`pdfcraft:stamp-place`), with no click. `x`, `y`
     /// are the stamp's top-left corner in PDF points on page `page` (0-based) as shown; `size` is
@@ -70,6 +76,19 @@ pub enum StampCommand {
     /// The screen watermark (`pdfcraft:watermark`): `None` or blank takes it away.
     Watermark {
         text: Option<String>,
+        /// How it looks; `None` is the default look.
+        style: Option<crate::watermark::WatermarkStyle>,
+    },
+    /// Show or hide the comments on the screen (`pdfcraft:annots-visible`), for every document, also those opened
+    /// later. The document and what is synced to the server stay as they are.
+    AnnotsVisible {
+        visible: bool,
+        keep_signatures: bool,
+    },
+    /// The key/value pairs (`customData` of `pdfcraft:annotation-defaults`) put on the comments and answers the user
+    /// makes from now on, for every document; empty stops. Pairs the engine refuses clear the setting (never a stale one).
+    AnnotationDefaults {
+        custom_data: Vec<(String, String)>,
     },
     Cancel {
         id: String,
@@ -137,6 +156,39 @@ pub(crate) fn sign_box_rect(page: &pdfcraft_render::PageInfo) -> [f64; 4] {
     let (w, h) = SIGN_BOX_SIZE;
     let (x, y) = (((f64::from(page.width) - w) / 2.0).max(0.0), ((f64::from(page.height) - h) / 2.0).max(0.0));
     view_rect_to_user(page, x, y, w, h)
+}
+
+/// Smallest side of a sign box the host may ask for, in points.
+pub const SIGN_BOX_MIN_SIDE: f64 = 10.0;
+
+/// The sign box's rectangle when the host gave a size and/or a place. Without either this is
+/// [`sign_box_rect`]. A given size or place must fit on the page as shown: a refusal says why.
+pub(crate) fn sign_box_rect_for(page: &pdfcraft_render::PageInfo, size: Option<(f64, f64)>, at: Option<(f64, f64)>) -> Result<[f64; 4], String> {
+    if size.is_none() && at.is_none() {
+        return Ok(sign_box_rect(page));
+    }
+    let (w, h) = size.unwrap_or(SIGN_BOX_SIZE);
+    let (pw, ph) = (f64::from(page.width), f64::from(page.height));
+    if !(w.is_finite() && h.is_finite() && w >= SIGN_BOX_MIN_SIDE && h >= SIGN_BOX_MIN_SIDE) {
+        return Err(format!("the sign box width and height must be numbers of at least {SIGN_BOX_MIN_SIDE} pt"));
+    }
+    if w > pw || h > ph {
+        return Err("the sign box is larger than the page".into());
+    }
+    let (x, y) = match at {
+        Some((x, y)) => {
+            if !(x.is_finite() && y.is_finite()) {
+                return Err("x and y must be finite numbers".into());
+            }
+            (x, y)
+        }
+        None => ((pw - w) / 2.0, (ph - h) / 2.0),
+    };
+    // A small tolerance keeps a box flush with the edge from failing on float rounding.
+    if x < 0.0 || y < 0.0 || x + w > pw + 0.01 || y + h > ph + 0.01 {
+        return Err("the sign box must lie inside the page".into());
+    }
+    Ok(view_rect_to_user(page, x, y, w, h))
 }
 
 /// A rectangle given by its top-left corner and size on the page as shown (upright whatever the
@@ -209,15 +261,28 @@ impl PdfCraftApp {
 
     /// Put a sign box in the middle of the page being read and select it (the same edit as any
     /// comment, so undo and saving are the usual). Returns the page, or why it was refused.
-    fn place_sign_box(&mut self, id: &str, role: String, signer: Option<String>, label: String) -> Result<usize, String> {
+    fn place_sign_box(
+        &mut self,
+        id: &str,
+        role: String,
+        signer: Option<String>,
+        label: String,
+        size: Option<(f64, f64)>,
+        page: Option<usize>,
+        at: Option<(f64, f64)>,
+    ) -> Result<usize, String> {
         validate_sign_box(id, &role, signer.as_deref(), &label)?;
         let (index, doc) = self.active_ids().ok_or("no document is open")?;
         let state = self.session.get(doc).ok_or("no document is open")?;
         if !state.allows_annotation() {
             return Err("the document doesn't allow comments".into());
         }
-        let page = self.views[index].current.min(state.info.pages.len().saturating_sub(1));
-        let rect = sign_box_rect(state.info.pages.get(page).ok_or("the document has no pages")?);
+        let page = match page {
+            Some(p) if p >= state.info.pages.len() => return Err("the page is out of range".into()),
+            Some(p) => p,
+            None => self.views[index].current.min(state.info.pages.len().saturating_sub(1)),
+        };
+        let rect = sign_box_rect_for(state.info.pages.get(page).ok_or("the document has no pages")?, size, at)?;
         let author = self.comment_prefs.author.clone();
         if self.apply_edit(pdfcraft_engine::Edit::AddSignBox { page, rect, role, signer, label, author }) {
             self.quick_tool = QuickTool::Select;
@@ -307,6 +372,24 @@ impl PdfCraftApp {
         }
     }
 
+    /// Bring every document to what the host last set for the comments (once per setting and document, so a
+    /// document opened later gets it too and the menu's own "hide all comments" works afterwards).
+    fn sync_comments_visibility(&mut self) {
+        let Some((hide, keep, count)) = self.comments_host else { return };
+        for index in 0..self.views.len() {
+            let id = self.views[index].id;
+            if self.comments_applied.get(&id) == Some(&count) {
+                continue;
+            }
+            self.comments_applied.insert(id, count);
+            if self.session.set_comments_visibility(id, hide, keep) {
+                self.views[index].invalidate_content();
+            }
+        }
+        let open: std::collections::HashSet<_> = self.views.iter().map(|v| v.id).collect();
+        self.comments_applied.retain(|id, _| open.contains(id));
+    }
+
     /// Once a frame: take the host's requests, report placements, and notice when the user left.
     pub(crate) fn host_stamp_tick(&mut self, ctx: &egui::Context) {
         // First, how a click ended: a command that arrived since must not be taken for it.
@@ -342,9 +425,9 @@ impl PdfCraftApp {
                         Err(error) => self.emit_stamp(StampEvent::Failed { id, error }),
                     }
                 }
-                StampCommand::AddSignBox { id, role, signer, label } => {
+                StampCommand::AddSignBox { id, role, signer, label, size, page, at } => {
                     self.disarm_stamp();
-                    match self.place_sign_box(&id, role, signer, label) {
+                    match self.place_sign_box(&id, role, signer, label, size, page, at) {
                         Ok(page) => self.emit_stamp(StampEvent::Placed { id, page }),
                         Err(error) => self.emit_stamp(StampEvent::Failed { id, error }),
                     }
@@ -363,9 +446,20 @@ impl PdfCraftApp {
                         Err(error) => self.emit_stamp(StampEvent::Failed { id, error }),
                     }
                 }
-                StampCommand::Watermark { text } => {
+                StampCommand::Watermark { text, style } => {
                     self.screen_watermark = crate::watermark::clean(text.as_deref());
-                    self.screen_watermark_outline = self.screen_watermark.as_deref().and_then(crate::watermark::build);
+                    let style = style.unwrap_or_default();
+                    self.screen_watermark_outline = self.screen_watermark.as_deref().and_then(|t| crate::watermark::build(t, &style));
+                }
+                StampCommand::AnnotsVisible { visible, keep_signatures } => {
+                    let count = self.comments_host.map_or(0, |(_, _, n)| n) + 1;
+                    self.comments_host = Some((!visible, keep_signatures, count));
+                }
+                StampCommand::AnnotationDefaults { custom_data } => {
+                    if let Err(error) = self.session.set_annotation_custom_data(custom_data) {
+                        let _ = self.session.set_annotation_custom_data(Vec::new());
+                        self.notify_error(error);
+                    }
                 }
                 StampCommand::Cancel { id } => {
                     if self.armed_stamp.as_ref().is_some_and(|a| a.id == id) {
@@ -375,6 +469,7 @@ impl PdfCraftApp {
             }
         }
         self.sync_watermark();
+        self.sync_comments_visibility();
         let Some(armed) = self.armed_stamp.as_ref() else { return };
         // The click's edit may not have been applied yet: its outcome decides, not the tool.
         let placing = self.views.iter().any(|v| matches!(v.pending_edit, Some(pdfcraft_engine::Edit::AddCustomStamp { extra: Some(_), .. })));
@@ -444,6 +539,34 @@ mod tests {
         assert_eq!(sign_box_rect(&page(300.0, 200.0, 90, [0.0, 0.0, 200.0, 300.0])), [70.0, 60.0, 130.0, 240.0]);
         // A page narrower than the box: the box starts at the page's edge.
         assert_eq!(sign_box_rect(&page(100.0, 100.0, 0, [0.0, 0.0, 100.0, 100.0])), [0.0, 20.0, 180.0, 80.0]);
+    }
+
+    #[test]
+    fn a_sign_box_size_and_place_are_in_points_as_shown() {
+        let upright = page(200.0, 300.0, 0, [0.0, 0.0, 200.0, 300.0]);
+        // Size alone: still centred.
+        assert_eq!(sign_box_rect_for(&upright, Some((100.0, 40.0)), None), Ok([50.0, 130.0, 150.0, 170.0]));
+        // Place alone keeps 180 x 60; (x, y) is the top-left corner, y down.
+        assert_eq!(sign_box_rect_for(&upright, None, Some((5.0, 10.0))), Ok([5.0, 230.0, 185.0, 290.0]));
+        // Neither: the old behaviour, also on a page narrower than the box.
+        assert_eq!(sign_box_rect_for(&page(100.0, 100.0, 0, [0.0, 0.0, 100.0, 100.0]), None, None), Ok([0.0, 20.0, 180.0, 80.0]));
+        // Shown turned 90 degrees (300 x 200): the corner is read on the page as shown.
+        let turned = page(300.0, 200.0, 90, [0.0, 0.0, 200.0, 300.0]);
+        let r = sign_box_rect_for(&turned, Some((60.0, 20.0)), Some((0.0, 0.0))).unwrap();
+        assert_eq!(r, view_rect_to_user(&turned, 0.0, 0.0, 60.0, 20.0));
+        // Refused: too small, not finite, larger than the page, outside the page.
+        for (size, at) in [
+            (Some((9.0, 40.0)), None),
+            (Some((f64::NAN, 40.0)), None),
+            (Some((250.0, 40.0)), None),
+            (Some((100.0, 40.0)), Some((150.0, 10.0))),
+            (None, Some((-1.0, 10.0))),
+            (None, Some((f64::INFINITY, 10.0))),
+        ] {
+            assert!(sign_box_rect_for(&upright, size, at).is_err(), "{size:?} {at:?}");
+        }
+        // Flush with the far edge is fine.
+        assert!(sign_box_rect_for(&upright, Some((100.0, 40.0)), Some((100.0, 260.0))).is_ok());
     }
 
     /// Page transforms run in f32, so rectangles match to a hundredth of a point.
@@ -656,7 +779,18 @@ mod flow_tests {
     #[test]
     fn a_sign_box_request_is_placed_at_once_selected_and_reported() {
         let (mut h, ev) = app(true);
-        send(&mut h, StampCommand::AddSignBox { id: "sb".into(), role: "reviewer".into(), signer: None, label: "reviewer 서명란".into() });
+        send(
+            &mut h,
+            StampCommand::AddSignBox {
+                id: "sb".into(),
+                role: "reviewer".into(),
+                signer: None,
+                label: "reviewer 서명란".into(),
+                size: None,
+                page: None,
+                at: None,
+            },
+        );
         // No arming and no click: placed on the page being read, which is left on the Select tool.
         assert_eq!(*ev.borrow(), vec![StampEvent::Placed { id: "sb".into(), page: 0 }]);
         assert_eq!(h.state().quick_tool, QuickTool::Select);
@@ -675,9 +809,154 @@ mod flow_tests {
     }
 
     #[test]
+    fn the_host_hides_comments_on_the_screen_for_every_document_and_the_menu_still_works() {
+        let (mut h, _) = app(true);
+        let doc = h.state().active_ids().unwrap().1;
+        let before = h.state().session.save_bytes(doc).unwrap();
+        send(&mut h, StampCommand::AnnotsVisible { visible: false, keep_signatures: true });
+        assert!(h.state().session.get(doc).unwrap().comments_hidden());
+        assert!(h.state().session.keeps_signatures(doc));
+        assert!(h.state().session.save_bytes(doc).unwrap() == before, "the document itself is untouched");
+        // A document opened later is brought to it too.
+        h.state_mut().open_bytes("b.pdf", None, pdf()).unwrap();
+        h.run_steps(3);
+        let second = h.state().views.iter().map(|v| v.id).find(|id| *id != doc).expect("a second document");
+        assert!(h.state().session.get(second).unwrap().comments_hidden());
+        // The menu's own toggle is not undone by the next frames.
+        assert!(h.state_mut().session.set_hide_comments(second, false));
+        h.run_steps(3);
+        assert!(!h.state().session.get(second).unwrap().comments_hidden());
+        assert!(h.state().session.get(doc).unwrap().comments_hidden());
+        // Showing again reaches both.
+        send(&mut h, StampCommand::AnnotsVisible { visible: true, keep_signatures: false });
+        assert!(h.state().views.iter().all(|v| !h.state().session.get(v.id).unwrap().comments_hidden()));
+        assert!(!h.state().session.keeps_signatures(doc));
+    }
+
+    /// With the comments hidden and the signatures kept, a sign box stays drawn and a click on it selects it
+    /// (so `sign-box-selected` still reaches the host); without keeping it, and for a plain comment, nothing is picked.
+    #[test]
+    fn a_kept_sign_box_can_still_be_selected_while_comments_are_hidden() {
+        let click_center = |h: &mut Harness<'static, PdfCraftApp>, keep: bool| -> Option<(usize, usize)> {
+            let (i, doc) = h.state().active_ids().unwrap();
+            h.state_mut().views[i].comments.selected = None;
+            send(h, StampCommand::AnnotsVisible { visible: false, keep_signatures: keep });
+            h.run_steps(3);
+            let info = &h.state().session.get(doc).unwrap().info;
+            let (w, hh) = (info.pages[0].width, info.pages[0].height);
+            let r = h.state().views[i].page_screen_rect(0).expect("page on screen");
+            // The box is [10, 120, 190, 180] in user space, y up.
+            let at = egui::pos2(r.min.x + 100.0 / w * r.width(), r.min.y + (hh - 150.0) / hh * r.height());
+            h.event(egui::Event::PointerMoved(at));
+            h.run_steps(2);
+            for pressed in [true, false] {
+                h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+                h.run_steps(2);
+            }
+            h.state().views[i].comments.selected
+        };
+        let (mut h, _) = app(true);
+        send(
+            &mut h,
+            StampCommand::AddSignBox { id: "sb".into(), role: "reviewer".into(), signer: None, label: "r".into(), size: None, page: None, at: None },
+        );
+        assert!(click_center(&mut h, true).is_some(), "kept: selectable");
+        assert!(click_center(&mut h, false).is_none(), "not kept: hidden, nothing to pick");
+    }
+
+    /// The kept list is cached per document generation and annotation count; every change that can alter it
+    /// (a move, a resize, a second box, an undo) must show up in the key, so the list is read again.
+    #[test]
+    fn the_kept_list_is_read_again_after_every_kind_of_change() {
+        let add = |h: &mut Harness<'static, PdfCraftApp>, id: &str| {
+            send(h, StampCommand::AddSignBox { id: id.into(), role: "r".into(), signer: None, label: "x".into(), size: None, page: None, at: None })
+        };
+        let (mut h, _) = app(true);
+        add(&mut h, "a");
+        send(&mut h, StampCommand::AnnotsVisible { visible: false, keep_signatures: true });
+        h.run_steps(3);
+        let (i, doc) = h.state().active_ids().unwrap();
+        let key = |h: &Harness<'static, PdfCraftApp>| h.state().views[i].kept_cache.get(&0).cloned().expect("the page was read");
+        let (k0, kept0) = key(&h);
+        assert_eq!(kept0.len(), 1);
+        assert_eq!(k0.0, h.state().session.get(doc).unwrap().edit_generation());
+        // A move and a resize (what a drag does) keep the count but change the generation.
+        let index = kept0[0];
+        h.state_mut().session.apply(doc, pdfcraft_engine::Edit::MoveAnnotation { page: 0, index, dx: 5.0, dy: 5.0 }).unwrap();
+        h.run_steps(3);
+        let (k1, _) = key(&h);
+        assert_ne!(k1, k0, "a move is a new generation");
+        h.state_mut().session.apply(doc, pdfcraft_engine::Edit::ResizeAnnotation { page: 0, index, rect: [10.0, 10.0, 120.0, 60.0] }).unwrap();
+        h.run_steps(3);
+        let (k2, _) = key(&h);
+        assert_ne!(k2, k1, "a resize is a new generation");
+        // A second box adds to the list; undo takes it away again.
+        add(&mut h, "b");
+        h.run_steps(3);
+        assert_eq!(key(&h).1.len(), 2);
+        h.state_mut().session.undo(doc).unwrap();
+        h.run_steps(3);
+        assert_eq!(key(&h).1.len(), 1, "undo is seen");
+    }
+
+    #[test]
+    fn a_sign_box_request_can_give_its_size_and_place() {
+        let (mut h, ev) = app(true);
+        send(
+            &mut h,
+            StampCommand::AddSignBox {
+                id: "a".into(),
+                role: "r".into(),
+                signer: None,
+                label: "x".into(),
+                size: Some((100.0, 40.0)),
+                page: Some(0),
+                at: Some((5.0, 10.0)),
+            },
+        );
+        assert_eq!(*ev.borrow(), vec![StampEvent::Placed { id: "a".into(), page: 0 }]);
+        let (_, doc) = h.state().active_ids().unwrap();
+        let note = h.state().session.get(doc).unwrap().info.annotations.iter().find(|a| !a.is_reply()).cloned().expect("the sign box");
+        let page = h.state().session.get(doc).unwrap().info.pages[0].clone();
+        assert_rect(note.rect.map(f64::from), view_rect_to_user(&page, 5.0, 10.0, 100.0, 40.0));
+        // A page past the end, and a box bigger than the page, are refused and add nothing.
+        send(
+            &mut h,
+            StampCommand::AddSignBox { id: "b".into(), role: "r".into(), signer: None, label: "x".into(), size: None, page: Some(99), at: None },
+        );
+        send(
+            &mut h,
+            StampCommand::AddSignBox {
+                id: "c".into(),
+                role: "r".into(),
+                signer: None,
+                label: "x".into(),
+                size: Some((9000.0, 40.0)),
+                page: None,
+                at: None,
+            },
+        );
+        let events = ev.borrow();
+        assert!(matches!(&events[1], StampEvent::Failed { id, .. } if id == "b"), "{events:?}");
+        assert!(matches!(&events[2], StampEvent::Failed { id, .. } if id == "c"), "{events:?}");
+        assert_eq!(h.state().session.get(doc).unwrap().info.annotations.iter().filter(|a| !a.is_reply()).count(), 1);
+    }
+
+    #[test]
     fn a_sign_box_request_with_a_signer_stores_it_and_one_without_does_not() {
         let (mut h, ev) = app(true);
-        send(&mut h, StampCommand::AddSignBox { id: "s1".into(), role: "reviewer".into(), signer: Some("u-kim".into()), label: "x".into() });
+        send(
+            &mut h,
+            StampCommand::AddSignBox {
+                id: "s1".into(),
+                role: "reviewer".into(),
+                signer: Some("u-kim".into()),
+                label: "x".into(),
+                size: None,
+                page: None,
+                at: None,
+            },
+        );
         assert_eq!(*ev.borrow(), vec![StampEvent::Placed { id: "s1".into(), page: 0 }]);
         let (_, doc) = h.state().active_ids().unwrap();
         let saved = h.state().session.save_bytes(doc).unwrap();
@@ -758,9 +1037,17 @@ mod flow_tests {
     #[test]
     fn a_sign_box_request_is_refused_without_a_document_or_with_a_bad_role() {
         let (mut h, ev) = app(false);
-        send(&mut h, StampCommand::AddSignBox { id: "a".into(), role: "r".into(), signer: None, label: "r 서명란".into() });
+        send(
+            &mut h,
+            StampCommand::AddSignBox {
+                id: "a".into(), role: "r".into(), signer: None, label: "r 서명란".into(), size: None, page: None, at: None
+            },
+        );
         let (mut h2, ev2) = app(true);
-        send(&mut h2, StampCommand::AddSignBox { id: "b".into(), role: " ".into(), signer: None, label: "x".into() });
+        send(
+            &mut h2,
+            StampCommand::AddSignBox { id: "b".into(), role: " ".into(), signer: None, label: "x".into(), size: None, page: None, at: None },
+        );
         assert!(matches!(&ev.borrow()[..], [StampEvent::Failed { id, .. }] if id == "a"), "{:?}", ev.borrow());
         assert!(matches!(&ev2.borrow()[..], [StampEvent::Failed { id, .. }] if id == "b"), "{:?}", ev2.borrow());
     }
@@ -770,7 +1057,7 @@ mod flow_tests {
         let (mut h, _) = app(true);
         let (_, doc) = h.state().active_ids().unwrap();
         let before = h.state().session.save_bytes(doc).unwrap();
-        send(&mut h, StampCommand::Watermark { text: Some("기밀 WATERMARK".into()) });
+        send(&mut h, StampCommand::Watermark { text: Some("기밀 WATERMARK".into()), style: None });
         h.run_steps(3);
         assert_eq!(h.state().screen_watermark.as_deref(), Some("기밀 WATERMARK"));
         assert_eq!(h.state().session.save_bytes(doc).unwrap(), before);
@@ -782,7 +1069,7 @@ mod flow_tests {
         let keys: Vec<_> = h.state().views.iter().map(|v| h.state().session.watermark_key(v.id).map(str::to_string)).collect();
         assert_eq!(keys.len(), 2);
         assert!(keys.iter().all(|k| k.as_deref() == Some("기밀 WATERMARK")), "{keys:?}");
-        send(&mut h, StampCommand::Watermark { text: Some("  ".into()) });
+        send(&mut h, StampCommand::Watermark { text: Some("  ".into()), style: None });
         h.run_steps(3);
         assert_eq!(h.state().screen_watermark, None);
         assert!(h.state().views.iter().all(|v| h.state().session.watermark_key(v.id).is_none()));
@@ -1113,7 +1400,12 @@ mod flow_tests {
     #[test]
     fn a_signature_stays_sealed_after_saving_and_reopening() {
         let (mut h, ev) = app(true);
-        send(&mut h, StampCommand::AddSignBox { id: "b".into(), role: "r".into(), signer: None, label: "r 서명란".into() });
+        send(
+            &mut h,
+            StampCommand::AddSignBox {
+                id: "b".into(), role: "r".into(), signer: None, label: "r 서명란".into(), size: None, page: None, at: None
+            },
+        );
         let (_, doc) = h.state().active_ids().unwrap();
         let index = h.state().session.get(doc).unwrap().info.annotations[0].index;
         let nm = h.state().session.get(doc).unwrap().annot_name_at(0, index).expect("the box has a name");
@@ -1147,7 +1439,12 @@ mod flow_tests {
     #[test]
     fn a_sign_box_selection_is_api_when_the_program_chose_it_and_user_otherwise() {
         let (mut h, _, heard) = shared_app();
-        send(&mut h, StampCommand::AddSignBox { id: "b1".into(), role: "r".into(), signer: None, label: "r 서명란".into() });
+        send(
+            &mut h,
+            StampCommand::AddSignBox {
+                id: "b1".into(), role: "r".into(), signer: None, label: "r 서명란".into(), size: None, page: None, at: None
+            },
+        );
         h.run_steps(3);
         let sources = |heard: &Heard| -> Vec<bool> {
             heard.borrow().iter().filter_map(|e| if let AnnotEvent::SignBoxSelected { from_api, .. } = e { Some(*from_api) } else { None }).collect()

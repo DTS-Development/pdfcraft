@@ -31,6 +31,16 @@ pub enum ViewCommand {
     Highlight { id: String, page: usize, rects: Vec<[f64; 4]>, color: Option<String>, transient: bool },
     /// Take the transient highlight away.
     ClearHighlight,
+    /// `pdfcraft:page-info`: the page count, every page's size and the page being read.
+    PageInfo { id: String },
+}
+
+/// One page's size in points as shown (turned by the page's `/Rotate`, upright), and that `/Rotate`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PageSize {
+    pub width: f64,
+    pub height: f64,
+    pub rotation: u16,
 }
 
 /// What the host is told.
@@ -38,10 +48,34 @@ pub enum ViewCommand {
 pub enum ViewEvent {
     /// The document the host opened was drawn for the first time (once for each `pdfcraft:open`).
     Opened,
-    GotoDone { id: String },
-    GotoFailed { id: String, error: String },
-    HighlightDone { id: String },
-    HighlightFailed { id: String, error: String },
+    GotoDone {
+        id: String,
+    },
+    GotoFailed {
+        id: String,
+        error: String,
+    },
+    HighlightDone {
+        id: String,
+    },
+    HighlightFailed {
+        id: String,
+        error: String,
+    },
+    /// Answer to `PageInfo`; `current` counts from 0 like every page here.
+    PageInfoDone {
+        id: String,
+        current: usize,
+        pages: Vec<PageSize>,
+    },
+    PageInfoFailed {
+        id: String,
+        error: String,
+    },
+    /// The page being read changed (from 0), or another document came to the front.
+    PageChanged {
+        page: usize,
+    },
 }
 
 impl ViewCommand {
@@ -81,6 +115,7 @@ impl ViewCommand {
                 Ok(Self::Highlight { id: id()?, page: page()?, rects: rects.iter().map(rect).collect::<Result<_, _>>()?, color, transient })
             }
             "highlight-clear" => Ok(Self::ClearHighlight),
+            "page-info" => Ok(Self::PageInfo { id: id()? }),
             other => Err(format!("unknown view message {other}")),
         }
     }
@@ -96,6 +131,16 @@ impl ViewEvent {
             Self::GotoFailed { id, error } => ("goto-failed", json!({ "id": id, "error": error })),
             Self::HighlightDone { id } => ("highlight-done", json!({ "id": id })),
             Self::HighlightFailed { id, error } => ("highlight-failed", json!({ "id": id, "error": error })),
+            Self::PageInfoDone { id, current, pages } => (
+                "page-info-done",
+                json!({
+                    "id": id,
+                    "current": current,
+                    "pages": pages.iter().map(|p| json!({ "width": p.width, "height": p.height, "rotation": p.rotation })).collect::<Vec<_>>(),
+                }),
+            ),
+            Self::PageInfoFailed { id, error } => ("page-info-failed", json!({ "id": id, "error": error })),
+            Self::PageChanged { page } => ("page-changed", json!({ "page": page })),
         }
     }
 }
@@ -189,6 +234,32 @@ impl PdfCraftApp {
         Ok(())
     }
 
+    /// Every page's size as shown, and the page being read, of the active document.
+    fn page_info(&self) -> Result<(usize, Vec<PageSize>), String> {
+        let (index, doc) = self.active_ids().ok_or("no document is open")?;
+        let state = self.session.get(doc).ok_or("no document is open")?;
+        let pages: Vec<PageSize> =
+            state.info.pages.iter().map(|p| PageSize { width: f64::from(p.width), height: f64::from(p.height), rotation: p.rotation }).collect();
+        Ok((self.views[index].current.min(pages.len().saturating_sub(1)), pages))
+    }
+
+    /// Tell the host when the page being read (or the document in front) differs from the last report. Only once the
+    /// view has been drawn, so the first report is the page the user really sees.
+    fn report_page(&mut self) {
+        if self.host_view.is_none() {
+            return;
+        }
+        let Some((index, doc)) = self.active_ids() else { return };
+        if !self.views[index].first_painted {
+            return;
+        }
+        let page = self.views[index].current;
+        if self.page_sent != Some((doc, page)) {
+            self.page_sent = Some((doc, page));
+            self.emit_view(ViewEvent::PageChanged { page });
+        }
+    }
+
     /// Once a frame: carry out the host's view requests and tell it when the document first appeared.
     pub(crate) fn host_view_tick(&mut self, ctx: &egui::Context) {
         let commands: Vec<ViewCommand> = self.view_inbox.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
@@ -214,12 +285,21 @@ impl PdfCraftApp {
                     self.views.iter_mut().for_each(|v| v.host_highlight = None);
                     true
                 }
+                ViewCommand::PageInfo { id } => {
+                    let result = check_id(&id).and_then(|()| self.page_info());
+                    self.emit_view(match result {
+                        Ok((current, pages)) => ViewEvent::PageInfoDone { id, current, pages },
+                        Err(error) => ViewEvent::PageInfoFailed { id, error },
+                    });
+                    false
+                }
             };
             if changed {
                 ctx.request_repaint();
             }
         }
         self.report_opened();
+        self.report_page();
     }
 
     /// `opened`: the document a `pdfcraft:open` brought was drawn. Waits while the file is still on its way
@@ -280,20 +360,21 @@ mod json_tests {
 
     #[test]
     fn reads_every_message_shape() {
-        let goto = ViewCommand::from_json("goto", &json!({"id": "g", "page": 2, "rect": {"x": 1, "y": 2, "width": 3, "height": 4}})).unwrap();
+        let goto =
+            ViewCommand::from_json("goto", &serde_json::json!({"id": "g", "page": 2, "rect": {"x": 1, "y": 2, "width": 3, "height": 4}})).unwrap();
         assert_eq!(goto, ViewCommand::Goto { id: "g".into(), page: 2, rect: Some([1.0, 2.0, 3.0, 4.0]) });
-        let bare = ViewCommand::from_json("goto", &json!({"id": "g", "page": 0})).unwrap();
+        let bare = ViewCommand::from_json("goto", &serde_json::json!({"id": "g", "page": 0})).unwrap();
         assert_eq!(bare, ViewCommand::Goto { id: "g".into(), page: 0, rect: None });
         let h = ViewCommand::from_json(
             "highlight",
-            &json!({"id": "h", "page": 1, "rects": [{"x": 0, "y": 0, "width": 5, "height": 5}], "color": "#ff0", "transient": true}),
+            &serde_json::json!({"id": "h", "page": 1, "rects": [{"x": 0, "y": 0, "width": 5, "height": 5}], "color": "#ff0", "transient": true}),
         )
         .unwrap();
         assert_eq!(
             h,
             ViewCommand::Highlight { id: "h".into(), page: 1, rects: vec![[0.0, 0.0, 5.0, 5.0]], color: Some("#ff0".into()), transient: true }
         );
-        assert_eq!(ViewCommand::from_json("highlight-clear", &json!({})).unwrap(), ViewCommand::ClearHighlight);
+        assert_eq!(ViewCommand::from_json("highlight-clear", &serde_json::json!({})).unwrap(), ViewCommand::ClearHighlight);
     }
 
     #[test]
@@ -356,7 +437,12 @@ mod flow_tests {
 
     type Events = Rc<RefCell<Vec<ViewEvent>>>;
 
+    /// Events as the older tests see them: `page-changed` is left out (it has its own tests).
     fn app(with_doc: bool) -> (Harness<'static, PdfCraftApp>, Events) {
+        app_with(with_doc, false)
+    }
+
+    fn app_with(with_doc: bool, page_changes: bool) -> (Harness<'static, PdfCraftApp>, Events) {
         let events: Events = Rc::default();
         let sink = events.clone();
         let mut harness = Harness::builder().with_size(egui::vec2(1000.0, 700.0)).build_eframe(move |_| {
@@ -364,7 +450,11 @@ mod flow_tests {
             if with_doc {
                 app.open_bytes("a.pdf", None, pdf_pages(3)).unwrap();
             }
-            app.host_view = Some(Box::new(move |e| sink.borrow_mut().push(e.clone())));
+            app.host_view = Some(Box::new(move |e| {
+                if page_changes || !matches!(e, ViewEvent::PageChanged { .. }) {
+                    sink.borrow_mut().push(e.clone());
+                }
+            }));
             app.host_save = Some(Box::new(|_, _, _, _| Ok(())));
             app
         });
@@ -478,5 +568,54 @@ mod flow_tests {
         h.run_steps(10);
         assert!(ev.borrow().is_empty());
         assert!(h.state().opened_wait.is_none(), "it stops waiting");
+    }
+
+    #[test]
+    fn page_info_lists_every_page_as_shown_and_the_current_one() {
+        let (mut h, ev) = app(true);
+        send(&mut h, goto("g", 2, None));
+        send(&mut h, ViewCommand::PageInfo { id: "p".into() });
+        let got = ev.borrow().clone();
+        let page = PageSize { width: 200.0, height: 300.0, rotation: 0 };
+        assert_eq!(got[1], ViewEvent::PageInfoDone { id: "p".into(), current: 2, pages: vec![page; 3] });
+        let (name, fields) = got[1].to_message();
+        assert_eq!(name, "page-info-done");
+        assert_eq!(fields["pages"][0], serde_json::json!({ "width": 200.0, "height": 300.0, "rotation": 0 }));
+    }
+
+    #[test]
+    fn page_info_fails_without_a_document_or_an_id() {
+        let (mut h, ev) = app(false);
+        send(&mut h, ViewCommand::PageInfo { id: "p".into() });
+        let (mut h2, ev2) = app(true);
+        send(&mut h2, ViewCommand::PageInfo { id: String::new() });
+        assert!(matches!(&ev.borrow()[0], ViewEvent::PageInfoFailed { id, error } if id == "p" && error.contains("no document")));
+        assert!(matches!(&ev2.borrow()[0], ViewEvent::PageInfoFailed { id, .. } if id.is_empty()));
+        assert_eq!(ViewCommand::from_json("page-info", &serde_json::json!({"id": "x"})).unwrap(), ViewCommand::PageInfo { id: "x".into() });
+        assert!(ViewCommand::from_json("page-info", &serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn page_changed_is_sent_once_for_each_change_of_page() {
+        let (mut h, ev) = app_with(true, true);
+        let pages = |ev: &Events| -> Vec<usize> {
+            ev.borrow().iter().filter_map(|e| if let ViewEvent::PageChanged { page } = e { Some(*page) } else { None }).collect()
+        };
+        // Steps are counted, not timed: wait for the event instead of guessing how many frames a loaded machine needs.
+        let until = |h: &mut Harness<'static, PdfCraftApp>, ev: &Events, n: usize| {
+            for _ in 0..400 {
+                if pages(ev).len() >= n {
+                    break;
+                }
+                h.run_steps(1);
+            }
+        };
+        until(&mut h, &ev, 1);
+        send(&mut h, goto("a", 2, None));
+        until(&mut h, &ev, 2);
+        // Further frames and a second move to the same page add nothing.
+        send(&mut h, goto("b", 2, None));
+        h.run_steps(10);
+        assert_eq!(pages(&ev), vec![0, 2], "the first page once drawn, then each move, never twice in a row");
     }
 }

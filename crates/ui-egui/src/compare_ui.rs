@@ -37,6 +37,8 @@ pub struct CompareState {
     pub overlay_view: Option<crate::canvas::DocView>,
     /// PPM: the overlay couldn't be built.
     pub overlay_failed: bool,
+    /// PPM: the host's overlay colours (the viewer's own when it names none).
+    pub overlay_style: pdfcraft_engine::compare::OverlayStyle,
 }
 
 /// The PPM build follows the viewer's compare screen: the current file on the left, the chosen
@@ -348,6 +350,7 @@ impl PdfCraftApp {
                     overlay: None,
                     overlay_view: None,
                     overlay_failed: false,
+                    overlay_style: Default::default(),
                 });
                 self.right = Some(RightPanel::Compare);
                 self.notify(if n == 0 {
@@ -439,7 +442,10 @@ impl PdfCraftApp {
             return;
         }
         match self.session.compare_overlay_job(c.new, c.old, ppm::OVERLAY_DPI) {
-            Ok(job) => c.overlay_job = Some(job),
+            Ok(mut job) => {
+                job.set_style(c.overlay_style);
+                c.overlay_job = Some(job);
+            }
             Err(e) => {
                 c.overlay_failed = true;
                 self.notify_error(e);
@@ -523,6 +529,11 @@ impl PdfCraftApp {
     }
 }
 
+/// The legend's dots: the colours the overlay is drawn in (the host's, or the viewer's own), then the same-place grey.
+fn legend_colours(style: &pdfcraft_engine::compare::OverlayStyle) -> [[u8; 3]; 3] {
+    [style.current, style.chosen, pdfcraft_engine::compare::OVERLAY_SAME]
+}
+
 /// PPM: the strip above the pages, like the viewer's header row and legend. Returns whether
 /// the overlay was asked for (`Some(true)`) or the halves (`Some(false)`).
 fn ppm_strip(ui: &mut egui::Ui, rect: egui::Rect, t: &Tokens, c: &CompareState) -> Option<bool> {
@@ -539,9 +550,9 @@ fn ppm_strip(ui: &mut egui::Ui, rect: egui::Rect, t: &Tokens, c: &CompareState) 
         // While building, the host's status line says so (like the viewer's header); the strip stays quiet.
         if c.overlay_shown && !building {
             for (colour, label) in [
-                (ppm::rgb(pdfcraft_engine::compare::OVERLAY_CURRENT), tl_ctx!(ppm::CTX, "Lines only in the current file")),
-                (ppm::rgb(pdfcraft_engine::compare::OVERLAY_CHOSEN), tl_ctx!(ppm::CTX, "Lines only in the chosen file")),
-                (ppm::rgb(pdfcraft_engine::compare::OVERLAY_SAME), tl_ctx!(ppm::CTX, "Same place")),
+                (ppm::rgb(legend_colours(&c.overlay_style)[0]), tl_ctx!(ppm::CTX, "Lines only in the current file")),
+                (ppm::rgb(legend_colours(&c.overlay_style)[1]), tl_ctx!(ppm::CTX, "Lines only in the chosen file")),
+                (ppm::rgb(legend_colours(&c.overlay_style)[2]), tl_ctx!(ppm::CTX, "Same place")),
             ] {
                 let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
                 ui.painter().rect_filled(dot, egui::CornerRadius::same(2), colour);
@@ -716,7 +727,15 @@ pub(crate) fn compare_area(app: &mut PdfCraftApp, old: usize, new: usize, ui: &m
 
 #[cfg(test)]
 mod tests {
-    use super::visible_rows;
+    use super::{legend_colours, visible_rows};
+
+    #[test]
+    fn the_overlay_legend_follows_the_overlay_colours() {
+        use pdfcraft_engine::compare::{OverlayStyle, OVERLAY_CHOSEN, OVERLAY_CURRENT, OVERLAY_SAME};
+        assert_eq!(legend_colours(&OverlayStyle::default()), [OVERLAY_CURRENT, OVERLAY_CHOSEN, OVERLAY_SAME]);
+        let style = OverlayStyle { current: [0, 170, 0], chosen: [255, 0, 255], strength: 0.8 };
+        assert_eq!(legend_colours(&style), [[0, 170, 0], [255, 0, 255], OVERLAY_SAME]);
+    }
 
     #[test]
     fn only_the_rows_in_view_are_laid_out() {
