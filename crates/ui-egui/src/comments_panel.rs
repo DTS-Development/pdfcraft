@@ -89,6 +89,26 @@ pub fn count(info: &DocInfo) -> usize {
     info.annotations.iter().filter(|a| a.state.is_none()).count()
 }
 
+/// The author filter's entries: the stored name is the key (two people with the same shown name stay two
+/// entries), the name shown is the label.
+fn filter_authors(info: &DocInfo) -> Vec<(String, String)> {
+    let mut authors: Vec<String> = info.annotations.iter().filter(|a| !a.is_reply()).map(|a| a.author.clone().unwrap_or_default()).collect();
+    authors.sort();
+    authors.dedup();
+    authors
+        .into_iter()
+        .map(|a| {
+            let label = crate::bidi::visual_auto(&crate::author_display::shown(&a)).into_owned();
+            (a, label)
+        })
+        .collect()
+}
+
+/// The group of an author-sorted list: the stored name, so people sharing a shown name are not merged.
+fn author_group(a: &Annotation) -> String {
+    a.author.clone().unwrap_or_else(|| "Unknown author".into())
+}
+
 fn matches(a: &Annotation, q: &str) -> bool {
     let shown = a.author.as_deref().map(crate::author_display::shown);
     any_contains([a.author.as_deref(), shown.as_deref(), a.contents.as_deref(), Some(kind_label(a))].into_iter().flatten(), q)
@@ -191,7 +211,7 @@ pub(crate) fn show(
                 let label = info.pages.get(a.page).map(|p| p.label.as_str()).unwrap_or("?");
                 Some(crate::i18n::fmt(tl!("Page {label}"), &[("label", label)]))
             }
-            SortBy::Author => Some(a.author.clone().unwrap_or_else(|| "Unknown author".into())),
+            SortBy::Author => Some(author_group(a)),
             SortBy::Type => Some(kind_label(a).to_string()),
             SortBy::Color => Some(if a.color.is_some() { format!("#{}", color_key(a)) } else { "No colour".into() }),
             SortBy::Date => None,
@@ -582,9 +602,7 @@ pub(crate) fn header_controls(ui: &mut egui::Ui, info: &DocInfo, view: &mut DocV
     let mut types: Vec<String> = info.annotations.iter().filter(|a| !a.is_reply()).map(|a| kind_label(a).to_string()).collect();
     types.sort();
     types.dedup();
-    let mut authors: Vec<String> = info.annotations.iter().filter(|a| !a.is_reply()).map(|a| a.author.clone().unwrap_or_default()).collect();
-    authors.sort();
-    authors.dedup();
+    let authors = filter_authors(info);
     let mut colors: Vec<(String, Option<[f32; 3]>)> = info.annotations.iter().filter(|a| !a.is_reply()).map(|a| (color_key(a), a.color)).collect();
     colors.sort_by(|a, b| a.0.cmp(&b.0));
     colors.dedup_by(|a, b| a.0 == b.0);
@@ -655,9 +673,8 @@ pub(crate) fn header_controls(ui: &mut egui::Ui, info: &DocInfo, view: &mut DocV
         }
         ui.separator();
         ui.label(egui::RichText::new(tl!("Author")).small());
-        for a in &authors {
-            let name = crate::bidi::visual_auto(&crate::author_display::shown(a)).into_owned();
-            toggle(ui, &mut cv.hidden_authors, a, if a.is_empty() { tl!("Unknown author") } else { &name });
+        for (a, name) in &authors {
+            toggle(ui, &mut cv.hidden_authors, a, if a.is_empty() { tl!("Unknown author") } else { name });
         }
         ui.separator();
         ui.label(egui::RichText::new(tl!("Status")).small());
@@ -716,7 +733,7 @@ mod filter {
 
 #[cfg(test)]
 mod author_shown {
-    use super::matches;
+    use super::{author_group, filter_authors, matches};
     use pdfcraft_engine::{Edit, NewAnnotation, NoteIcon, Session, Shape, Style};
     use std::sync::Arc;
 
@@ -740,6 +757,10 @@ mod author_shown {
         assert_eq!(names, ["u1#Kim#A", "u2#Kim#B"], "stored as given");
         let shown: Vec<String> = names.iter().map(|n| crate::author_display::shown(n).into_owned()).collect();
         assert_eq!(shown, ["Kim", "Kim"]);
+        let info_like = pdfcraft_render::DocInfo { annotations: notes.clone(), ..s.get(id).expect("doc").info.clone() };
+        let entries = filter_authors(&info_like);
+        assert_eq!(entries, [("u1#Kim#A".to_string(), "Kim".to_string()), ("u2#Kim#B".to_string(), "Kim".to_string())], "two entries");
+        assert_ne!(author_group(&notes[0]), author_group(&notes[1]), "two groups");
         assert!(matches(&notes[0], "kim") && matches(&notes[1], "kim"), "by the name shown");
         assert!(matches(&notes[0], "u1") && !matches(&notes[1], "u1"), "by the stored name");
         crate::author_display::set("", 0);

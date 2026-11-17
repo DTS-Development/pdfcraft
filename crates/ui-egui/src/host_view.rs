@@ -598,12 +598,24 @@ mod flow_tests {
     #[test]
     fn page_changed_is_sent_once_for_each_change_of_page() {
         let (mut h, ev) = app_with(true, true);
-        h.run_steps(3);
+        let pages = |ev: &Events| -> Vec<usize> {
+            ev.borrow().iter().filter_map(|e| if let ViewEvent::PageChanged { page } = e { Some(*page) } else { None }).collect()
+        };
+        // Steps are counted, not timed: wait for the event instead of guessing how many frames a loaded machine needs.
+        let until = |h: &mut Harness<'static, PdfCraftApp>, ev: &Events, n: usize| {
+            for _ in 0..400 {
+                if pages(ev).len() >= n {
+                    break;
+                }
+                h.run_steps(1);
+            }
+        };
+        until(&mut h, &ev, 1);
         send(&mut h, goto("a", 2, None));
-        h.run_steps(3);
+        until(&mut h, &ev, 2);
+        // Further frames and a second move to the same page add nothing.
         send(&mut h, goto("b", 2, None));
-        h.run_steps(3);
-        let pages: Vec<usize> = ev.borrow().iter().filter_map(|e| if let ViewEvent::PageChanged { page } = e { Some(*page) } else { None }).collect();
-        assert_eq!(pages, vec![0, 2], "the first page once drawn, then each move, never twice in a row");
+        h.run_steps(10);
+        assert_eq!(pages(&ev), vec![0, 2], "the first page once drawn, then each move, never twice in a row");
     }
 }
