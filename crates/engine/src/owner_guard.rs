@@ -101,6 +101,7 @@ pub(crate) fn takes_custom_data(edit: &Edit) -> bool {
             | Edit::ReplyToAnnotation { .. }
             | Edit::SetAnnotationStatus { .. }
             | Edit::MarkAnnotation { .. }
+            | Edit::ReplaceText { .. }
     )
 }
 

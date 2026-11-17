@@ -195,7 +195,11 @@ pub(crate) fn show(
     let sort = cv.sort;
     match sort {
         SortBy::Page => {}
-        SortBy::Author => roots.sort_by_key(|a| a.author.clone().unwrap_or_default().to_lowercase()),
+        // By the name shown, then the stored one: the same shown name from two people stays two groups, side by side.
+        SortBy::Author => roots.sort_by_cached_key(|a| {
+            let stored = a.author.clone().unwrap_or_default();
+            (crate::author_display::shown(&stored).to_lowercase(), stored)
+        }),
         SortBy::Date => roots.sort_by(|a, b| b.modified.cmp(&a.modified)),
         SortBy::Type => roots.sort_by_key(|a| kind_label(a).to_string()),
         SortBy::Color => roots.sort_by_key(|a| color_key(a)),

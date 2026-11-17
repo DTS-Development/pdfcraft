@@ -557,8 +557,11 @@ pub(crate) struct PageCx<'a> {
     pub redact_mark: ([f64; 3], f64),
     /// The document allows commenting.
     pub allowed: bool,
-    /// Comments are hidden (Hide all comments): nothing to select.
+    /// Comments are hidden (Hide all comments): nothing to select, draw or move, except `kept`.
     pub hidden: bool,
+    /// While hidden: the sign boxes and signatures (`/Annots` indices on this page) the host asked to keep.
+    /// They are drawn, so they can be selected (a sign box then reaches the host as `sign-box-selected`).
+    pub kept: &'a [usize],
 }
 
 impl PageCx<'_> {
@@ -579,7 +582,7 @@ impl PageCx<'_> {
 
     /// Top-level comments on this page, in paint order.
     fn comments(&self) -> impl Iterator<Item = &Annotation> {
-        self.info.annotations.iter().filter(move |a| !self.hidden && a.page == self.page && !a.is_reply() && a.subtype != "Popup")
+        self.info.annotations.iter().filter(move |a| (!self.hidden || self.kept.contains(&a.index)) && a.page == self.page && !a.is_reply() && a.subtype != "Popup")
     }
 
     /// Where a comment is on screen: one rectangle, or one per marked line for text markup.
@@ -1366,7 +1369,7 @@ pub(crate) fn composer(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, 
         // Scrolled away: keep the draft until the page is back.
         return None;
     };
-    let cx = PageCx { page, xf: &xf, info, tool: QuickTool::Select, prefs, allowed: true, hidden: false, redact_mark: ([0.89, 0.13, 0.13], 1.0) };
+    let cx = PageCx { page, xf: &xf, info, tool: QuickTool::Select, prefs, allowed: true, hidden: false, kept: &[], redact_mark: ([0.89, 0.13, 0.13], 1.0) };
     let anchor = cx.to_screen(c.at);
     let t = Tokens::get(ctx);
     let mut post = false;

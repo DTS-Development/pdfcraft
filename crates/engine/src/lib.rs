@@ -781,6 +781,11 @@ impl Document {
         self.config.hide_comments
     }
 
+    /// Whether hidden comments leave signatures and sign boxes drawn (and selectable).
+    pub fn keeps_signatures(&self) -> bool {
+        self.config.keep_signatures
+    }
+
     pub fn can_undo(&self) -> Option<&str> {
         self.undo_label().map(Label::as_str)
     }

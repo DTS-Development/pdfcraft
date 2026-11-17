@@ -3089,7 +3089,17 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
             painter.rect_stroke(r, CornerRadius::ZERO, Stroke::new(0.5, t.border.gamma_multiply(0.8)), egui::StrokeKind::Outside);
 
             // Comments: tools, selection, moving and resizing come before text selection.
-            let pcx = comments::PageCx { page: i, xf: &xf, info, tool, prefs, allowed, hidden: comments_hidden, redact_mark };
+            // Hidden but kept: sign boxes and sealed signatures stay selectable, so signing can go on.
+            let kept: Vec<usize> = if comments_hidden && doc.keeps_signatures() {
+                info.annotations
+                    .iter()
+                    .filter(|a| a.page == i && !a.is_reply() && (a.sealed || doc.sign_box_at(i, a.index).is_some()))
+                    .map(|a| a.index)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let pcx = comments::PageCx { page: i, xf: &xf, info, tool, prefs, allowed, hidden: comments_hidden, kept: &kept, redact_mark };
             if let QuickTool::Measure(measure_tool) = tool {
                 crate::measure_ui::page_input(ui, &resp, doc, view, &pcx, measure_tool, units);
             }
@@ -4128,7 +4138,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         app.notify_error(why);
     }
     if (open_signature || open_initials) && app.host_allows("sign.fill.signature") {
-        app.signature_draft = crate::fill_sign::SigDraft::new(open_initials, &app.comment_prefs.author);
+        app.signature_draft = crate::fill_sign::SigDraft::new(open_initials, &crate::author_display::shown(&app.comment_prefs.author));
         app.dialog = Some(crate::Dialog::Signature);
     }
     if open_boxes && app.host_allows("page.boxes") {

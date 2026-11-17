@@ -611,7 +611,7 @@ impl PdfCraftApp {
                 let initials = id == "sign.fill.initials.change";
                 let saved = if initials { self.initials.as_ref() } else { self.signature.as_ref() };
                 self.signature_draft = saved.map_or_else(
-                    || crate::fill_sign::SigDraft::new(initials, &self.comment_prefs.author),
+                    || crate::fill_sign::SigDraft::new(initials, &crate::author_display::shown(&self.comment_prefs.author)),
                     |s| crate::fill_sign::SigDraft::from_saved(initials, s),
                 );
                 self.dialog = Some(Dialog::Signature);
@@ -621,7 +621,7 @@ impl PdfCraftApp {
                 self.quick_tool = crate::QuickTool::Fill(tool);
                 let initials = tool == crate::fill_sign::FillTool::Initials;
                 if (tool == crate::fill_sign::FillTool::Signature && self.signature.is_none()) || (initials && self.initials.is_none()) {
-                    self.signature_draft = crate::fill_sign::SigDraft::new(initials, &self.comment_prefs.author);
+                    self.signature_draft = crate::fill_sign::SigDraft::new(initials, &crate::author_display::shown(&self.comment_prefs.author));
                     self.dialog = Some(Dialog::Signature);
                 }
             }

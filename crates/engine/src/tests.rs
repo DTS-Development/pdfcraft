@@ -7143,6 +7143,21 @@ mod annot_sync {
     }
 
     #[test]
+    fn host_custom_data_also_goes_on_replace_text() {
+        let (mut s, id) = sharing("alice");
+        s.set_annotation_custom_data(host_pairs()).unwrap();
+        let quad = pdfcraft_annot::rect_quad([20.0, 140.0, 80.0, 160.0]);
+        let strike = Style::default_for(&Shape::TextMarkup { kind: Markup::StrikeOut, quads: vec![] });
+        let caret = Style::default_for(&Shape::Caret { rect: [0.0; 4] });
+        s.apply(id, Edit::ReplaceText { page: 0, quads: vec![quad], text: "new".into(), author: "alice".into(), strike, caret }).unwrap();
+        let changes = s.take_annot_changes(id).expect("a change");
+        assert!(!changes.upserts.is_empty());
+        for up in &changes.upserts {
+            assert!(up.xfdf.contains("commentId") && up.xfdf.contains("T-100"), "{}", up.xfdf);
+        }
+    }
+
+    #[test]
     fn host_custom_data_is_checked() {
         let mut s = Session::new();
         let pairs = |k: &str, v: &str| vec![(k.to_string(), v.to_string())];

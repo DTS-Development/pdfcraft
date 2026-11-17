@@ -833,6 +833,37 @@ mod flow_tests {
         assert!(!h.state().session.keeps_signatures(doc));
     }
 
+    /// With the comments hidden and the signatures kept, a sign box stays drawn and a click on it selects it
+    /// (so `sign-box-selected` still reaches the host); without keeping it, and for a plain comment, nothing is picked.
+    #[test]
+    fn a_kept_sign_box_can_still_be_selected_while_comments_are_hidden() {
+        let click_center = |h: &mut Harness<'static, PdfCraftApp>, keep: bool| -> Option<(usize, usize)> {
+            let (i, doc) = h.state().active_ids().unwrap();
+            h.state_mut().views[i].comments.selected = None;
+            send(h, StampCommand::AnnotsVisible { visible: false, keep_signatures: keep });
+            h.run_steps(3);
+            let info = &h.state().session.get(doc).unwrap().info;
+            let (w, hh) = (info.pages[0].width, info.pages[0].height);
+            let r = h.state().views[i].page_screen_rect(0).expect("page on screen");
+            // The box is [10, 120, 190, 180] in user space, y up.
+            let at = egui::pos2(r.min.x + 100.0 / w * r.width(), r.min.y + (hh - 150.0) / hh * r.height());
+            h.event(egui::Event::PointerMoved(at));
+            h.run_steps(2);
+            for pressed in [true, false] {
+                h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+                h.run_steps(2);
+            }
+            h.state().views[i].comments.selected
+        };
+        let (mut h, _) = app(true);
+        send(
+            &mut h,
+            StampCommand::AddSignBox { id: "sb".into(), role: "reviewer".into(), signer: None, label: "r".into(), size: None, page: None, at: None },
+        );
+        assert!(click_center(&mut h, true).is_some(), "kept: selectable");
+        assert!(click_center(&mut h, false).is_none(), "not kept: hidden, nothing to pick");
+    }
+
     #[test]
     fn a_sign_box_request_can_give_its_size_and_place() {
         let (mut h, ev) = app(true);
