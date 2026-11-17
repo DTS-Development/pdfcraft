@@ -90,7 +90,8 @@ pub fn count(info: &DocInfo) -> usize {
 }
 
 fn matches(a: &Annotation, q: &str) -> bool {
-    any_contains([a.author.as_deref(), a.contents.as_deref(), Some(kind_label(a))].into_iter().flatten(), q)
+    let shown = a.author.as_deref().map(crate::author_display::shown);
+    any_contains([a.author.as_deref(), shown.as_deref(), a.contents.as_deref(), Some(kind_label(a))].into_iter().flatten(), q)
 }
 
 /// Whether one of `fields` contains `q` in any case, Turkish dotted and dotless i included.
@@ -212,7 +213,11 @@ pub(crate) fn show(
                 ui.add_space(6.0);
                 let title = g.clone().unwrap_or_default();
                 // Catalog labels are already in display order; an author's name is put in it here.
-                let shown = if sort == SortBy::Author && a.author.is_some() { crate::bidi::visual_auto(&title) } else { tl!(&title).into() };
+                let shown: std::borrow::Cow<str> = if sort == SortBy::Author && a.author.is_some() {
+                    crate::bidi::visual_auto(&crate::author_display::shown(&title)).into_owned().into()
+                } else {
+                    tl!(&title).into()
+                };
                 ui.label(egui::RichText::new(shown).font(theme::semibold(12.5)).color(t.text_muted));
                 group = g;
             }
@@ -306,7 +311,7 @@ fn card(
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 avatar(ui, t, Some(subtype_icon(&a.subtype)), None, color);
-                let author = a.author.as_deref().map_or_else(|| tl!("Unknown author").into(), crate::bidi::visual_auto);
+                let author = a.author.as_deref().map_or_else(|| tl!("Unknown author").into(), |n| crate::bidi::visual_auto(&crate::author_display::shown(n)).into_owned());
                 ui.label(egui::RichText::new(author).font(theme::semibold(12.5)).color(t.text));
                 if let Some(m) = &a.modified {
                     ui.add(egui::Label::new(egui::RichText::new(m).font(theme::regular(11.0)).color(t.text_faint)).truncate());
@@ -363,13 +368,13 @@ fn card(
                 // The ownership checks walk the page tree: only the selected card, the one with menus, pays for them.
                 let (can_edit, can_delete) = if selected { reply_rights(doc, r, allowed) } else { (false, false) };
                 let resp = ui.horizontal(|ui| {
-                    avatar(ui, t, None, Some(&initials(r.author.as_deref().unwrap_or("?"))), t.text_faint);
+                    avatar(ui, t, None, Some(&initials(&r.author.as_deref().map_or(std::borrow::Cow::Borrowed("?"), crate::author_display::shown))), t.text_faint);
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 2.0;
                         // The "…" menu is only for a reply the user may change; others' replies have none.
                         let mut menu = None;
                         ui.horizontal(|ui| {
-                            let author = r.author.as_deref().map_or_else(|| tl!("Reply").into(), crate::bidi::visual_auto);
+                            let author = r.author.as_deref().map_or_else(|| tl!("Reply").into(), |n| crate::bidi::visual_auto(&crate::author_display::shown(n)).into_owned());
                             ui.label(egui::RichText::new(author).font(theme::semibold(12.0)));
                             if let Some(m) = &r.modified {
                                 ui.add(egui::Label::new(egui::RichText::new(m).font(theme::regular(11.0)).color(t.text_faint)).truncate());
@@ -651,7 +656,7 @@ pub(crate) fn header_controls(ui: &mut egui::Ui, info: &DocInfo, view: &mut DocV
         ui.separator();
         ui.label(egui::RichText::new(tl!("Author")).small());
         for a in &authors {
-            let name = crate::bidi::visual_auto(a);
+            let name = crate::bidi::visual_auto(&crate::author_display::shown(a)).into_owned();
             toggle(ui, &mut cv.hidden_authors, a, if a.is_empty() { tl!("Unknown author") } else { &name });
         }
         ui.separator();

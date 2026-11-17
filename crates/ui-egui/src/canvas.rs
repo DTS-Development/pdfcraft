@@ -2109,7 +2109,7 @@ fn annotation_hover_text(a: &pdfcraft_render::Annotation) -> Option<String> {
     if a.is_reply() || a.fill_sign {
         return None;
     }
-    let who = a.author.clone().unwrap_or_else(|| a.subtype.clone());
+    let who = a.author.as_deref().map_or_else(|| a.subtype.clone(), |n| crate::author_display::shown(n).into_owned());
     let body = a.contents.clone().unwrap_or_default();
     Some(if body.is_empty() { who } else { format!("{who}\n{body}") })
 }

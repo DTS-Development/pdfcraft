@@ -77,6 +77,12 @@ fn main() {
                         if let Some(author) = query_param("author") {
                             app.set_host_author(&author);
                         }
+                        // `?authorSep=&authorIdx=`: show only that piece of an author's name on screen (`userId#name#team`
+                        // with `#` and 1 shows the name). Display only; the saved `/T` and every event keep the name whole.
+                        if let Some(sep) = query_param("authorSep") {
+                            let index = query_param("authorIdx").and_then(|i| i.parse::<usize>().ok()).unwrap_or(0);
+                            pdfcraft_ui_egui::author_display::set(&sep, index);
+                        }
                         // A host-driven frame starts clean: the previous frame's open side panel
                         // (compare, ...) and egui memory in localStorage are neither read nor saved (#26).
                         app.start_fresh_for_host(&cc.egui_ctx);

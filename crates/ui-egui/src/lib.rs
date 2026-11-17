@@ -29,6 +29,7 @@ macro_rules! tl_ctx {
 }
 
 mod a11y_ui;
+pub mod author_display;
 mod actions_ui;
 mod appearance;
 pub mod canvas;
