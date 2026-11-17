@@ -31,12 +31,16 @@ pub fn shown(author: &str) -> Cow<'_, str> {
 }
 
 #[cfg(test)]
+pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     // One test: the rule is process-wide, so parallel tests would see each other's.
     #[test]
     fn picks_the_piece_or_falls_back_to_the_whole_name() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set("", 1);
         assert_eq!(shown("u1#Kim#Team A"), "u1#Kim#Team A", "no rule");
         set("#", 1);

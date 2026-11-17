@@ -715,6 +715,38 @@ mod filter {
 }
 
 #[cfg(test)]
+mod author_shown {
+    use super::matches;
+    use pdfcraft_engine::{Edit, NewAnnotation, NoteIcon, Session, Shape, Style};
+    use std::sync::Arc;
+
+    /// Two people with the same display name stay two authors (the key is the stored name); the search finds
+    /// a comment by the name shown and by the stored one.
+    #[test]
+    fn same_display_name_is_two_authors_and_search_takes_both_names() {
+        let _guard = crate::author_display::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::author_display::set("#", 1);
+        let mut s = Session::new().with_clock(|| 1_700_000_000);
+        let bytes = Session::new().create_blank(200.0, 300.0, 1).expect("blank").to_vec();
+        let id = s.open("t.pdf", None, Arc::new(bytes), None).expect("opens");
+        for (i, who) in ["u1#Kim#A", "u2#Kim#B"].into_iter().enumerate() {
+            let at = [50.0 + 30.0 * i as f64, 50.0];
+            let style = Style { color: [1.0, 0.8, 0.0], opacity: 1.0, width: 1.0, fill: None };
+            let note = NewAnnotation { page: 0, shape: Shape::Note { at, icon: NoteIcon::Comment }, style, contents: "n".into(), author: who.into() };
+            s.apply(id, Edit::AddAnnotation(note)).expect("note");
+        }
+        let notes = s.get(id).expect("doc").info.annotations.clone();
+        let names: Vec<&str> = notes.iter().filter_map(|a| a.author.as_deref()).collect();
+        assert_eq!(names, ["u1#Kim#A", "u2#Kim#B"], "stored as given");
+        let shown: Vec<String> = names.iter().map(|n| crate::author_display::shown(n).into_owned()).collect();
+        assert_eq!(shown, ["Kim", "Kim"]);
+        assert!(matches(&notes[0], "kim") && matches(&notes[1], "kim"), "by the name shown");
+        assert!(matches(&notes[0], "u1") && !matches(&notes[1], "u1"), "by the stored name");
+        crate::author_display::set("", 0);
+    }
+}
+
+#[cfg(test)]
 mod replies {
     use super::reply_rights;
     use pdfcraft_engine::{Edit, NewAnnotation, NoteIcon, Ownership, Session, Shape, Style};
