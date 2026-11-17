@@ -90,6 +90,20 @@ pub(crate) fn creates_comments(edit: &Edit) -> bool {
     )
 }
 
+/// Whether the comments the edit creates get the host's custom data: comments and answers the user
+/// makes, not what a page operation copies or an import brings (nor sign boxes and signatures).
+pub(crate) fn takes_custom_data(edit: &Edit) -> bool {
+    matches!(
+        edit,
+        Edit::AddMeasurement(_)
+            | Edit::AddAnnotation(_)
+            | Edit::AddCustomStamp { .. }
+            | Edit::ReplyToAnnotation { .. }
+            | Edit::SetAnnotationStatus { .. }
+            | Edit::MarkAnnotation { .. }
+    )
+}
+
 /// What a viewer's host policy decides about an edit.
 enum Work {
     /// Comments of every kind, answering them, filling in form values: always a viewer's.

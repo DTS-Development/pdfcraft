@@ -85,6 +85,11 @@ pub enum StampCommand {
         visible: bool,
         keep_signatures: bool,
     },
+    /// The key/value pairs (`customData` of `pdfcraft:annotation-defaults`) put on the comments and answers the user
+    /// makes from now on, for every document; empty stops. Pairs the engine refuses clear the setting (never a stale one).
+    AnnotationDefaults {
+        custom_data: Vec<(String, String)>,
+    },
     Cancel {
         id: String,
     },
@@ -449,6 +454,12 @@ impl PdfCraftApp {
                 StampCommand::AnnotsVisible { visible, keep_signatures } => {
                     let count = self.comments_host.map_or(0, |(_, _, n)| n) + 1;
                     self.comments_host = Some((!visible, keep_signatures, count));
+                }
+                StampCommand::AnnotationDefaults { custom_data } => {
+                    if let Err(error) = self.session.set_annotation_custom_data(custom_data) {
+                        let _ = self.session.set_annotation_custom_data(Vec::new());
+                        self.notify_error(error);
+                    }
                 }
                 StampCommand::Cancel { id } => {
                     if self.armed_stamp.as_ref().is_some_and(|a| a.id == id) {

@@ -289,6 +289,11 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   undo, `annots-changed` and what is synced stay as they are, and while hidden the comments can't be picked or
 ///   drawn (the same as the menu's Hide all comments, which still works per document afterwards). Form fields and
 ///   links stay. With `keepSignatures: true` signatures (sealed comments) and sign boxes stay drawn too.
+/// - `pdfcraft:annotation-defaults` (from the parent): `{ customData }`, an object of strings (at most 64 keys, keys 1 to
+///   100 characters, values up to 2000, no key starting with `ppm`), is put in each comment, answer, status and mark the
+///   user creates from now on (`/PpmCustomData`, so it is saved and goes out as `<trn-custom-data>` in `annots-changed`),
+///   until the next message; `null` or `{}` stops. Not on sign boxes, signatures, copied pages' comments, or what the
+///   server applies. A value the comment already has is kept. Needs a user (`actor`), like marking comments as theirs.
 /// - `pdfcraft:stamp-armed` `{ id }`, `pdfcraft:stamp-placed` `{ id, page }`,
 ///   `pdfcraft:stamp-cancelled` `{ id }` and `pdfcraft:stamp-failed` `{ id, error }` (to the
 ///   parent) report how a stamp request went.
@@ -531,6 +536,28 @@ mod host {
                         } else {
                             eframe::web_sys::console::warn_1(&"PdfCraft: pdfcraft:annots-visible refused: visible must be a boolean".into());
                         }
+                        return;
+                    }
+                    Some("pdfcraft:annotation-defaults") => {
+                        // `customData` is an object of strings, or null/missing to stop. Anything else stops it too (never a stale value).
+                        let value = js_sys::Reflect::get(&data, &JsValue::from_str("customData")).unwrap_or(JsValue::UNDEFINED);
+                        let pairs = if value.is_undefined() || value.is_null() {
+                            Vec::new()
+                        } else {
+                            js_sys::JSON::stringify(&value)
+                                .ok()
+                                .and_then(|s| s.as_string())
+                                .and_then(|json| serde_json::from_str::<std::collections::BTreeMap<String, serde_json::Value>>(&json).ok())
+                                .and_then(|m| m.into_iter().map(|(k, v)| v.as_str().map(|s| (k, s.to_string()))).collect::<Option<Vec<_>>>())
+                                .unwrap_or_else(|| {
+                                    eframe::web_sys::console::warn_1(&"PdfCraft: pdfcraft:annotation-defaults refused: customData must be an object of strings".into());
+                                    Vec::new()
+                                })
+                        };
+                        if let Ok(mut q) = stamps.lock() {
+                            q.push(pdfcraft_ui_egui::StampCommand::AnnotationDefaults { custom_data: pairs });
+                        }
+                        ctx.request_repaint();
                         return;
                     }
                     Some("pdfcraft:stamp-cancel") => {

@@ -414,6 +414,19 @@ pub fn known(doc: &Document, actor: &str) -> Known {
     k
 }
 
+/// The comment's `/PpmCustomData` with `custom` added under keys it doesn't have, as JSON.
+fn merge_custom(doc: &Document, d: &Dict, custom: &[(String, String)]) -> String {
+    let mut map: serde_json::Map<String, serde_json::Value> = d
+        .get(CUSTOM_DATA_KEY.as_bytes())
+        .and_then(|o| doc.resolve(o).as_string().map(|s| s.to_text()))
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or_default();
+    for (k, v) in custom {
+        map.entry(k.clone()).or_insert_with(|| serde_json::Value::String(v.clone()));
+    }
+    serde_json::Value::Object(map).to_string()
+}
+
 fn name_of(doc: &Document, d: &Dict) -> Option<String> {
     let o = doc.resolve(d.get(b"NM")?);
     let s = o.as_string()?.to_text();
@@ -424,6 +437,22 @@ fn name_of(doc: &Document, d: &Dict) -> Option<String> {
 /// page's comments would repeat their original's). New are the entries that weren't there
 /// before, and all of a page that wasn't. Returns how many were claimed.
 pub fn claim_new(doc: &mut Document, before: &Known, actor: &str, fresh_name: &mut dyn FnMut() -> String) -> Result<usize, AnnotError> {
+    claim_new_with(doc, before, actor, fresh_name, &[])
+}
+
+/// The private key of a comment's host values (`/PpmCustomData`, a JSON object of strings), written
+/// to XFDF as `<trn-custom-data>`.
+pub const CUSTOM_DATA_KEY: &str = "PpmCustomData";
+
+/// [`claim_new`], and `custom` (the host's key and value pairs) is added to each comment claimed
+/// that is no sign box and no signature, keeping a value the comment already has.
+pub fn claim_new_with(
+    doc: &mut Document,
+    before: &Known,
+    actor: &str,
+    fresh_name: &mut dyn FnMut() -> String,
+    custom: &[(String, String)],
+) -> Result<usize, AnnotError> {
     let mut names = before.names.clone();
     // Inline entries from before, used up as they are matched (editing one may promote it to a
     // reference, which must not make it look new).
@@ -459,9 +488,15 @@ pub fn claim_new(doc: &mut Document, before: &Known, actor: &str, fresh_name: &m
             let (_, r) = annot_ref(doc, page, index)?;
             let name = name_of(doc, &d).filter(|n| !names.contains(n)).unwrap_or_else(&mut *fresh_name);
             names.insert(name.clone());
+            // Host values go on comments only: not on a sign box, and not on a signature.
+            let takes_custom = !custom.is_empty() && !crate::is_sign_box(&d) && !crate::is_signature(doc, &d);
+            let merged = takes_custom.then(|| merge_custom(doc, &d, custom));
             doc.update_dict(r, |d| {
                 d.set(OWNER_KEY.as_bytes().to_vec(), PdfString::text(actor));
                 d.set(b"NM".to_vec(), PdfString::text(&name));
+                if let Some(json) = &merged {
+                    d.set(CUSTOM_DATA_KEY.as_bytes().to_vec(), PdfString::text(json));
+                }
             })?;
             claimed += 1;
         }

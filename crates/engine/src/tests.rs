@@ -7105,6 +7105,57 @@ mod annot_sync {
         assert!(!s.get(id).unwrap().dirty);
     }
 
+    fn host_pairs() -> Vec<(String, String)> {
+        vec![("commentId".into(), "c-1".into()), ("iframeComment".into(), "true".into()), ("tagNo".into(), "T-100".into())]
+    }
+
+    #[test]
+    fn host_custom_data_goes_on_new_comments_and_replies_until_it_is_stopped() {
+        let (mut s, id) = sharing("alice");
+        s.set_annotation_custom_data(host_pairs()).unwrap();
+        let has = |xfdf: &str| xfdf.contains("trn-custom-data") && ["commentId", "c-1", "iframeComment", "true", "tagNo", "T-100"].iter().all(|t| xfdf.contains(t));
+        // Two comments and two answers (a reply and a status), all with the same values.
+        s.apply(id, rect(0, 10.0)).unwrap();
+        let first = only(s.take_annot_changes(id));
+        s.apply(id, rect(0, 40.0)).unwrap();
+        let second = only(s.take_annot_changes(id));
+        let (page, index) = s.get(id).unwrap().annot_position(&first.annot_id).unwrap();
+        s.apply(id, Edit::ReplyToAnnotation { page, index, text: "Agreed".into(), author: "alice".into() }).unwrap();
+        let reply = only(s.take_annot_changes(id));
+        s.apply(id, Edit::SetAnnotationStatus { page, index, state: ReviewState::Accepted, author: "alice".into() }).unwrap();
+        let status = only(s.take_annot_changes(id));
+        for up in [&first, &second, &reply, &status] {
+            assert!(has(&up.xfdf), "{}", up.xfdf);
+        }
+        // The values are in the file too, so a saved copy sends them again.
+        let saved = s.save_bytes(id).unwrap();
+        assert!(saved.windows(13).any(|w| w == b"PpmCustomData"));
+        // Stopped: the next comment has none, and the earlier ones keep theirs.
+        s.set_annotation_custom_data(Vec::new()).unwrap();
+        s.apply(id, rect(0, 70.0)).unwrap();
+        let later = only(s.take_annot_changes(id));
+        assert!(!later.xfdf.contains("commentId") && !later.xfdf.contains("tagNo"), "{}", later.xfdf);
+        // Sign boxes and the page operations' copies never take them.
+        s.set_annotation_custom_data(host_pairs()).unwrap();
+        s.apply(id, Edit::AddSignBox { page: 0, rect: [20.0, 200.0, 100.0, 240.0], role: "reviewer".into(), signer: None, label: "sign".into(), author: "alice".into() }).unwrap();
+        let sign_box = only(s.take_annot_changes(id));
+        assert!(!sign_box.xfdf.contains("commentId"), "{}", sign_box.xfdf);
+    }
+
+    #[test]
+    fn host_custom_data_is_checked() {
+        let mut s = Session::new();
+        let pairs = |k: &str, v: &str| vec![(k.to_string(), v.to_string())];
+        assert!(s.set_annotation_custom_data(pairs("ppmSigner", "x")).is_err(), "PdfCraft's own keys");
+        assert!(s.set_annotation_custom_data(pairs("PPM-stamp", "x")).is_err(), "any case");
+        assert!(s.set_annotation_custom_data(pairs("", "x")).is_err());
+        assert!(s.set_annotation_custom_data(pairs(&"k".repeat(101), "x")).is_err());
+        assert!(s.set_annotation_custom_data(pairs("k", &"v".repeat(2001))).is_err());
+        assert!(s.set_annotation_custom_data((0..65).map(|i| (format!("k{i}"), "v".into())).collect()).is_err());
+        assert!(s.set_annotation_custom_data(vec![("a".into(), "1".into()), ("a".into(), "2".into())]).is_err());
+        assert!(s.set_annotation_custom_data(host_pairs()).is_ok());
+    }
+
     #[test]
     fn a_placed_stamp_goes_out_through_the_diff() {
         let (mut s, id) = sharing("alice");
