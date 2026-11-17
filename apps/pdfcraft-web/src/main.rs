@@ -408,7 +408,7 @@ mod host {
                             q.clear();
                         }
                     }
-                    Some(kind) if kind.starts_with("pdfcraft:annots-") => {
+                    Some(kind) if pdfcraft_ui_egui::is_annot_sync_message(kind) => {
                         match annots_command(kind, &data) {
                             Ok(command) => {
                                 if let Ok(mut q) = annots.lock() {

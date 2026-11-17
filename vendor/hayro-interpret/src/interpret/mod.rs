@@ -1060,6 +1060,8 @@ fn interpret_content<'a>(
 /// PdfCraft patch: whether an annotation is a signature, by the same rule as the engine's `is_signature`
 /// (`crates/annot`: sealed, a host signature stamp, a typed or picture signature, a Fill & Sign signature).
 /// "Hide all comments" with `keep_signatures` leaves these drawn. Keep in step with that function.
+/// This is an approximation without a JSON parser: `"date"` / `"templateId"` are looked for anywhere in `/PpmStamp`, where the
+/// engine reads the top-level keys only (the metadata the host writes has both at the top level, so they agree).
 fn is_signature_annotation(annot: &Dict<'_>, flags: u32) -> bool {
     use hayro_syntax::object::Name;
     if flags & (128 | 512) == (128 | 512) {
@@ -1080,7 +1082,7 @@ fn is_signature_annotation(annot: &Dict<'_>, flags: u32) -> bool {
         }
         Some(b"Ink") => {
             yes(b"PCFillSign")
-                || annot.get::<hayro_syntax::object::String<'_>>(b"Subj").is_some_and(|t| pdf_text(t.as_bytes()) == "Signature")
+                || annot.get::<hayro_syntax::object::String<'_>>(b"Subj").is_some_and(|t| pdf_text(t.as_bytes()).trim_matches(|c: char| c.is_whitespace() || c == '\0') == "Signature")
         }
         _ => false,
     }

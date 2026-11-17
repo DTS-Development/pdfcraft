@@ -68,7 +68,7 @@ mod optimize_ui;
 mod search_ui;
 mod sign_ui;
 mod stamps_ui;
-pub use host_annots::{AnnotCommand, AnnotEvent, AnnotInbox, HostAnnotFn};
+pub use host_annots::{is_annot_sync_message, AnnotCommand, AnnotEvent, AnnotInbox, HostAnnotFn};
 pub use host_bytes::{BytesInbox, BytesPurpose, BytesReply, BytesRequest, HostBytesFn};
 pub use host_compare::{CompareCommand, CompareEvent, CompareInbox, HostCompareFn, MAX_COMPARE_BYTES, overlay_style_from_json};
 pub use host_lock::{HOST_LOCK, commands_manifest, open_scope, parse_mode, policy_overrides, with_policy};

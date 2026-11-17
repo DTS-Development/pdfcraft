@@ -85,6 +85,12 @@ fn good<T>(list: &[serde_json::Value], read: impl Fn(&serde_json::Value) -> Resu
         .collect()
 }
 
+/// Whether a `pdfcraft:*` message type belongs to annotation sync ([`AnnotCommand::from_json`]). An exact list, not a
+/// `pdfcraft:annots-` prefix: `pdfcraft:annots-visible` shares the prefix but is a view message with its own handler.
+pub fn is_annot_sync_message(kind: &str) -> bool {
+    matches!(kind, "pdfcraft:annots-reset" | "pdfcraft:annots-apply" | "pdfcraft:annots-reject" | "pdfcraft:annots-select")
+}
+
 impl AnnotCommand {
     /// Read a `pdfcraft:annots-*` message (`kind` is the part after `annots-`) from its JSON. A
     /// malformed envelope is an error; a malformed item is skipped.
@@ -469,6 +475,21 @@ pub(crate) fn user_rect_to_view(page: &pdfcraft_render::PageInfo, r: [f64; 4]) -
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_the_annotation_sync_messages_are_routed_to_the_sync_queue() {
+        use super::is_annot_sync_message;
+        for k in ["reset", "apply", "reject", "select"] {
+            let kind = format!("pdfcraft:annots-{k}");
+            assert!(is_annot_sync_message(&kind), "{kind}");
+            // What the router sends on must be something `from_json` knows.
+            assert!(!AnnotCommand::from_json(k, &serde_json::json!({})).is_err_and(|e| e.starts_with("unknown annotation message")), "{kind}");
+        }
+        // Same prefix, own handler (view message); and other new 0.11.0 messages never reach the sync queue.
+        for kind in ["pdfcraft:annots-visible", "pdfcraft:annotation-defaults", "pdfcraft:page-info", "pdfcraft:sign-box-add", "pdfcraft:watermark", "pdfcraft:compare"] {
+            assert!(!is_annot_sync_message(kind), "{kind}");
+        }
+    }
+
     use super::*;
     use serde_json::json;
 
