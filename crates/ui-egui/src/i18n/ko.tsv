@@ -2696,16 +2696,23 @@ compare viewer	Page {n}	페이지 {n}
 compare viewer	Delete	삭제
 compare viewer	Insert	추가
 compare viewer	Edit	바뀜
-compare viewer	Old	이전
-compare viewer	New	새 문서
+compare viewer	Old	기준
+compare viewer	New	비교
 compare viewer	Overlay	겹쳐 보기
-compare viewer	Lines only in the current file	새 문서에만 있는 선
-compare viewer	Lines only in the chosen file	이전 문서에만 있는 선
+compare viewer	Lines only in the current file	기준에만 있는 선
+compare viewer	Lines only in the chosen file	비교에만 있는 선
 compare viewer	Same place	같은 곳
-compare viewer	Previous + overlay	이전 문서 + 겹침
-compare viewer	Words only in the current file or changed	새 문서에만 있거나 바뀐 글자
-compare viewer	Words only in the chosen file or changed	이전 문서에만 있거나 바뀐 글자
-compare viewer	Red: words only in the current file or changed / Green: words only in the chosen file or changed	빨강: 새 문서에만 있거나 바뀐 글자 / 초록: 이전 문서에만 있거나 바뀐 글자
+compare viewer	Previous + overlay	비교 + 겹침
+compare viewer	Words only in the current file or changed	기준에만 있거나 바뀐 글자
+compare viewer	Words only in the chosen file or changed	비교 문서에만 있거나 바뀐 글자
+compare viewer	Red: words only in the current file or changed / Green: words only in the chosen file or changed	빨강: 기준에만 있거나 바뀐 글자 / 초록: 비교 문서에만 있거나 바뀐 글자
 compare viewer	Only words are shown. For pictures and drawings, use Overlay.	글자 차이만 표시합니다. 그림·도면 차이는 겹쳐 보기에서 보세요.
-compare viewer	Only the first {n} pages were compared (current {a}, chosen {b}).	앞 {n}쪽만 비교했습니다(새 문서 {a}쪽, 이전 {b}쪽).
+compare viewer	Only the first {n} pages were compared (current {a}, chosen {b}).	앞 {n}쪽만 비교했습니다(기준 {a}쪽, 비교 {b}쪽).
+compare viewer	the current file	기준
+compare viewer	the chosen file	비교
+compare viewer	Lines only in {name}	{name}에만 있는 선
+compare viewer	Words only in {name} or changed	{name}에만 있거나 바뀐 글자
+compare viewer	Red: words only in {a} or changed / Green: words only in {b} or changed	빨강: {a}에만 있거나 바뀐 글자 / 초록: {b}에만 있거나 바뀐 글자
+compare viewer	Only the first {n} pages were compared ({an} {a}, {bn} {b}).	앞 {n}쪽만 비교했습니다({an} {a}쪽, {bn} {b}쪽).
+compare viewer	{name} + overlay	{name} + 겹침
 compare viewer	Couldn't build the overlay.	비교하지 못했습니다.

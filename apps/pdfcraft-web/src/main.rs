@@ -327,6 +327,9 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   `{ id, replaced, inserted, deleted, visual }` or `pdfcraft:compare-failed` `{ id, error }`
 ///   (to the parent) report the outcome. In this mode the Compare panel has no Mark as
 ///   comments or Report.
+/// - `names?` of `pdfcraft:compare` and `-run`: `{ previous?, current? }`, each a string of 1 to 20 characters that is not blank (anything else, or another key, fails the
+///   compare). They name the chosen (old) file and the active (new) file in the overlay's legend, the note on the shading colours, the heads of the list's two
+///   lines and the page note; without them the viewer's own wording (the current file is its "base") stays.
 /// - `changes?`, `changeList?` of `pdfcraft:compare` and `-run` (booleans; anything else fails the compare): `changes: true` adds
 ///   `changes: [{ id, kind: "replaced" | "inserted" | "deleted", previous, current }]` and `changesTruncated` to `compare-done` (ids `c1`…, in the
 ///   order of the editor's list, at most 2000; a side is `{ page (from 1), rect: { x, y, width, height } (points from the top-left of the page as
@@ -999,6 +1002,10 @@ mod host {
             Some(value) => pdfcraft_ui_egui::side_colors_from_json(&value)?,
             None => Default::default(),
         };
+        let names = match json_of("names")? {
+            Some(value) => pdfcraft_ui_egui::names_from_json(&value)?,
+            None => Default::default(),
+        };
         // `view` is "side", "overlay" or "overlay-side" (anything else fails the compare); `lockView` must be a boolean.
         let view = match js_sys::Reflect::get(data, &JsValue::from_str("view")).unwrap_or(JsValue::UNDEFINED) {
             v if v.is_undefined() || v.is_null() || op == CompareOp::Preview => pdfcraft_ui_egui::CompareView::Side,
@@ -1036,6 +1043,7 @@ mod host {
             side,
             view,
             lock_view,
+            names,
             changes,
             change_list,
             change,

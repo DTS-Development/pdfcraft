@@ -49,6 +49,8 @@ pub struct CompareCommand {
     pub changes: bool,
     /// `changeList` of the message (default true): false keeps the editor's own list of differences closed and out of the menu.
     pub change_list: bool,
+    /// `names` of the message: what the legend and the list call the two files.
+    pub names: crate::compare_ui::CompareNames,
     /// `change` of a `compare-goto`: the id (`c1`, `c2`…) of the change to move to.
     pub change: String,
 }
@@ -133,6 +135,25 @@ pub fn side_colors_from_json(v: &serde_json::Value) -> Result<SideColors, String
             "colorA" => out.old = Some(rgb()?),
             "colorB" => out.new = Some(rgb()?),
             other => return Err(format!("unknown side field {other}")),
+        }
+    }
+    Ok(out)
+}
+
+/// `names` of a compare message: `{ previous?, current? }`, each a string of 1 to 20 characters that is not blank.
+/// `previous` names the chosen (old) file and `current` the active (new) one.
+pub fn names_from_json(v: &serde_json::Value) -> Result<crate::compare_ui::CompareNames, String> {
+    let obj = v.as_object().ok_or("names must be an object")?;
+    let mut out = crate::compare_ui::CompareNames::default();
+    for (key, value) in obj {
+        let text = value.as_str().ok_or_else(|| format!("{key} must be a string"))?;
+        if text.trim().is_empty() || text.chars().count() > 20 {
+            return Err(format!("{key} must be 1 to 20 characters"));
+        }
+        match key.as_str() {
+            "previous" => out.previous = Some(text.to_string()),
+            "current" => out.current = Some(text.to_string()),
+            other => return Err(format!("unknown names field {other}")),
         }
     }
     Ok(out)
@@ -230,7 +251,10 @@ impl PdfCraftApp {
                     continue;
                 }
                 match self.run_host_compare(command.overlay, command.side, command.view, command.lock_view, command.changes, command.change_list) {
-                    Ok(done) => self.report_compare_done(command.id, done),
+                    Ok(done) => {
+                        self.set_compare_names(command.names);
+                        self.report_compare_done(command.id, done)
+                    }
                     Err(error) => fail(self, &error),
                 }
             } else if self.compare_taken {
@@ -251,7 +275,10 @@ impl PdfCraftApp {
                         self.emit_compare(CompareEvent::PreviewDone { id: cut(&id, MAX_ID_CHARS) });
                     }
                     (Ok(()), _) => match self.run_host_compare(command.overlay, command.side, command.view, command.lock_view, command.changes, command.change_list) {
-                        Ok(done) => self.report_compare_done(command.id, done),
+                        Ok(done) => {
+                            self.set_compare_names(command.names);
+                            self.report_compare_done(command.id, done)
+                        }
                         Err(error) => fail(self, &error),
                     },
                 }
@@ -394,6 +421,13 @@ impl PdfCraftApp {
         Ok(())
     }
 
+    /// PPM: the host's names of the two files (`names`), shown wherever the comparison names a side.
+    fn set_compare_names(&mut self, names: crate::compare_ui::CompareNames) {
+        if let Some(c) = self.compare.as_mut().filter(|c| c.ppm) {
+            c.names = names;
+        }
+    }
+
     /// PPM: shade the old and the new file's words in the host's colours (the alpha stays the viewer's).
     fn apply_side_colors(&mut self, side: SideColors) {
         let Some(c) = self.compare.as_mut().filter(|c| c.ppm) else { return };
@@ -467,6 +501,7 @@ mod tests {
             lock_view: false,
             changes: false,
             change_list: true,
+            names: Default::default(),
             change: String::new(),
         }
     }
@@ -1164,5 +1199,55 @@ mod tests {
         assert_eq!(h.state().right, None);
         let (_, events2) = ppm_with(CompareCommand { changes: true, change_list: false, ..command("c1") });
         assert_eq!(list_of(&done_of(&events2)), list, "the same list as a compare of the same files");
+    }
+
+    #[test]
+    fn the_names_are_read_strictly() {
+        let n = names_from_json(&serde_json::json!({ "previous": "비교", "current": "기준" })).unwrap();
+        assert_eq!((n.previous.as_deref(), n.current.as_deref()), (Some("비교"), Some("기준")));
+        assert_eq!(names_from_json(&serde_json::json!({})).unwrap(), Default::default());
+        assert!(names_from_json(&serde_json::json!({ "current": "a".repeat(20) })).is_ok());
+        for bad in [
+            serde_json::json!({ "previous": "" }),
+            serde_json::json!({ "previous": "   " }),
+            serde_json::json!({ "current": "a".repeat(21) }),
+            serde_json::json!({ "current": 3 }),
+            serde_json::json!({ "old": "x" }),
+            serde_json::json!([]),
+        ] {
+            assert!(names_from_json(&bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_hosts_names_replace_the_viewers_words_for_the_two_files() {
+        use egui_kittest::kittest::Queryable;
+        let names = crate::compare_ui::CompareNames { previous: Some("Mine".into()), current: Some("Base".into()) };
+        // Without names the viewer's own words stay.
+        let mut h = ppm_with(command("c1")).0;
+        h.run_steps(2);
+        assert!(h.get_all_by_label_contains("Old -").count() >= 2 && h.query_all_by_label_contains("Base -").count() == 0);
+        // With names the rows head their lines by them, and a run takes them like a compare.
+        let (mut h, _) = ppm_with(preview("p1"));
+        send(&mut h, CompareCommand { names: names.clone(), ..run("r1") });
+        h.run_steps(2);
+        assert_eq!(h.state().compare.as_ref().unwrap().names, names);
+        assert!(h.get_all_by_label_contains("Base -").count() >= 2 && h.get_all_by_label_contains("Mine +").count() >= 1);
+        assert_eq!(h.query_all_by_label_contains("Old -").count(), 0);
+        let (mut h, _) = ppm_with(CompareCommand { names: names.clone(), ..command("c2") });
+        h.run_steps(2);
+        assert_eq!(h.state().compare.as_ref().unwrap().names, names);
+    }
+
+    #[test]
+    fn the_legend_and_the_notes_use_the_names_and_a_missing_one_keeps_the_viewers_word() {
+        use crate::compare_ui::CompareNames;
+        let both = CompareNames { previous: Some("Mine".into()), current: Some("Base".into()) };
+        assert_eq!(crate::compare_ui::lines_only(&both, true), "Lines only in Base");
+        assert_eq!(crate::compare_ui::lines_only(&both, false), "Lines only in Mine");
+        assert_eq!(crate::compare_ui::words_only(&both, false), "Words only in Mine or changed");
+        let one = CompareNames { previous: None, current: Some("Base".into()) };
+        assert_eq!(crate::compare_ui::lines_only(&one, false), "Lines only in the chosen file");
+        assert_eq!(crate::compare_ui::lines_only(&one, true), "Lines only in Base");
     }
 }

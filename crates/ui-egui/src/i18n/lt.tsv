@@ -2712,4 +2712,11 @@ compare viewer	Words only in the chosen file or changed	Tik pasirinktame faile e
 compare viewer	Red: words only in the current file or changed / Green: words only in the chosen file or changed	Raudona: žodžiai tik dabartiniame faile arba pakeisti / Žalia: žodžiai tik pasirinktame faile arba pakeisti
 compare viewer	Only words are shown. For pictures and drawings, use Overlay.	Rodomi tik žodžiai. Paveikslėlių ir brėžinių skirtumams naudokite sutapdinimą.
 compare viewer	Only the first {n} pages were compared (current {a}, chosen {b}).	Palyginta tik pirmieji {n} puslapiai (dabartinis: {a}, pasirinktas: {b}).
+compare viewer	the current file	dabartinis failas
+compare viewer	the chosen file	pasirinktas failas
+compare viewer	Lines only in {name}	Linijos tik: {name}
+compare viewer	Words only in {name} or changed	Žodžiai tik: {name}, arba pakeisti
+compare viewer	Red: words only in {a} or changed / Green: words only in {b} or changed	Raudona: žodžiai tik: {a}, arba pakeisti / Žalia: žodžiai tik: {b}, arba pakeisti
+compare viewer	Only the first {n} pages were compared ({an} {a}, {bn} {b}).	Palyginta tik pirmieji {n} puslapiai ({an}: {a}, {bn}: {b}).
+compare viewer	{name} + overlay	{name} + sluoksniavimas
 compare viewer	Couldn't build the overlay.	Nepavyko sukurti sutapdinimo.

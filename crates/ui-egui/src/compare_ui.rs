@@ -52,6 +52,32 @@ pub struct CompareState {
     pub marks_custom: bool,
     /// The host kept the editor's own list of differences away (`changeList: false`).
     pub change_list: bool,
+    /// PPM: the host's names of the two files for the legend, the colour note, the rows and the page note.
+    pub names: CompareNames,
+}
+
+/// The names the host gave the two files of a PPM comparison (`names` of the message). None keeps the viewer's own wording.
+/// `previous` is the chosen (old) file, `current` the active (new) file the viewer calls the base.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CompareNames {
+    pub previous: Option<String>,
+    pub current: Option<String>,
+}
+
+impl CompareNames {
+    /// The current file's name where a sentence needs one: the host's, else the viewer's word for it.
+    fn current_or_default(&self) -> String {
+        self.current.clone().unwrap_or_else(|| tl_ctx!(ppm::CTX, "the current file").to_string())
+    }
+
+    /// The chosen file's name, likewise.
+    fn previous_or_default(&self) -> String {
+        self.previous.clone().unwrap_or_else(|| tl_ctx!(ppm::CTX, "the chosen file").to_string())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.previous.is_none() && self.current.is_none()
+    }
 }
 
 /// What a PPM comparison shows: the two halves, the overlay alone, or the old file beside the overlay.
@@ -87,6 +113,7 @@ impl CompareState {
             mark_colors: [ppm::TARGET, ppm::BASE],
             marks_custom: false,
             change_list: true,
+            names: CompareNames::default(),
         }
     }
 
@@ -331,8 +358,9 @@ fn ppm_panel(ui: &mut egui::Ui, t: &Tokens, s: &CompareState) -> Option<PanelAct
                     let line = if show { format!("{label} {mark}{}: {text}", words(text)) } else { String::new() };
                     ui.add(egui::Label::new(egui::RichText::new(line).small()).truncate().selectable(false));
                 };
-                side(ui, ch.kind != Kind::Deleted, "-", tl_ctx!(ppm::CTX, "Old"), &ch.new.text);
-                side(ui, ch.kind != Kind::Inserted, "+", tl_ctx!(ppm::CTX, "New"), &ch.old.text);
+                let (current, previous) = (s.names.current.as_deref().unwrap_or(tl_ctx!(ppm::CTX, "Old")), s.names.previous.as_deref().unwrap_or(tl_ctx!(ppm::CTX, "New")));
+                side(ui, ch.kind != Kind::Deleted, "-", current, &ch.new.text);
+                side(ui, ch.kind != Kind::Inserted, "+", previous, &ch.old.text);
             });
         });
         if resp.clicked() {
@@ -418,6 +446,7 @@ impl PdfCraftApp {
                     mark_colors: [ppm::TARGET, ppm::BASE],
                     marks_custom: false,
                     change_list: true,
+                    names: CompareNames::default(),
                 });
                 self.right = Some(RightPanel::Compare);
                 self.notify(if n == 0 {
@@ -570,6 +599,7 @@ impl PdfCraftApp {
     fn finish_overlay(&mut self, job: pdfcraft_engine::compare::OverlayJob) {
         let Some(c) = self.compare.as_ref() else { return };
         let new = c.new;
+        let names = c.names.clone();
         let built = job.finish(&self.session).map_err(|e| e.to_string());
         let outcome = built.and_then(|o| {
             // Looked at only: read-only and never synced, like the files it was made from.
@@ -593,10 +623,13 @@ impl PdfCraftApp {
             let id = view.id;
             self.session.set_hide_replies(id, true);
             let notice = (o.current_pages != o.chosen_pages).then(|| {
-                crate::i18n::fmt(
-                    tl_ctx!(ppm::CTX, "Only the first {n} pages were compared (current {a}, chosen {b})."),
-                    &[("n", &o.current_pages.min(o.chosen_pages).to_string()), ("a", &o.current_pages.to_string()), ("b", &o.chosen_pages.to_string())],
-                )
+                let (n, a, b) = (o.current_pages.min(o.chosen_pages).to_string(), o.current_pages.to_string(), o.chosen_pages.to_string());
+                if names.is_empty() {
+                    crate::i18n::fmt(tl_ctx!(ppm::CTX, "Only the first {n} pages were compared (current {a}, chosen {b})."), &[("n", &n), ("a", &a), ("b", &b)])
+                } else {
+                    let (an, bn) = (names.current_or_default(), names.previous_or_default());
+                    crate::i18n::fmt(tl_ctx!(ppm::CTX, "Only the first {n} pages were compared ({an} {a}, {bn} {b})."), &[("n", &n), ("an", &an), ("a", &a), ("bn", &bn), ("b", &b)])
+                }
             });
             Ok((id, notice, view))
         });
@@ -612,6 +645,24 @@ impl PdfCraftApp {
                 }
             }
         }
+    }
+}
+
+/// The legend's text for the lines only one file has: the host's name for it, else the viewer's own wording.
+pub(crate) fn lines_only(names: &CompareNames, current: bool) -> String {
+    match (if current { &names.current } else { &names.previous }, current) {
+        (Some(n), _) => crate::i18n::fmt(tl_ctx!(ppm::CTX, "Lines only in {name}"), &[("name", n)]),
+        (None, true) => tl_ctx!(ppm::CTX, "Lines only in the current file").to_string(),
+        (None, false) => tl_ctx!(ppm::CTX, "Lines only in the chosen file").to_string(),
+    }
+}
+
+/// The note's text for the words only one file has (or that changed), likewise.
+pub(crate) fn words_only(names: &CompareNames, current: bool) -> String {
+    match (if current { &names.current } else { &names.previous }, current) {
+        (Some(n), _) => crate::i18n::fmt(tl_ctx!(ppm::CTX, "Words only in {name} or changed"), &[("name", n)]),
+        (None, true) => tl_ctx!(ppm::CTX, "Words only in the current file or changed").to_string(),
+        (None, false) => tl_ctx!(ppm::CTX, "Words only in the chosen file or changed").to_string(),
     }
 }
 
@@ -631,11 +682,11 @@ fn ppm_strip(ui: &mut egui::Ui, rect: egui::Rect, t: &Tokens, c: &CompareState) 
         ui.add_enabled_ui(!c.lock_view, |ui| {
             let shown = c.view();
             for (view, label) in [
-                (CompareView::Side, tl!("Side by side")),
-                (CompareView::Overlay, tl_ctx!(ppm::CTX, "Overlay")),
-                (CompareView::OverlaySide, tl_ctx!(ppm::CTX, "Previous + overlay")),
+                (CompareView::Side, tl!("Side by side").to_string()),
+                (CompareView::Overlay, tl_ctx!(ppm::CTX, "Overlay").to_string()),
+                (CompareView::OverlaySide, c.names.previous.as_ref().map_or_else(|| tl_ctx!(ppm::CTX, "Previous + overlay").to_string(), |n| crate::i18n::fmt(tl_ctx!(ppm::CTX, "{name} + overlay"), &[("name", n)]))),
             ] {
-                if widgets::pill_button(ui, label, shown == view).clicked() && shown != view {
+                if widgets::pill_button(ui, &label, shown == view).clicked() && shown != view {
                     ask = Some(view);
                 }
             }
@@ -643,9 +694,9 @@ fn ppm_strip(ui: &mut egui::Ui, rect: egui::Rect, t: &Tokens, c: &CompareState) 
         // While building, the host's status line says so (like the viewer's header); the strip stays quiet.
         if c.overlay_shown && !building {
             for (colour, label) in [
-                (ppm::rgb(legend_colours(&c.overlay_style)[0]), tl_ctx!(ppm::CTX, "Lines only in the current file")),
-                (ppm::rgb(legend_colours(&c.overlay_style)[1]), tl_ctx!(ppm::CTX, "Lines only in the chosen file")),
-                (ppm::rgb(legend_colours(&c.overlay_style)[2]), tl_ctx!(ppm::CTX, "Same place")),
+                (ppm::rgb(legend_colours(&c.overlay_style)[0]), lines_only(&c.names, true)),
+                (ppm::rgb(legend_colours(&c.overlay_style)[1]), lines_only(&c.names, false)),
+                (ppm::rgb(legend_colours(&c.overlay_style)[2]), tl_ctx!(ppm::CTX, "Same place").to_string()),
             ] {
                 let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
                 ui.painter().rect_filled(dot, egui::CornerRadius::same(2), colour);
@@ -654,19 +705,23 @@ fn ppm_strip(ui: &mut egui::Ui, rect: egui::Rect, t: &Tokens, c: &CompareState) 
         } else if !c.overlay_shown && c.marks_custom {
             // The words are shaded in the host's colours, so the note names them with dots, not colour names.
             for (colour, label) in [
-                (c.mark_colors[1], tl_ctx!(ppm::CTX, "Words only in the current file or changed")),
-                (c.mark_colors[0], tl_ctx!(ppm::CTX, "Words only in the chosen file or changed")),
+                (c.mark_colors[1], words_only(&c.names, true)),
+                (c.mark_colors[0], words_only(&c.names, false)),
             ] {
                 let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
                 ui.painter().rect_filled(dot, egui::CornerRadius::same(2), colour);
                 ui.label(egui::RichText::new(label).small());
             }
         } else if !c.overlay_shown {
-            ui.label(
-                egui::RichText::new(tl_ctx!(ppm::CTX, "Red: words only in the current file or changed / Green: words only in the chosen file or changed"))
-                    .small()
-                    .color(t.text_muted),
-            );
+            let note = if c.names.is_empty() {
+                tl_ctx!(ppm::CTX, "Red: words only in the current file or changed / Green: words only in the chosen file or changed").to_string()
+            } else {
+                crate::i18n::fmt(
+                    tl_ctx!(ppm::CTX, "Red: words only in {a} or changed / Green: words only in {b} or changed"),
+                    &[("a", &c.names.current_or_default()), ("b", &c.names.previous_or_default())],
+                )
+            };
+            ui.label(egui::RichText::new(note).small().color(t.text_muted));
         }
     });
     let note = if c.overlay_shown {

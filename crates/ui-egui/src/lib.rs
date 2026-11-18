@@ -71,9 +71,9 @@ mod sign_ui;
 mod stamps_ui;
 pub use host_annots::{is_annot_sync_message, AnnotCommand, AnnotEvent, AnnotInbox, HostAnnotFn};
 pub use host_bytes::{BytesInbox, BytesPurpose, BytesReply, BytesRequest, HostBytesFn};
-pub use compare_ui::CompareView;
+pub use compare_ui::{CompareNames, CompareView};
 pub use host_compare::{
-    ChangeItem, ChangeList, ChangeSide, CompareCommand, CompareEvent, CompareInbox, CompareOp, HostCompareFn, MAX_COMPARE_BYTES, SideColors, overlay_style_from_json, side_colors_from_json,
+    ChangeItem, ChangeList, ChangeSide, CompareCommand, CompareEvent, CompareInbox, CompareOp, HostCompareFn, MAX_COMPARE_BYTES, SideColors, names_from_json, overlay_style_from_json, side_colors_from_json,
 };
 pub use host_popup::{PopupAction, parse_actions as parse_popup_actions};
 pub use host_lock::{HOST_LOCK, commands_manifest, open_scope, parse_mode, policy_overrides, with_policy};
