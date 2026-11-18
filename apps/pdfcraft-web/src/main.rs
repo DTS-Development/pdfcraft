@@ -327,7 +327,7 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   `{ id, replaced, inserted, deleted, visual }` or `pdfcraft:compare-failed` `{ id, error }`
 ///   (to the parent) report the outcome. In this mode the Compare panel has no Mark as
 ///   comments or Report.
-/// - `names?` of `pdfcraft:compare` and `-run`: `{ previous?, current? }`, each a string of 1 to 20 characters that is not blank (anything else, or another key, fails the
+/// - `names?` of `pdfcraft:compare` and `-run`: `{ previous?, current? }`, each a string of 1 to 20 characters that is not blank and holds no control or direction-formatting character (anything else, or another key, fails the
 ///   compare). They name the chosen (old) file and the active (new) file in the overlay's legend, the note on the shading colours, the heads of the list's two
 ///   lines and the page note; without them the viewer's own wording (the current file is its "base") stays.
 /// - `changes?`, `changeList?` of `pdfcraft:compare` and `-run` (booleans; anything else fails the compare): `changes: true` adds
@@ -340,7 +340,7 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 /// - `pdfcraft:compare-preview` (from the parent): `{ id, old: { name, bytes }, new: { name, bytes }, mode?, policy? }` opens the two files side by
 ///   side (the new one on the left, scrolled and zoomed together) without comparing: no shading, no change list, no view switch. It counts as the
 ///   window's one comparison. Answered with `pdfcraft:compare-preview-done` `{ id }` or `pdfcraft:compare-preview-failed` `{ id, error }`.
-/// - `pdfcraft:compare-run` (from the parent): `{ id, overlay?, side?, view?, lockView? }` compares the two files a preview opened, as `pdfcraft:compare`
+/// - `pdfcraft:compare-run` (from the parent): `{ id, overlay?, side?, names?, view?, lockView?, changes?, changeList? }` compares the two files a preview opened, as `pdfcraft:compare`
 ///   does (same options, same answers: `compare-done`, `compare-failed`, `compare-view`). Without an open preview, or a second time, it fails with `compare-failed`.
 /// - `pdfcraft:goto` (from the parent): `{ id, page, rect? }` scrolls to the page (from 0, as in `stamp-place`), or to
 ///   `rect` `{ x, y, width, height }` on it (points on the page as shown, top-left origin; its centre goes to the middle
@@ -708,29 +708,24 @@ mod host {
                     ];
                     // Only when `changes: true` asked: the list, and whether it was cut.
                     if let Some(list) = changes {
-                        let side = |s: &Option<pdfcraft_ui_egui::ChangeSide>| -> JsValue {
-                            let Some(s) = s else { return JsValue::NULL };
-                            let rect = js_sys::Object::new();
-                            for (k, v) in ["x", "y", "width", "height"].into_iter().zip(s.rect) {
-                                let _ = js_sys::Reflect::set(&rect, &k.into(), &JsValue::from_f64(v));
-                            }
-                            let o = js_sys::Object::new();
-                            let _ = js_sys::Reflect::set(&o, &"page".into(), &count(s.page + 1));
-                            let _ = js_sys::Reflect::set(&o, &"rect".into(), &rect);
-                            let _ = js_sys::Reflect::set(&o, &"text".into(), &s.text.as_str().into());
-                            o.into()
+                        // One serialisation and one parse instead of an object per field of up to 2000 changes.
+                        let side = |s: &Option<pdfcraft_ui_egui::ChangeSide>| match s {
+                            None => serde_json::Value::Null,
+                            Some(s) => serde_json::json!({
+                                "page": s.page + 1,
+                                "rect": { "x": s.rect[0], "y": s.rect[1], "width": s.rect[2], "height": s.rect[3] },
+                                "text": s.text,
+                            }),
                         };
-                        let array = js_sys::Array::new();
-                        for c in &list.items {
-                            let o = js_sys::Object::new();
-                            let _ = js_sys::Reflect::set(&o, &"id".into(), &c.id.as_str().into());
-                            let _ = js_sys::Reflect::set(&o, &"kind".into(), &c.kind.into());
-                            let _ = js_sys::Reflect::set(&o, &"previous".into(), &side(&c.previous));
-                            let _ = js_sys::Reflect::set(&o, &"current".into(), &side(&c.current));
-                            array.push(&o);
+                        let items: Vec<serde_json::Value> = list
+                            .items
+                            .iter()
+                            .map(|c| serde_json::json!({ "id": c.id, "kind": c.kind, "previous": side(&c.previous), "current": side(&c.current) }))
+                            .collect();
+                        if let Some(array) = serde_json::to_string(&items).ok().and_then(|json| js_sys::JSON::parse(&json).ok()) {
+                            fields.push(("changes", array));
+                            fields.push(("changesTruncated", JsValue::from_bool(list.truncated)));
                         }
-                        fields.push(("changes", array.into()));
-                        fields.push(("changesTruncated", JsValue::from_bool(list.truncated)));
                     }
                     fields
                 }

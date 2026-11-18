@@ -459,8 +459,10 @@ impl PdfCraftApp {
             report(&AnnotEvent::PopupAction { id: click.id, annot_id, subject, page, rect });
         }
         // `closeOnClick`: the selection goes after the action was told (the page hears the action, then `annots-selected` null).
+        // Only when that annotation is still the selected one: a click that moved the selection elsewhere keeps the new one.
         if click.close
             && let Some(v) = self.views.iter_mut().find(|v| v.id == doc)
+            && v.comments.selected == Some((page, index))
         {
             v.comments.selected = None;
         }
@@ -1324,6 +1326,35 @@ mod tests {
         assert!(action < gone, "action first, then the selection going: {heard:?}");
         let subjects: Vec<_> = heard.iter().filter_map(|e| if let AnnotEvent::PopupAction { subject, .. } = e { subject.clone() } else { None }).collect();
         assert_eq!(subjects, ["circle"], "no /Subj: the XFDF tag name, as the upserts' subtype has it");
+    }
+
+    #[test]
+    fn close_on_click_keeps_a_selection_that_moved_to_another_annotation() {
+        let mut app = PdfCraftApp::new();
+        app.ownership_inbox.lock().unwrap().push(pdfcraft_engine::Ownership { read_only: true, ..share() });
+        app.startup_inbox.lock().unwrap().push(("a.pdf".into(), pdf()));
+        let inbox = app.annot_inbox.clone();
+        let mut h = egui_kittest::Harness::builder().build_eframe(move |_| app);
+        for _ in 0..20 {
+            h.run_steps(2);
+        }
+        let item = |name: &str, tag: &str| RemoteAnnot {
+            annot_id: name.into(),
+            author_id: "u-kim".into(),
+            xfdf: format!(
+                r##"<?xml version="1.0" encoding="UTF-8" ?><xfdf xmlns="http://ns.adobe.com/xfdf/" xml:space="preserve"><annots><{tag} page="0" name="{name}" rect="20,40,120,140" title="Kim" flags="print"/></annots></xfdf>"##
+            ),
+        };
+        inbox.lock().unwrap().push(AnnotCommand::Reset { seq: 0, items: vec![item("a", "square"), item("b", "circle")] });
+        h.run_steps(3);
+        // The click was on "a", but "b" is the selected one by the time it is handled.
+        inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: "b".into() });
+        h.run_steps(3);
+        let selected = h.state().views[0].comments.selected;
+        assert!(selected.is_some());
+        h.state_mut().views[0].host_popup_click = Some(crate::host_popup::PopupClick { id: "go".into(), name: "a".into(), close: true });
+        h.run_steps(4);
+        assert_eq!(h.state().views[0].comments.selected, selected, "the selection is not b's to close");
     }
 
     #[test]

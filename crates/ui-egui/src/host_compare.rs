@@ -150,6 +150,10 @@ pub fn names_from_json(v: &serde_json::Value) -> Result<crate::compare_ui::Compa
         if text.trim().is_empty() || text.chars().count() > 20 {
             return Err(format!("{key} must be 1 to 20 characters"));
         }
+        // Control and bidirectional formatting characters can reorder or hide what the user reads.
+        if text.chars().any(|c| c.is_control() || matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')) {
+            return Err(format!("{key} must not hold control or direction characters"));
+        }
         match key.as_str() {
             "previous" => out.previous = Some(text.to_string()),
             "current" => out.current = Some(text.to_string()),
@@ -349,6 +353,10 @@ impl PdfCraftApp {
             self.active = self.views.iter().position(|v| v.id == new).or(self.active);
         }
         self.run_compare();
+        // A comparison that couldn't run (the engine refused, a tab is gone) leaves the preview as it was: that is a failure, not zero differences.
+        if !self.compare.as_ref().is_some_and(|c| !c.preview) {
+            return Err("the comparison failed".into());
+        }
         if let (Some(style), Some(c)) = (overlay, self.compare.as_mut()) {
             c.overlay_style = style;
         }
@@ -1063,6 +1071,19 @@ mod tests {
     }
 
     #[test]
+    fn a_run_that_cannot_compare_fails_and_leaves_the_preview() {
+        let (mut h, events) = ppm_with(preview("p1"));
+        h.run_steps(2);
+        // The old file's tab is gone from the window's point of view: the engine has nothing to compare.
+        h.state_mut().compare_old = None;
+        send(&mut h, run("r1"));
+        let events = events.borrow();
+        assert!(matches!(events.last(), Some(CompareEvent::Failed { id, .. }) if id == "r1"), "{events:?}");
+        assert!(!events.iter().any(|e| matches!(e, CompareEvent::Done { .. })), "no compare-done with zero counts: {events:?}");
+        assert!(h.state().compare.as_ref().is_some_and(|c| c.preview), "the preview is still open");
+    }
+
+    #[test]
     fn a_run_without_a_preview_fails_and_so_does_a_second_run_or_a_compare_during_a_preview() {
         let (mut h, events) = ppm_with(run("r0"));
         h.run_steps(2);
@@ -1214,6 +1235,11 @@ mod tests {
             serde_json::json!({ "current": 3 }),
             serde_json::json!({ "old": "x" }),
             serde_json::json!([]),
+            serde_json::json!({ "previous": "a\nb" }),
+            serde_json::json!({ "current": "a\u{85}b" }),
+            serde_json::json!({ "current": "a\u{202e}b" }),
+            serde_json::json!({ "previous": "\u{2066}a" }),
+            serde_json::json!({ "previous": "a\u{200f}" }),
         ] {
             assert!(names_from_json(&bad).is_err(), "{bad}");
         }
