@@ -649,6 +649,9 @@ fn main_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                     if p == RightPanel::Comments && app.comments_panel_hidden() {
                         continue;
                     }
+                    if p == RightPanel::Compare && app.compare.as_ref().is_some_and(|c| !c.change_list) {
+                        continue;
+                    }
                     if ui.add(widgets::radio(app.right == Some(p), tl!(label))).clicked() {
                         app.choose_right_panel(Some(p));
                     }

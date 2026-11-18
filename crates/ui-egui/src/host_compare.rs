@@ -17,13 +17,15 @@ const MAX_ERROR_CHARS: usize = 200;
 /// The most bytes either file may have; the bridge checks it before copying into memory.
 pub const MAX_COMPARE_BYTES: usize = 200 << 20;
 
-/// Which request: compare at once, open the two files without comparing (`compare-preview`), or compare
-/// the files a preview opened (`compare-run`; its `old` and `new` are empty).
+/// Which request: compare at once, open the two files without comparing (`compare-preview`), compare
+/// the files a preview opened (`compare-run`; its `old` and `new` are empty), or move to one change of the
+/// comparison (`compare-goto`; only `id` and `change` are read).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompareOp {
     Compare,
     Preview,
     Run,
+    Goto,
 }
 
 /// What the host asks for: `(name, bytes)` of each file, and the rules both open under (its
@@ -43,6 +45,43 @@ pub struct CompareCommand {
     pub view: CompareView,
     /// `lockView` of the message: the user can't switch the view.
     pub lock_view: bool,
+    /// `changes` of the message: tell the host the list of differences with the counts.
+    pub changes: bool,
+    /// `changeList` of the message (default true): false keeps the editor's own list of differences closed and out of the menu.
+    pub change_list: bool,
+    /// `change` of a `compare-goto`: the id (`c1`, `c2`…) of the change to move to.
+    pub change: String,
+}
+
+/// The most changes (and so the most ids) the host is told; the editor's own list shows as many.
+pub const MAX_CHANGES: usize = 2000;
+/// The longest `text` of one side of a change, in characters (longer is cut to 199 and an ellipsis).
+pub const MAX_CHANGE_TEXT: usize = 200;
+
+/// One side of a change as the host is told: the page (from 0) and the box of the words on it, in the space of
+/// `sign-box-selected` (`[x, y, width, height]` in points from the top-left of the page as shown).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChangeSide {
+    pub page: usize,
+    pub rect: [f64; 4],
+    pub text: String,
+}
+
+/// One difference. `previous` is the old file's side (`None` for an insertion), `current` the new file's
+/// (`None` for a deletion).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChangeItem {
+    pub id: String,
+    pub kind: &'static str,
+    pub previous: Option<ChangeSide>,
+    pub current: Option<ChangeSide>,
+}
+
+/// The list of changes `changes: true` asks for; `truncated` when there were more than [`MAX_CHANGES`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChangeList {
+    pub items: Vec<ChangeItem>,
+    pub truncated: bool,
 }
 
 /// Read the host's `overlay` object: `colorA` (the old file's ink), `colorB` (the new file's ink),
@@ -106,10 +145,16 @@ pub struct SideColors {
     pub new: Option<[u8; 3]>,
 }
 
+/// The counts of replaced, inserted, deleted and visual differences, and the list when the host asked for it.
+type CompareDone = ((usize, usize, usize, usize), Option<ChangeList>);
+
 /// What the host is told.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CompareEvent {
-    Done { id: String, replaced: usize, inserted: usize, deleted: usize, visual: usize },
+    Done { id: String, replaced: usize, inserted: usize, deleted: usize, visual: usize, changes: Option<ChangeList> },
+    /// A `compare-goto` moved both files (or the overlay) to the change.
+    GotoDone { id: String },
+    GotoFailed { id: String, error: String },
     Failed { id: String, error: String },
     /// The two files of a `compare-preview` are open side by side.
     PreviewDone { id: String },
@@ -173,14 +218,19 @@ impl PdfCraftApp {
             };
             if too_long {
                 fail(self, "the request id is missing or too long");
+            } else if command.op == CompareOp::Goto {
+                match self.goto_change(&command.change) {
+                    Ok(()) => self.emit_compare(CompareEvent::GotoDone { id: cut(&id, MAX_ID_CHARS) }),
+                    Err(error) => self.emit_compare(CompareEvent::GotoFailed { id: cut(&id, MAX_ID_CHARS), error: cut(&error, MAX_ERROR_CHARS) }),
+                }
             } else if command.op == CompareOp::Run {
                 // Only the files a preview opened, and once.
                 if !self.compare.as_ref().is_some_and(|c| c.preview) {
                     fail(self, "no preview is open: send compare-preview first");
                     continue;
                 }
-                match self.run_host_compare(command.overlay, command.side, command.view, command.lock_view) {
-                    Ok(counts) => self.report_compare_done(command.id, counts),
+                match self.run_host_compare(command.overlay, command.side, command.view, command.lock_view, command.changes, command.change_list) {
+                    Ok(done) => self.report_compare_done(command.id, done),
                     Err(error) => fail(self, &error),
                 }
             } else if self.compare_taken {
@@ -200,8 +250,8 @@ impl PdfCraftApp {
                         }
                         self.emit_compare(CompareEvent::PreviewDone { id: cut(&id, MAX_ID_CHARS) });
                     }
-                    (Ok(()), _) => match self.run_host_compare(command.overlay, command.side, command.view, command.lock_view) {
-                        Ok(counts) => self.report_compare_done(command.id, counts),
+                    (Ok(()), _) => match self.run_host_compare(command.overlay, command.side, command.view, command.lock_view, command.changes, command.change_list) {
+                        Ok(done) => self.report_compare_done(command.id, done),
                         Err(error) => fail(self, &error),
                     },
                 }
@@ -210,8 +260,8 @@ impl PdfCraftApp {
     }
 
     /// Tell the host the counts, and the view when it starts on one that builds (so a quick build can't hide it).
-    fn report_compare_done(&mut self, id: String, (replaced, inserted, deleted, visual): (usize, usize, usize, usize)) {
-        self.emit_compare(CompareEvent::Done { id: id.clone(), replaced, inserted, deleted, visual });
+    fn report_compare_done(&mut self, id: String, ((replaced, inserted, deleted, visual), changes): CompareDone) {
+        self.emit_compare(CompareEvent::Done { id: id.clone(), replaced, inserted, deleted, visual, changes });
         // The host starts from side by side, so only a change from that is told.
         let started = self.compare.as_ref().filter(|c| c.ppm && c.overlay_shown).map(|c| (c.view(), c.overlay_job.is_some()));
         if let Some((view, building)) = started.filter(|(_, building)| *building) {
@@ -264,7 +314,9 @@ impl PdfCraftApp {
         side: SideColors,
         view: CompareView,
         lock_view: bool,
-    ) -> Result<(usize, usize, usize, usize), String> {
+        changes: bool,
+        change_list: bool,
+    ) -> Result<CompareDone, String> {
         // The new file is the active one (a preview may have been left on the other tab).
         if let Some(new) = self.compare.as_ref().map(|c| c.new) {
             self.active = self.views.iter().position(|v| v.id == new).or(self.active);
@@ -276,13 +328,70 @@ impl PdfCraftApp {
         self.apply_side_colors(side);
         if let Some(c) = self.compare.as_mut() {
             c.lock_view = lock_view;
+            c.change_list = change_list;
+        }
+        if !change_list && self.right == Some(crate::RightPanel::Compare) {
+            self.right = None;
         }
         if view != CompareView::Side {
             // The same path as the user's Overlay buttons: the build starts and `View` reports it.
             self.set_view(view);
         }
         let Some(s) = self.compare.as_ref() else { return Err("the comparison failed".into()) };
-        Ok((s.result.count(Kind::Replaced), s.result.count(Kind::Inserted), s.result.count(Kind::Deleted), s.visual.len()))
+        let counts = (s.result.count(Kind::Replaced), s.result.count(Kind::Inserted), s.result.count(Kind::Deleted), s.visual.len());
+        Ok((counts, changes.then(|| self.change_list_for_host())))
+    }
+
+    /// The comparison's differences as the host is told them: ids `c1`… in the order of the editor's list, the
+    /// first [`MAX_CHANGES`] of them.
+    fn change_list_for_host(&self) -> ChangeList {
+        let Some(s) = self.compare.as_ref() else { return ChangeList { items: Vec::new(), truncated: false } };
+        let (old_doc, new_doc) = (self.session.get(s.old), self.session.get(s.new));
+        let side = |doc: Option<&pdfcraft_engine::Document>, side: &pdfcraft_engine::compare::Side| -> ChangeSide {
+            // The box that holds the words of the side (a side with none sits by its neighbour).
+            let mut boxes = side.rects.iter().copied();
+            let first = boxes.next().or(side.near).unwrap_or_default();
+            let user = boxes.fold(first, |a, b| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]);
+            let rect = doc
+                .and_then(|d| d.info.pages.get(side.page))
+                .map_or(user, |p| crate::host_annots::user_rect_to_view(p, user))
+                .map(|v| (v * 100.0).round() / 100.0);
+            let text = if side.text.chars().count() > MAX_CHANGE_TEXT {
+                side.text.chars().take(MAX_CHANGE_TEXT - 1).chain(std::iter::once('\u{2026}')).collect()
+            } else {
+                side.text.clone()
+            };
+            ChangeSide { page: side.page, rect, text }
+        };
+        let items = s
+            .result
+            .changes
+            .iter()
+            .take(MAX_CHANGES)
+            .enumerate()
+            .map(|(i, ch)| ChangeItem {
+                id: format!("c{}", i + 1),
+                kind: match ch.kind {
+                    Kind::Replaced => "replaced",
+                    Kind::Inserted => "inserted",
+                    Kind::Deleted => "deleted",
+                },
+                previous: (ch.kind != Kind::Inserted).then(|| side(old_doc, &ch.old)),
+                current: (ch.kind != Kind::Deleted).then(|| side(new_doc, &ch.new)),
+            })
+            .collect();
+        ChangeList { items, truncated: s.result.changes.len() > MAX_CHANGES }
+    }
+
+    /// `compare-goto`: select the change `id` like a click on its row of the editor's list (both files go to it and flash;
+    /// the overlay goes to its page).
+    fn goto_change(&mut self, id: &str) -> Result<(), String> {
+        let Some(s) = self.compare.as_ref().filter(|c| !c.preview) else { return Err("no comparison is finished".into()) };
+        let n = id.strip_prefix('c').and_then(|n| n.parse::<usize>().ok()).filter(|n| (1..=MAX_CHANGES).contains(n) && n.to_string() == id[1..]);
+        let Some(i) = n.map(|n| n - 1).filter(|i| *i < s.result.changes.len()) else { return Err(format!("unknown change {id}")) };
+        let Some(index) = self.views.iter().position(|v| v.id == s.new) else { return Err("the new file is not open".into()) };
+        self.select_change(index, i);
+        Ok(())
     }
 
     /// PPM: shade the old and the new file's words in the host's colours (the alpha stays the viewer's).
@@ -356,6 +465,9 @@ mod tests {
             side: SideColors::default(),
             view: CompareView::Side,
             lock_view: false,
+            changes: false,
+            change_list: true,
+            change: String::new(),
         }
     }
 
@@ -384,7 +496,7 @@ mod tests {
     fn the_host_starts_a_comparison_and_hears_the_counts() {
         let (mut h, events) = app(true);
         send(&mut h, command("c1"));
-        assert_eq!(*events.borrow(), vec![CompareEvent::Done { id: "c1".into(), replaced: 2, inserted: 0, deleted: 0, visual: events_visual(&h) }]);
+        assert_eq!(*events.borrow(), vec![CompareEvent::Done { id: "c1".into(), replaced: 2, inserted: 0, deleted: 0, visual: events_visual(&h), changes: None }]);
         let state = h.state();
         assert_eq!(state.right, Some(RightPanel::Compare));
         let (_, active) = state.active_ids().unwrap();
@@ -940,5 +1052,117 @@ mod tests {
         h.run_steps(2);
         assert!(matches!(&events.borrow()[0], CompareEvent::PreviewFailed { id, .. } if id == "p1"), "{:?}", events.borrow());
         assert!(h.state().compare.is_none());
+    }
+
+    fn done_of(events: &Rc<RefCell<Vec<CompareEvent>>>) -> CompareEvent {
+        events.borrow().iter().rev().find(|e| matches!(e, CompareEvent::Done { .. })).cloned().expect("a compare-done")
+    }
+
+    fn list_of(e: &CompareEvent) -> ChangeList {
+        match e {
+            CompareEvent::Done { changes: Some(l), .. } => l.clone(),
+            other => panic!("no list in {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_list_of_changes_comes_only_when_asked_and_has_ids_kinds_pages_and_boxes() {
+        // Asked for: ids c1.., the three kinds, the side that has no words is None, boxes lie on the page.
+        let (mut h, events) = ppm_with(CompareCommand {
+            changes: true,
+            old: ("old.pdf".into(), text_pdf("Delivery within five days. Old clause removed here. Returns accepted.")),
+            new: ("new.pdf".into(), text_pdf("Delivery within three days. Returns accepted. A brand new clause was added.")),
+            ..command("c1")
+        });
+        h.run_steps(2);
+        let list = list_of(&done_of(&events));
+        assert!(!list.truncated && !list.items.is_empty());
+        for (n, c) in list.items.iter().enumerate() {
+            assert_eq!(c.id, format!("c{}", n + 1));
+            assert_eq!(c.previous.is_none(), c.kind == "inserted", "{c:?}");
+            assert_eq!(c.current.is_none(), c.kind == "deleted", "{c:?}");
+            for side in [&c.previous, &c.current].into_iter().flatten() {
+                assert_eq!(side.page, 0);
+                let [x, y, w, hh] = side.rect;
+                assert!(x >= 0.0 && y >= 0.0 && w > 0.0 && hh > 0.0 && x + w <= 700.0 && y + hh <= 900.0, "{side:?}");
+                assert!(!side.text.is_empty() && side.text.chars().count() <= MAX_CHANGE_TEXT);
+            }
+        }
+        let kinds: Vec<_> = list.items.iter().map(|c| c.kind).collect();
+        assert!(kinds.contains(&"replaced") && kinds.contains(&"inserted") && kinds.contains(&"deleted"), "{kinds:?}");
+        // The counts stay the totals of the comparison.
+        let CompareEvent::Done { replaced, inserted, deleted, .. } = done_of(&events) else { unreachable!() };
+        assert_eq!(replaced + inserted + deleted, list.items.len());
+
+        // Not asked for: the payload has no list.
+        let (_, events) = ppm_with(command("c2"));
+        assert!(matches!(done_of(&events), CompareEvent::Done { changes: None, .. }));
+    }
+
+    #[test]
+    fn a_long_side_is_cut_to_two_hundred_characters_with_an_ellipsis() {
+        let long = "word ".repeat(120);
+        let (_, events) = ppm_with(CompareCommand {
+            changes: true,
+            old: ("old.pdf".into(), text_pdf("Start. End.")),
+            new: ("new.pdf".into(), text_pdf(&format!("Start. {long}End."))),
+            ..command("c1")
+        });
+        let list = list_of(&done_of(&events));
+        let text = &list.items.iter().find_map(|c| c.current.as_ref()).expect("a current side").text;
+        assert_eq!(text.chars().count(), MAX_CHANGE_TEXT);
+        assert!(text.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn change_list_false_keeps_the_editors_list_closed_and_unselectable() {
+        let (mut h, _) = ppm_with(CompareCommand { change_list: false, ..command("c1") });
+        assert_eq!(h.state().right, None);
+        h.state_mut().choose_right_panel(Some(RightPanel::Compare));
+        assert_eq!(h.state().right, None, "the panel can't be chosen");
+        assert!(!h.state().compare.as_ref().unwrap().change_list);
+        // The default shows it.
+        let (h2, _) = ppm_with(command("c2"));
+        assert_eq!(h2.state().right, Some(RightPanel::Compare));
+    }
+
+    #[test]
+    fn a_goto_selects_the_change_like_a_click_on_its_row() {
+        let (mut h, events) = ppm_with(CompareCommand { changes: true, ..command("c1") });
+        let goto = |id: &str, change: &str| CompareCommand { op: CompareOp::Goto, change: change.into(), old: Default::default(), new: Default::default(), ..command(id) };
+        send(&mut h, goto("g1", "c2"));
+        assert_eq!(h.state().compare.as_ref().unwrap().selected, Some(1));
+        assert!(h.state().views.iter().any(|v| v.flash.is_some()), "a file flashes the change");
+        // Unknown ids, ids that aren't ours and ids past the list fail.
+        for bad in ["c0", "c99", "x1", "c01", "c", "c-1", ""] {
+            send(&mut h, goto("g2", bad));
+        }
+        let events = events.borrow();
+        assert!(matches!(&events[1], CompareEvent::GotoDone { id } if id == "g1"), "{events:?}");
+        assert!(events[2..].iter().all(|e| matches!(e, CompareEvent::GotoFailed { .. })), "{events:?}");
+        assert_eq!(events.len(), 2 + 7);
+    }
+
+    #[test]
+    fn a_goto_in_the_overlay_goes_to_the_page_and_without_a_comparison_it_fails() {
+        let (mut h, events) = ppm_with(CompareCommand { view: CompareView::Overlay, ..command("c1") });
+        let goto = CompareCommand { op: CompareOp::Goto, change: "c1".into(), old: Default::default(), new: Default::default(), ..command("g1") };
+        send(&mut h, goto.clone());
+        assert!(matches!(events.borrow().last(), Some(CompareEvent::GotoDone { .. })), "{:?}", events.borrow());
+        // No comparison at all, and a preview that isn't compared yet.
+        let (mut h, events) = ppm_with(preview("p1"));
+        send(&mut h, goto);
+        assert!(matches!(events.borrow().last(), Some(CompareEvent::GotoFailed { error, .. }) if error.contains("no comparison")), "{:?}", events.borrow());
+    }
+
+    #[test]
+    fn a_run_takes_changes_and_change_list_like_a_compare() {
+        let (mut h, events) = ppm_with(preview("p1"));
+        send(&mut h, CompareCommand { changes: true, change_list: false, ..run("r1") });
+        let list = list_of(&done_of(&events));
+        assert!(!list.items.is_empty());
+        assert_eq!(h.state().right, None);
+        let (_, events2) = ppm_with(CompareCommand { changes: true, change_list: false, ..command("c1") });
+        assert_eq!(list_of(&done_of(&events2)), list, "the same list as a compare of the same files");
     }
 }

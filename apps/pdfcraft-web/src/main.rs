@@ -327,6 +327,13 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   `{ id, replaced, inserted, deleted, visual }` or `pdfcraft:compare-failed` `{ id, error }`
 ///   (to the parent) report the outcome. In this mode the Compare panel has no Mark as
 ///   comments or Report.
+/// - `changes?`, `changeList?` of `pdfcraft:compare` and `-run` (booleans; anything else fails the compare): `changes: true` adds
+///   `changes: [{ id, kind: "replaced" | "inserted" | "deleted", previous, current }]` and `changesTruncated` to `compare-done` (ids `c1`…, in the
+///   order of the editor's list, at most 2000; a side is `{ page (from 1), rect: { x, y, width, height } (points from the top-left of the page as
+///   shown), text (200 characters at most) }`, null where the other file alone has the words). `changeList: false` keeps the editor's own list
+///   of differences closed, out of the side panels menu, and unselectable.
+/// - `pdfcraft:compare-goto` (from the parent): `{ id, change }` moves both files (the overlay: to the page) to the change as a click on its row of the
+///   list does. Answered with `pdfcraft:compare-goto-done` `{ id }` or `pdfcraft:compare-goto-failed` `{ id, error }` (an unknown change, or no finished comparison).
 /// - `pdfcraft:compare-preview` (from the parent): `{ id, old: { name, bytes }, new: { name, bytes }, mode?, policy? }` opens the two files side by
 ///   side (the new one on the left, scrolled and zoomed together) without comparing: no shading, no change list, no view switch. It counts as the
 ///   window's one comparison. Answered with `pdfcraft:compare-preview-done` `{ id }` or `pdfcraft:compare-preview-failed` `{ id, error }`.
@@ -470,11 +477,12 @@ mod host {
                         }
                         return;
                     }
-                    Some(kind @ ("pdfcraft:compare" | "pdfcraft:compare-preview" | "pdfcraft:compare-run")) => {
+                    Some(kind @ ("pdfcraft:compare" | "pdfcraft:compare-preview" | "pdfcraft:compare-run" | "pdfcraft:compare-goto")) => {
                         use pdfcraft_ui_egui::{CompareEvent, CompareOp};
                         let op = match kind {
                             "pdfcraft:compare-preview" => CompareOp::Preview,
                             "pdfcraft:compare-run" => CompareOp::Run,
+                            "pdfcraft:compare-goto" => CompareOp::Goto,
                             _ => CompareOp::Compare,
                         };
                         let id = string(&data, "id").unwrap_or_default();
@@ -487,7 +495,11 @@ mod host {
                             }
                             Err(error) => {
                                 let id = id.chars().take(128).collect();
-                                bridge.post_compare(&if op == CompareOp::Preview { CompareEvent::PreviewFailed { id, error } } else { CompareEvent::Failed { id, error } })
+                                bridge.post_compare(&match op {
+                                    CompareOp::Preview => CompareEvent::PreviewFailed { id, error },
+                                    CompareOp::Goto => CompareEvent::GotoFailed { id, error },
+                                    _ => CompareEvent::Failed { id, error },
+                                })
                             }
                         }
                         return;
@@ -682,14 +694,47 @@ mod host {
             use pdfcraft_ui_egui::CompareEvent as E;
             let count = |n: usize| JsValue::from_f64(n as f64);
             let fields = match event {
-                E::Done { id, replaced, inserted, deleted, visual } => vec![
-                    ("type", "pdfcraft:compare-done".into()),
-                    ("id", id.as_str().into()),
-                    ("replaced", count(*replaced)),
-                    ("inserted", count(*inserted)),
-                    ("deleted", count(*deleted)),
-                    ("visual", count(*visual)),
-                ],
+                E::Done { id, replaced, inserted, deleted, visual, changes } => {
+                    let mut fields = vec![
+                        ("type", "pdfcraft:compare-done".into()),
+                        ("id", id.as_str().into()),
+                        ("replaced", count(*replaced)),
+                        ("inserted", count(*inserted)),
+                        ("deleted", count(*deleted)),
+                        ("visual", count(*visual)),
+                    ];
+                    // Only when `changes: true` asked: the list, and whether it was cut.
+                    if let Some(list) = changes {
+                        let side = |s: &Option<pdfcraft_ui_egui::ChangeSide>| -> JsValue {
+                            let Some(s) = s else { return JsValue::NULL };
+                            let rect = js_sys::Object::new();
+                            for (k, v) in ["x", "y", "width", "height"].into_iter().zip(s.rect) {
+                                let _ = js_sys::Reflect::set(&rect, &k.into(), &JsValue::from_f64(v));
+                            }
+                            let o = js_sys::Object::new();
+                            let _ = js_sys::Reflect::set(&o, &"page".into(), &count(s.page + 1));
+                            let _ = js_sys::Reflect::set(&o, &"rect".into(), &rect);
+                            let _ = js_sys::Reflect::set(&o, &"text".into(), &s.text.as_str().into());
+                            o.into()
+                        };
+                        let array = js_sys::Array::new();
+                        for c in &list.items {
+                            let o = js_sys::Object::new();
+                            let _ = js_sys::Reflect::set(&o, &"id".into(), &c.id.as_str().into());
+                            let _ = js_sys::Reflect::set(&o, &"kind".into(), &c.kind.into());
+                            let _ = js_sys::Reflect::set(&o, &"previous".into(), &side(&c.previous));
+                            let _ = js_sys::Reflect::set(&o, &"current".into(), &side(&c.current));
+                            array.push(&o);
+                        }
+                        fields.push(("changes", array.into()));
+                        fields.push(("changesTruncated", JsValue::from_bool(list.truncated)));
+                    }
+                    fields
+                }
+                E::GotoDone { id } => vec![("type", "pdfcraft:compare-goto-done".into()), ("id", id.as_str().into())],
+                E::GotoFailed { id, error } => {
+                    vec![("type", "pdfcraft:compare-goto-failed".into()), ("id", id.as_str().into()), ("error", error.as_str().into())]
+                }
                 E::Failed { id, error } => {
                     vec![("type", "pdfcraft:compare-failed".into()), ("id", id.as_str().into()), ("error", error.as_str().into())]
                 }
@@ -968,8 +1013,19 @@ mod host {
             v if v.is_undefined() || v.is_null() || op == CompareOp::Preview => false,
             v => v.as_bool().ok_or("lockView must be a boolean")?,
         };
-        // The files: a run has none; a compare or a preview needs both.
-        let (old, new) = if op == CompareOp::Run { (Default::default(), Default::default()) } else { (compare_file(data, "old")?, compare_file(data, "new")?) };
+        // `changes` and `changeList` must be booleans (`changeList` is true unless it says false); a preview has neither.
+        let flag = |key: &str, default: bool| -> Result<bool, String> {
+            match js_sys::Reflect::get(data, &JsValue::from_str(key)).unwrap_or(JsValue::UNDEFINED) {
+                v if v.is_undefined() || v.is_null() || matches!(op, CompareOp::Preview | CompareOp::Goto) => Ok(default),
+                v => v.as_bool().ok_or_else(|| format!("{key} must be a boolean")),
+            }
+        };
+        let changes = flag("changes", false)?;
+        let change_list = flag("changeList", true)?;
+        // A goto names the change and nothing else; the others have no such key.
+        let change = if op == CompareOp::Goto { string(data, "change").ok_or_else(|| "change must be a string".to_string())? } else { String::new() };
+        // The files: a run and a goto have none; a compare or a preview needs both.
+        let (old, new) = if matches!(op, CompareOp::Run | CompareOp::Goto) { (Default::default(), Default::default()) } else { (compare_file(data, "old")?, compare_file(data, "new")?) };
         Ok(pdfcraft_ui_egui::CompareCommand {
             id,
             op,
@@ -980,6 +1036,9 @@ mod host {
             side,
             view,
             lock_view,
+            changes,
+            change_list,
+            change,
         })
     }
 

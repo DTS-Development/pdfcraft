@@ -50,6 +50,8 @@ pub struct CompareState {
     pub mark_colors: [Color32; 2],
     /// PPM: the host named a shading colour, so the strip's note shows colour dots rather than colour names.
     pub marks_custom: bool,
+    /// The host kept the editor's own list of differences away (`changeList: false`).
+    pub change_list: bool,
 }
 
 /// What a PPM comparison shows: the two halves, the overlay alone, or the old file beside the overlay.
@@ -84,6 +86,7 @@ impl CompareState {
             preview: true,
             mark_colors: [ppm::TARGET, ppm::BASE],
             marks_custom: false,
+            change_list: true,
         }
     }
 
@@ -414,6 +417,7 @@ impl PdfCraftApp {
                     preview: false,
                     mark_colors: [ppm::TARGET, ppm::BASE],
                     marks_custom: false,
+                    change_list: true,
                 });
                 self.right = Some(RightPanel::Compare);
                 self.notify(if n == 0 {
@@ -428,32 +432,37 @@ impl PdfCraftApp {
         }
     }
 
+    /// Select change `i`: both files go to it and flash (the panel's row click and the host's `compare-goto`).
+    pub(crate) fn select_change(&mut self, index: usize, i: usize) {
+        let Some(s) = self.compare.as_mut() else { return };
+        let old = s.old;
+        s.selected = Some(i);
+        let Some(ch) = s.result.changes.get(i) else { return };
+        let rect = ch.new.rects.first().copied().or(ch.new.near).unwrap_or_default();
+        let page = ch.new.page;
+        let old_target = (ch.old.page, ch.old.rects.first().copied().or(ch.old.near).unwrap_or_default());
+        // The overlay has the pages only, so it goes to the page.
+        if s.overlay_shown
+            && let Some(v) = s.overlay_view.as_mut()
+        {
+            v.go_to_page(page);
+        }
+        let v = &mut self.views[index];
+        v.go_to_page(page);
+        v.flash = Some((page, rect.map(|x| x as f32), 0.0));
+        // The old file's half jumps to its side of the change too.
+        if let Some(oi) = self.views.iter().position(|v| v.id == old) {
+            let v = &mut self.views[oi];
+            v.go_to_page(old_target.0);
+            v.flash = Some((old_target.0, old_target.1.map(|x| x as f32), 0.0));
+        }
+    }
+
     pub(crate) fn compare_action(&mut self, index: usize, a: PanelAction) {
         let Some(s) = self.compare.as_mut() else { return };
         let (old, new) = (s.old, s.new);
         match a {
-            PanelAction::Select(i) => {
-                s.selected = Some(i);
-                let Some(ch) = s.result.changes.get(i) else { return };
-                let rect = ch.new.rects.first().copied().or(ch.new.near).unwrap_or_default();
-                let page = ch.new.page;
-                let old_target = (ch.old.page, ch.old.rects.first().copied().or(ch.old.near).unwrap_or_default());
-                // The overlay has the pages only, so it goes to the page.
-                if s.overlay_shown
-                    && let Some(v) = s.overlay_view.as_mut()
-                {
-                    v.go_to_page(page);
-                }
-                let v = &mut self.views[index];
-                v.go_to_page(page);
-                v.flash = Some((page, rect.map(|x| x as f32), 0.0));
-                // The old file's half jumps to its side of the change too.
-                if let Some(oi) = self.views.iter().position(|v| v.id == old) {
-                    let v = &mut self.views[oi];
-                    v.go_to_page(old_target.0);
-                    v.flash = Some((old_target.0, old_target.1.map(|x| x as f32), 0.0));
-                }
-            }
+            PanelAction::Select(i) => self.select_change(index, i),
             PanelAction::SideBySide(on) => {
                 s.side_by_side = on;
                 s.leader = 1;
