@@ -636,6 +636,9 @@ mod tests {
         h.get_by_label("Overlay").click();
         h.run_steps(4);
         assert!(h.state().compare.as_ref().unwrap().overlay_shown, "unlocked: the button switches");
+        h.get_by_label("Side by side").click();
+        h.run_steps(4);
+        assert!(!h.state().compare.as_ref().unwrap().overlay_shown, "and the other button switches back");
     }
 
     #[test]

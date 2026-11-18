@@ -1299,6 +1299,49 @@ mod tests {
         assert!(h.query_by_label("Go there").is_some(), "the bar on its comment (a document that can be edited too)");
     }
 
+    /// A placed signature stamp is a comment of its own: it has the bar (a sign box and a reply do not).
+    #[test]
+    fn a_signature_stamp_has_the_bar() {
+        use egui_kittest::kittest::Queryable;
+        let app = PdfCraftApp::new();
+        app.ownership_inbox.lock().unwrap().push(share());
+        app.startup_inbox.lock().unwrap().push(("a.pdf".into(), pdf()));
+        let (inbox, stamps) = (app.annot_inbox.clone(), app.stamp_inbox.clone());
+        let mut h = egui_kittest::Harness::builder().build_eframe(move |_| app);
+        for _ in 0..20 {
+            h.run_steps(2);
+        }
+        let mut png = Vec::new();
+        let mut enc = png::Encoder::new(&mut png, 2, 2);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut w = enc.write_header().unwrap();
+        w.write_image_data(&[255u8; 16]).unwrap();
+        drop(w);
+        let (_, id) = h.state().active_ids().unwrap();
+        let file = pdfcraft_engine::MarkFile { name: "sig.png".into(), bytes: png.into(), page: 0 };
+        h.state_mut()
+            .session
+            .apply(
+                id,
+                pdfcraft_engine::Edit::AddCustomStamp {
+                    page: 0,
+                    rect: [20.0, 40.0, 120.0, 90.0],
+                    name: "Signature".into(),
+                    file,
+                    author: "alice".into(),
+                    extra: Some(("PpmStamp".into(), "meta-1".into())),
+                },
+            )
+            .unwrap();
+        h.run_steps(3);
+        let name = h.state().session.get(id).unwrap().annot_name_at(0, 0).expect("the stamp is named");
+        stamps.lock().unwrap().push(popup_actions(&[("go", "Go there", "navigation")]));
+        inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: name });
+        h.run_steps(4);
+        assert!(h.query_by_label("Go there").is_some(), "the bar on a signature stamp");
+    }
+
     /// A click waits for the next tick; a server change in between must not make it speak of another annotation.
     #[test]
     fn a_click_is_not_reported_for_another_annotation_after_the_list_changes() {
