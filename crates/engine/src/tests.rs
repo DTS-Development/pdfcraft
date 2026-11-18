@@ -7184,6 +7184,38 @@ mod annot_sync {
         assert!(s.take_annot_problems(id).is_empty());
     }
 
+    /// An annotation of the actor's carrying `n` characters of PDFTron `trn-attachments` (as the page's `annotations.reset` stores it).
+    fn with_attachment(max: usize, n: usize) -> (Session, DocId) {
+        let (mut s, id) = session_with(2);
+        s.set_ownership(Ownership { actor: Some("u-a".into()), annot_sync: true, max_xfdf_len: max, ..Default::default() });
+        s.apply(id, rect(0, 10.0)).unwrap();
+        only(s.take_annot_changes(id));
+        let cos = &mut s.doc_mut(id).unwrap().editor.as_mut().unwrap().cos;
+        // The attachment list is a JSON string inside the JSON map: its quotes are escaped.
+        let custom = format!(r#"{{"trn-attachments":"[\"{}\"]","commentId":"c-1"}}"#, "A".repeat(n));
+        let idx = pdfcraft_annot::summaries(cos).iter().position(|a| a.page == 0).unwrap();
+        pdfcraft_annot::set_extra(cos, 0, idx, "PpmCustomData", &custom).unwrap();
+        (s, id)
+    }
+
+    /// `maxAnnotationXfdfLength`: an annotation with a 300 KB or 1.5 MB attachment goes out to the host once the limit is raised,
+    /// and is told as not saved (a problem) at the default.
+    #[test]
+    fn a_raised_xfdf_limit_lets_a_big_attachment_go_out() {
+        for n in [300_000, 1_500_000] {
+            let (mut s, id) = with_attachment(0, n);
+            s.apply(id, Edit::MoveAnnotation { page: 0, index: 0, dx: 5.0, dy: 0.0 }).unwrap();
+            assert_eq!(s.take_annot_changes(id), None, "{n}: over the default limit nothing goes out");
+            assert_eq!(s.take_annot_problems(id).len(), 1, "{n}: and the user is told");
+
+            let (mut s, id) = with_attachment(8_000_000, n);
+            s.apply(id, Edit::MoveAnnotation { page: 0, index: 0, dx: 5.0, dy: 0.0 }).unwrap();
+            let up = only(s.take_annot_changes(id));
+            assert!(up.xfdf.contains("&quot;trn-attachments&quot;") && up.xfdf.len() > n, "{n}: {}", up.xfdf.len());
+            assert!(s.take_annot_problems(id).is_empty(), "{n}");
+        }
+    }
+
     #[test]
     fn a_placed_stamp_goes_out_through_the_diff() {
         let (mut s, id) = sharing("alice");

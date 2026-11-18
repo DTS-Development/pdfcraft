@@ -42,6 +42,9 @@ pub enum AnnotEvent {
     /// The selected annotation is a sign box: its role and its place on the page as shown (`page` from 0).
     /// `from_api` is set when the program chose it (a sign box just added, `annots-select`), not the user.
     SignBoxSelected { annot_id: String, role: String, signer: Option<String>, page: usize, rect: [f64; 4], from_api: bool },
+    /// A button the host put on the selected annotation's bar was clicked: the action's `id`, the annotation, its page (from 0)
+    /// and its place on the page as shown (`[x, y, width, height]`, like `SignBoxSelected`).
+    PopupAction { id: String, annot_id: String, page: usize, rect: [f64; 4] },
 }
 
 /// Requests from the host, drained every frame once the shared document is open.
@@ -164,6 +167,10 @@ impl AnnotEvent {
                 }
                 vec![("pdfcraft:sign-box-selected", msg)]
             }
+            Self::PopupAction { id, annot_id, page, rect } => vec![(
+                "pdfcraft:annotation-popup-action",
+                json!({ "id": id, "annotId": annot_id, "page": page, "rect": { "x": rect[0], "y": rect[1], "width": rect[2], "height": rect[3] } }),
+            )],
         }
     }
 }
@@ -225,6 +232,7 @@ impl PdfCraftApp {
         self.run_annot_commands(doc, commands);
         if self.host_annots.is_some() {
             self.report_annot_selection(doc);
+            self.report_popup_click(doc);
         }
     }
 
@@ -431,6 +439,24 @@ impl PdfCraftApp {
         Some(AnnotEvent::SignBoxSelected { annot_id: annot_id.into(), role, signer, page, rect, from_api })
     }
 
+    /// A click on one of the host's buttons next to the selected annotation: the page hears which, and where the annotation is.
+    fn report_popup_click(&mut self, doc: DocId) {
+        let Some(click) = self.views.iter_mut().find(|v| v.id == doc).and_then(|v| v.host_popup_click.take()) else { return };
+        let Some(state) = self.session.get(doc) else { return };
+        let (Some(annot_id), Some(info), Some(a)) = (
+            state.annot_name_at(click.page, click.index),
+            state.info.pages.get(click.page),
+            state.info.annotations.iter().find(|a| a.page == click.page && a.index == click.index),
+        ) else {
+            return;
+        };
+        // Hundredths of a point: the rectangle is stored in f32, and the page doesn't need its noise.
+        let rect = user_rect_to_view(info, a.rect.map(f64::from)).map(|v| (v * 100.0).round() / 100.0);
+        if let Some(report) = self.host_annots.as_ref() {
+            report(&AnnotEvent::PopupAction { id: click.id, annot_id, page: click.page, rect });
+        }
+    }
+
     /// Tell the page when the canvas selection changed (once per change).
     fn report_annot_selection(&mut self, doc: DocId) {
         let selected = self.view_of(doc).and_then(|v| v.comments.selected).and_then(|(p, i)| self.annot_name(doc, p, i));
@@ -485,7 +511,7 @@ mod tests {
             assert!(!AnnotCommand::from_json(k, &serde_json::json!({})).is_err_and(|e| e.starts_with("unknown annotation message")), "{kind}");
         }
         // Same prefix, own handler (view message); and other new 0.11.0 messages never reach the sync queue.
-        for kind in ["pdfcraft:annots-visible", "pdfcraft:annotation-defaults", "pdfcraft:page-info", "pdfcraft:sign-box-add", "pdfcraft:watermark", "pdfcraft:compare"] {
+        for kind in ["pdfcraft:annots-visible", "pdfcraft:annotation-defaults", "pdfcraft:annotation-popup-actions", "pdfcraft:annotation-popup-action", "pdfcraft:page-info", "pdfcraft:sign-box-add", "pdfcraft:watermark", "pdfcraft:compare"] {
             assert!(!is_annot_sync_message(kind), "{kind}");
         }
     }
@@ -1170,6 +1196,80 @@ mod tests {
         h.run_steps(3);
         let heard = heard.borrow();
         assert!(heard.contains(&AnnotEvent::Selected(Some("big".into()))), "selected by the click in a read-only document: {heard:?}");
+    }
+
+    fn popup_actions(list: &[(&str, &str, &str)]) -> crate::StampCommand {
+        let actions = list.iter().map(|(id, label, icon)| crate::PopupAction { id: (*id).into(), label: (*label).into(), icon: (*icon).into() }).collect();
+        crate::StampCommand::AnnotationPopupActions { actions }
+    }
+
+    /// The host's buttons: shown next to the selected annotation of a read-only shared document, a click reports the
+    /// action, the annotation and its place on the page as shown; a new list replaces an open bar at once; a sign box
+    /// and an unselected annotation have no bar.
+    #[test]
+    fn the_hosts_buttons_hang_on_a_selected_annotation_and_report_their_click() {
+        use egui_kittest::kittest::Queryable;
+        let heard: std::rc::Rc<std::cell::RefCell<Vec<AnnotEvent>>> = Default::default();
+        let sink = heard.clone();
+        let mut app = PdfCraftApp::new();
+        app.ownership_inbox.lock().unwrap().push(pdfcraft_engine::Ownership { read_only: true, ..share() });
+        app.startup_inbox.lock().unwrap().push(("a.pdf".into(), pdf()));
+        app.host_annots = Some(Box::new(move |e| sink.borrow_mut().push(e.clone())));
+        let (inbox, stamps) = (app.annot_inbox.clone(), app.stamp_inbox.clone());
+        let mut h = egui_kittest::Harness::builder().build_eframe(move |_| app);
+        for _ in 0..20 {
+            h.run_steps(2);
+        }
+        let item = |name: &str, tag: &str, extra: &str| RemoteAnnot {
+            annot_id: name.into(),
+            author_id: "u-kim".into(),
+            xfdf: format!(
+                r##"<?xml version="1.0" encoding="UTF-8" ?><xfdf xmlns="http://ns.adobe.com/xfdf/" xml:space="preserve"><annots><{tag} page="0" name="{name}" rect="20,40,120,140" title="Kim" flags="print">{extra}</{tag}></annots></xfdf>"##
+            ),
+        };
+        let sign_box = r#"<trn-custom-data bytes="{&quot;ppmSignRole&quot;:&quot;reviewer&quot;}"/><contents>sign</contents><defaultappearance>0 0 0 rg /Helvetica 12 Tf</defaultappearance>"#;
+        inbox.lock().unwrap().push(AnnotCommand::Reset { seq: 0, items: vec![item("note", "square", ""), item("box", "freetext", sign_box)] });
+        stamps.lock().unwrap().push(popup_actions(&[("open-sheet", "Open comments", "message-square"), ("locate", "Locate", "compass")]));
+        h.run_steps(4);
+        assert!(h.query_by_label("Open comments").is_none(), "nothing selected: no bar");
+
+        inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: "note".into() });
+        h.run_steps(4);
+        assert!(h.query_by_label("Open comments").is_some() && h.query_by_label("Locate").is_some(), "the bar of the selected annotation");
+
+        // Another list replaces the open bar at once, without selecting again.
+        stamps.lock().unwrap().push(popup_actions(&[("go", "Go there", "navigation")]));
+        h.run_steps(3);
+        assert!(h.query_by_label("Open comments").is_none() && h.query_by_label("Go there").is_some(), "the new list shows in the open bar");
+
+        h.get_by_label("Go there").click();
+        h.run_steps(3);
+        let click = heard.borrow().iter().find_map(|e| match e {
+            AnnotEvent::PopupAction { id, annot_id, page, rect } => Some((id.clone(), annot_id.clone(), *page, *rect)),
+            _ => None,
+        });
+        let (id, annot_id, page, rect) = click.expect("the click is reported");
+        assert_eq!((id.as_str(), annot_id.as_str(), page), ("go", "note", 0));
+        // The page as shown is 200 x 300 points: the square at user y 40..140 is 160..260 from the top.
+        for (got, want) in rect.iter().zip([20.0, 160.0, 100.0, 100.0]) {
+            assert!((got - want).abs() < 0.5, "{rect:?}");
+        }
+        let json = AnnotEvent::PopupAction { id, annot_id, page, rect }.to_messages();
+        assert_eq!(json[0].0, "pdfcraft:annotation-popup-action");
+        assert_eq!(json[0].1["rect"]["width"], 100.0);
+
+        // A sign box has no bar.
+        inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: "box".into() });
+        h.run_steps(4);
+        assert!(h.query_by_label("Go there").is_none(), "no bar on a sign box");
+
+        // Taking the list away takes the bar away.
+        inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: "note".into() });
+        h.run_steps(3);
+        assert!(h.query_by_label("Go there").is_some());
+        stamps.lock().unwrap().push(crate::StampCommand::AnnotationPopupActions { actions: Vec::new() });
+        h.run_steps(3);
+        assert!(h.query_by_label("Go there").is_none());
     }
 
     /// A read-only (viewer-only) shared document shows other people's annotations as they come.

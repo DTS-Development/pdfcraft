@@ -20,9 +20,9 @@ use pdfcraft_forms::{FieldKind, FieldValue};
 
 mod position;
 mod single;
-pub use position::{AnnotEntry, ExportRequest, export_positions, list_annotations, strip_positions};
+pub use position::{AnnotEntry, ExportRequest, export_positions, export_positions_with, list_annotations, list_annotations_with, strip_positions};
 pub use single::{
-    AnnotIndex, AnnotXfdf, MAX_XFDF_LEN, PictureCache, RemoteItem, RemoteReport, apply_remote, apply_remote_cached, export_annotation,
+    AnnotIndex, AnnotXfdf, MAX_XFDF_LEN, MAX_XFDF_LEN_CEILING, PictureCache, RemoteItem, RemoteReport, apply_remote, apply_remote_cached, export_annotation,
     export_annotation_in, export_annotations, remove_by_name, remove_by_name_in,
 };
 

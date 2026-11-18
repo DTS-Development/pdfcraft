@@ -90,6 +90,10 @@ pub enum StampCommand {
     AnnotationDefaults {
         custom_data: Vec<(String, String)>,
     },
+    /// The buttons of `pdfcraft:annotation-popup-actions` for every document; empty (also a list the page can't use) takes them away.
+    AnnotationPopupActions {
+        actions: Vec<crate::host_popup::PopupAction>,
+    },
     Cancel {
         id: String,
     },
@@ -461,6 +465,9 @@ impl PdfCraftApp {
                         self.notify_error(error);
                     }
                 }
+                StampCommand::AnnotationPopupActions { actions } => {
+                    self.popup_actions = Arc::new(actions);
+                }
                 StampCommand::Cancel { id } => {
                     if self.armed_stamp.as_ref().is_some_and(|a| a.id == id) {
                         self.disarm_stamp();
@@ -470,6 +477,12 @@ impl PdfCraftApp {
         }
         self.sync_watermark();
         self.sync_comments_visibility();
+        // Every view draws the host's buttons from the same list, so a new list shows in an open bar at once.
+        for view in &mut self.views {
+            if !Arc::ptr_eq(&view.host_popup, &self.popup_actions) {
+                view.host_popup = self.popup_actions.clone();
+            }
+        }
         let Some(armed) = self.armed_stamp.as_ref() else { return };
         // The click's edit may not have been applied yet: its outcome decides, not the tool.
         let placing = self.views.iter().any(|v| matches!(v.pending_edit, Some(pdfcraft_engine::Edit::AddCustomStamp { extra: Some(_), .. })));

@@ -204,6 +204,10 @@ fn record_link_scan() {
 use pdfcraft_cos::{SaveOptions, write_full, write_incremental};
 use pdfcraft_render::{DocInfo, Layer, LayerOp, OpenError, ReadingColors, RenderConfig, RenderPool, ScreenWatermark, inspect};
 
+/// The range a host may set `maxAnnotationXfdfLength` to (UTF-16 units of one annotation's XFDF).
+pub const XFDF_LEN_MIN: usize = pdfcraft_xfdf::MAX_XFDF_LEN;
+pub const XFDF_LEN_MAX: usize = pdfcraft_xfdf::MAX_XFDF_LEN_CEILING;
+
 /// Who is editing, as the embedding page says (`pdfcraft:open` `actor` and `readOnly`).
 /// The default is no checking: anyone edits anything, as in a stand-alone PdfCraft.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -227,6 +231,10 @@ pub struct Ownership {
     /// `pdfcraft:open` `replace`: this file takes the place of every document open (they close
     /// without asking) and is shown. Read when the file arrives; it is no rule of the document.
     pub replace: bool,
+    /// `pdfcraft:open` `maxAnnotationXfdfLength`: the most UTF-16 units one annotation's XFDF may have
+    /// when it goes out to the host (`annots-changed`) or is checked for export. 0 is the default
+    /// (`pdfcraft_xfdf::MAX_XFDF_LEN`); the host's value is held to `MAX_XFDF_LEN..=MAX_XFDF_LEN_CEILING`.
+    pub max_xfdf_len: usize,
 }
 
 /// How far the embedding page lets editing go (`pdfcraft:open` `mode`).

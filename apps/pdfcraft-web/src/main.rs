@@ -203,6 +203,8 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   `pdfcraft:failed` instead of opening without the checks. `mode` (`"viewer"` or `"builder"`)
 ///   is how much editing a host-lock build allows: `"builder"` everything it doesn't lock for
 ///   every host, anything else, or nothing, only comments. A build without the lock ignores it.
+///   `maxAnnotationXfdfLength` (a whole number from 200000 to 8000000, UTF-16 units of one annotation's XFDF as it goes out
+///   to the page, counted after `&quot;` escaping) raises the size an annotation may have to be saved; out of range refuses the open.
 ///   `annotSync` (a boolean, needs `actor`) turns on sharing the annotations through the page: edits
 ///   to annotations no longer make the file dirty, and the user's changes go out as
 ///   `pdfcraft:annots-changed` instead of `pdfcraft:save`. `commentsPanel: false` hides this
@@ -300,6 +302,14 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   user creates from now on (`/PpmCustomData`, so it is saved and goes out as `<trn-custom-data>` in `annots-changed`),
 ///   until the next message; `null` or `{}` stops. Not on sign boxes, signatures, copied pages' comments, or what the
 ///   server applies. A value the comment already has is kept. Needs a user (`actor`), like marking comments as theirs.
+/// - `pdfcraft:annotation-popup-actions` (from the parent): `{ actions }`, a list of `{ id, label, icon }` (at most 8; `id` 1 to
+///   64 characters of letters, digits and `-_.:`, no two alike; `label` 1 to 20 characters, the button's tooltip and name; `icon`
+///   the name of one of the embedded icons), puts one icon button each on a bar that floats next to the selected annotation of a
+///   document shared with the page (`annotSync`), for every document, also those opened later, until it is sent again. `null`,
+///   missing or `[]` takes the bar away; a list that can't be used does too and is logged. Sign boxes and replies have no bar;
+///   signatures do. It is there in viewer and `readOnly` documents too. A new list shows in an open bar at once. A click goes
+///   to the parent as `pdfcraft:annotation-popup-action` `{ id, annotId, page, rect }` (`page` from 0, `rect` `{ x, y, width,
+///   height }` in points on the page as shown, top-left origin, like `sign-box-selected`).
 /// - `pdfcraft:stamp-armed` `{ id }`, `pdfcraft:stamp-placed` `{ id, page }`,
 ///   `pdfcraft:stamp-cancelled` `{ id }` and `pdfcraft:stamp-failed` `{ id, error }` (to the
 ///   parent) report how a stamp request went.
@@ -564,6 +574,26 @@ mod host {
                         };
                         if let Ok(mut q) = stamps.lock() {
                             q.push(pdfcraft_ui_egui::StampCommand::AnnotationDefaults { custom_data: pairs });
+                        }
+                        ctx.request_repaint();
+                        return;
+                    }
+                    Some("pdfcraft:annotation-popup-actions") => {
+                        // `actions` is a list of `{ id, label, icon }` (at most 8) or null/missing/[] to take them away. A list that can't be used
+                        // takes them away too (never a stale one) and says why in the console.
+                        let value = js_sys::Reflect::get(&data, &JsValue::from_str("actions")).unwrap_or(JsValue::UNDEFINED);
+                        let json = if value.is_undefined() || value.is_null() { None } else { js_sys::JSON::stringify(&value).ok().and_then(|s| s.as_string()) };
+                        let parsed = match json.as_deref().map(serde_json::from_str::<serde_json::Value>) {
+                            None => pdfcraft_ui_egui::parse_popup_actions(None),
+                            Some(Ok(v)) => pdfcraft_ui_egui::parse_popup_actions(Some(&v)),
+                            Some(Err(e)) => Err(e.to_string()),
+                        };
+                        let actions = parsed.unwrap_or_else(|error| {
+                            eframe::web_sys::console::warn_1(&format!("PdfCraft: pdfcraft:annotation-popup-actions refused: {error}").into());
+                            Vec::new()
+                        });
+                        if let Ok(mut q) = stamps.lock() {
+                            q.push(pdfcraft_ui_egui::StampCommand::AnnotationPopupActions { actions });
                         }
                         ctx.request_repaint();
                         return;
@@ -1062,7 +1092,16 @@ mod host {
         } else {
             !get_panel.as_bool().ok_or_else(|| "commentsPanel must be a boolean".to_string())?
         };
-        let own = pdfcraft_ui_egui::Ownership { actor, read_only, scope, annot_sync, hide_comments_panel, replace, ..Default::default() };
+        // `maxAnnotationXfdfLength`: a whole number of UTF-16 units from the default up to the ceiling; anything else refuses the open.
+        let max = get("maxAnnotationXfdfLength");
+        let max_xfdf_len = if max.is_undefined() || max.is_null() {
+            0
+        } else {
+            let (lo, hi) = (pdfcraft_ui_egui::XFDF_LEN_MIN, pdfcraft_ui_egui::XFDF_LEN_MAX);
+            let n = max.as_f64().filter(|n| n.fract() == 0.0 && *n >= lo as f64 && *n <= hi as f64);
+            n.ok_or_else(|| format!("maxAnnotationXfdfLength must be a whole number from {lo} to {hi}"))? as usize
+        };
+        let own = pdfcraft_ui_egui::Ownership { actor, read_only, scope, annot_sync, hide_comments_panel, replace, max_xfdf_len, ..Default::default() };
         Ok(pdfcraft_ui_egui::with_policy(own, policy_overrides(data)))
     }
 

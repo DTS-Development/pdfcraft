@@ -58,6 +58,7 @@ mod host_annots;
 mod host_bytes;
 mod host_compare;
 mod host_lock;
+mod host_popup;
 mod host_stamp;
 mod host_view;
 mod js_ui;
@@ -71,11 +72,12 @@ mod stamps_ui;
 pub use host_annots::{is_annot_sync_message, AnnotCommand, AnnotEvent, AnnotInbox, HostAnnotFn};
 pub use host_bytes::{BytesInbox, BytesPurpose, BytesReply, BytesRequest, HostBytesFn};
 pub use host_compare::{CompareCommand, CompareEvent, CompareInbox, HostCompareFn, MAX_COMPARE_BYTES, overlay_style_from_json};
+pub use host_popup::{PopupAction, parse_actions as parse_popup_actions};
 pub use host_lock::{HOST_LOCK, commands_manifest, open_scope, parse_mode, policy_overrides, with_policy};
 pub use host_stamp::{HostStampFn, MAX_PNG_BYTES, SIGN_BOX_SIZE, StampCommand, StampEvent, StampInbox};
 pub use host_view::{HostViewFn, MAX_HIGHLIGHT_RECTS, PageSize, ViewCommand, ViewEvent, ViewInbox};
 pub use pdfcraft_engine::{AnnotChanges, RejectedAnnot, RemoteAnnot};
-pub use pdfcraft_engine::{EditClass, EditClasses, EditScope, Ownership};
+pub use pdfcraft_engine::{EditClass, EditClasses, EditScope, Ownership, XFDF_LEN_MAX, XFDF_LEN_MIN};
 pub use watermark::WatermarkStyle;
 mod standards_ui;
 mod watermark;
@@ -679,6 +681,8 @@ pub struct PdfCraftApp {
     /// What the host set with `pdfcraft:annots-visible`: (hidden, keep signatures, how many times it was set). Each
     /// document is brought to it once per setting (`comments_applied`), so the menu's own toggle still works after.
     pub(crate) comments_host: Option<(bool, bool, u64)>,
+    /// The host's buttons for the bar of a selected annotation (`annotation-popup-actions`), for every document; empty is none.
+    pub(crate) popup_actions: std::sync::Arc<Vec<host_popup::PopupAction>>,
     pub(crate) comments_applied: std::collections::HashMap<pdfcraft_engine::DocId, u64>,
     /// The embedding page's annotation messages, and where to report changes (web, see [`AnnotCommand`]).
     pub annot_inbox: AnnotInbox,
@@ -1081,6 +1085,7 @@ impl PdfCraftApp {
             opened_wait: None,
             page_sent: None,
             comments_host: None,
+            popup_actions: std::sync::Arc::new(Vec::new()),
             comments_applied: Default::default(),
             annot_inbox: Default::default(),
             host_annots: None,

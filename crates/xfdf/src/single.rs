@@ -35,6 +35,9 @@ use super::*;
 
 /// The most characters (UTF-16 code units, as the server counts them) one item's XFDF may have.
 pub const MAX_XFDF_LEN: usize = 200_000;
+
+/// The most a host may raise the limit to (`maxAnnotationXfdfLength`); the host's own item cap (8 MiB) is the real bound.
+pub const MAX_XFDF_LEN_CEILING: usize = 8_000_000;
 /// Longest annotation id the server accepts.
 const MAX_ID_LEN: usize = 200;
 /// Longest picture a remote item may carry, decoded.
@@ -109,6 +112,8 @@ pub struct AnnotIndex {
     by_name: HashMap<String, Vec<(usize, ObjRef)>>,
     /// The name of every annotation that has one, for `inreplyto`.
     names: HashMap<ObjRef, String>,
+    /// The most UTF-16 units an exported annotation may have ([`MAX_XFDF_LEN`] unless the host raised it).
+    max_len: usize,
 }
 
 impl AnnotIndex {
@@ -126,7 +131,13 @@ impl AnnotIndex {
                 }
             }
         }
-        Self { pages: pages.iter().map(|p| p.obj).collect(), by_name, names }
+        Self { pages: pages.iter().map(|p| p.obj).collect(), by_name, names, max_len: MAX_XFDF_LEN }
+    }
+
+    /// The same index exporting up to `max_len` units (clamped to [`MAX_XFDF_LEN`]..=[`MAX_XFDF_LEN_CEILING`]).
+    pub fn with_max_len(mut self, max_len: usize) -> Self {
+        self.max_len = max_len.clamp(MAX_XFDF_LEN, MAX_XFDF_LEN_CEILING);
+        self
     }
 
     fn add(&mut self, nm: &str, page: usize, obj: ObjRef) {
@@ -182,12 +193,12 @@ pub fn export_annotation_in(doc: &Document, idx: &AnnotIndex, nm: &str) -> Resul
     }
     let Some(spot) = locate(doc, idx, nm).into_iter().next() else { return Err(DataError::NotFound(nm.into())) };
     let d = doc.get(spot.obj).as_dict().cloned().unwrap_or_default();
-    element_xfdf(doc, &d, spot.page, &idx.names, nm)
+    element_xfdf(doc, &d, spot.page, &idx.names, nm, idx.max_len)
 }
 
 /// The XFDF document of the annotation dictionary `d` on zero-based `page`, with `names` giving the
 /// id of each annotation (for `inreplyto`) and `nm` this one's.
-pub(crate) fn element_xfdf(doc: &Document, d: &Dict, page: usize, names: &HashMap<ObjRef, String>, nm: &str) -> Result<AnnotXfdf, DataError> {
+pub(crate) fn element_xfdf(doc: &Document, d: &Dict, page: usize, names: &HashMap<ObjRef, String>, nm: &str, max_len: usize) -> Result<AnnotXfdf, DataError> {
     if utf16_len(nm) > MAX_ID_LEN {
         return Err(DataError::Invalid("the annotation name is too long".into()));
     }
@@ -198,9 +209,9 @@ pub(crate) fn element_xfdf(doc: &Document, d: &Dict, page: usize, names: &HashMa
     }
     // A kept picture's size is known before it is encoded: don't encode what can't be sent.
     if let Some(len) = kept_picture_len(doc, d)
-        && len.div_ceil(3) * 4 > MAX_XFDF_LEN
+        && len.div_ceil(3) * 4 > max_len
     {
-        return Err(DataError::TooLarge { len: len.div_ceil(3) * 4, max: MAX_XFDF_LEN });
+        return Err(DataError::TooLarge { len: len.div_ceil(3) * 4, max: max_len });
     }
     let mut element = String::new();
     let Some(tag) = annot_element(doc, d, page, names, true, &mut element) else {
@@ -208,8 +219,8 @@ pub(crate) fn element_xfdf(doc: &Document, d: &Dict, page: usize, names: &HashMa
     };
     let xfdf = format!("{PREFIX}{}{SUFFIX}", element.trim_end());
     let len = utf16_len(&xfdf);
-    if len > MAX_XFDF_LEN {
-        return Err(DataError::TooLarge { len, max: MAX_XFDF_LEN });
+    if len > max_len {
+        return Err(DataError::TooLarge { len, max: max_len });
     }
     let kind = text_of(doc, d, b"Subj").filter(|s| !s.trim().is_empty()).unwrap_or_else(|| tag.to_string());
     // The server counts UTF-16 units, not characters.
