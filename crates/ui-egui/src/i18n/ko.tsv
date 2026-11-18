@@ -1598,7 +1598,7 @@ theme	Appearance	화면 모양
 	Read	읽기
 	E-Sign	전자 서명
 	Tools	도구
-	Inspector	검사기
+	Inspector	세부 정보
 	 on page {label}	 ({label} 페이지)
 	A font isn't embedded	글꼴이 포함되어 있지 않습니다
 	A {} action isn't allowed	{} 동작은 허용되지 않습니다
@@ -2690,20 +2690,29 @@ key	Space	Space
 	this change isn't available here: only comments can be made in this view	이 화면에서는 할 수 없는 변경입니다. 주석만 만들 수 있습니다
 	a reply can't be replied to	답글에는 답글을 달 수 없습니다
 # Compare screen of the PPM build: wording follows the web viewer's compare screen (decided by the product owner).
-compare viewer	Change list	변경 목록
+compare viewer	Change list	차이 목록
 compare viewer	{n} differences	차이 {n}개
 compare viewer	Page {n}	페이지 {n}
 compare viewer	Delete	삭제
-compare viewer	Insert	끼워 넣다
-compare viewer	Edit	편집하다
-compare viewer	Change	변화
-compare viewer	Old	오래된
-compare viewer	New	새로운
+compare viewer	Insert	추가
+compare viewer	Edit	바뀜
+compare viewer	Old	기준
+compare viewer	New	비교
 compare viewer	Overlay	겹쳐 보기
 compare viewer	Lines only in the current file	기준에만 있는 선
 compare viewer	Lines only in the chosen file	비교에만 있는 선
 compare viewer	Same place	같은 곳
+compare viewer	Previous + overlay	비교 + 겹침
+compare viewer	Words only in the current file or changed	기준에만 있거나 바뀐 글자
+compare viewer	Words only in the chosen file or changed	비교 문서에만 있거나 바뀐 글자
 compare viewer	Red: words only in the current file or changed / Green: words only in the chosen file or changed	빨강: 기준에만 있거나 바뀐 글자 / 초록: 비교 문서에만 있거나 바뀐 글자
 compare viewer	Only words are shown. For pictures and drawings, use Overlay.	글자 차이만 표시합니다. 그림·도면 차이는 겹쳐 보기에서 보세요.
 compare viewer	Only the first {n} pages were compared (current {a}, chosen {b}).	앞 {n}쪽만 비교했습니다(기준 {a}쪽, 비교 {b}쪽).
+compare viewer	the current file	기준
+compare viewer	the chosen file	비교
+compare viewer	Lines only in {name}	{name}에만 있는 선
+compare viewer	Words only in {name} or changed	{name}에만 있거나 바뀐 글자
+compare viewer	Red: words only in {a} or changed / Green: words only in {b} or changed	빨강: {a}에만 있거나 바뀐 글자 / 초록: {b}에만 있거나 바뀐 글자
+compare viewer	Only the first {n} pages were compared ({an} {a}, {bn} {b}).	앞 {n}쪽만 비교했습니다({an} {a}쪽, {bn} {b}쪽).
+compare viewer	{name} + overlay	{name} + 겹침
 compare viewer	Couldn't build the overlay.	비교하지 못했습니다.

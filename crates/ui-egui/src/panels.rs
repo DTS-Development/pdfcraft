@@ -581,7 +581,9 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                     RightPanel::Compare => ("Compare", compare.as_ref().filter(|c| c.new == id).map(|c| c.result.changes.len())),
                 };
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(tl!(title)).font(theme::semibold(15.5)));
+                    // The hosted (PPM) compare panel is titled as the viewer's: its list of differences.
+                    let title = if panel == RightPanel::Compare && hosted { tl_ctx!(crate::compare_ui::ppm::CTX, "Change list") } else { tl!(title) };
+                    ui.label(egui::RichText::new(title).font(theme::semibold(15.5)));
                     if let Some(c) = count {
                         ui.label(egui::RichText::new(c.to_string()).font(theme::medium(13.0)).color(t.text_faint));
                     }

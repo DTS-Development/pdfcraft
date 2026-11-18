@@ -23,7 +23,7 @@ mod single;
 pub use position::{AnnotEntry, ExportRequest, export_positions, export_positions_with, export_positions_within, list_annotations, list_annotations_with, strip_positions};
 pub use single::{
     AnnotIndex, AnnotXfdf, MAX_XFDF_LEN, MAX_XFDF_LEN_CEILING, PictureCache, RemoteItem, RemoteReport, apply_remote, apply_remote_cached, export_annotation,
-    export_annotation_in, export_annotations, remove_by_name, remove_by_name_in,
+    annotation_subject, export_annotation_in, export_annotations, remove_by_name, remove_by_name_in,
 };
 
 #[cfg(test)]

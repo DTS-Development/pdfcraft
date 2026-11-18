@@ -2702,14 +2702,23 @@ compare viewer	Page {n}	Trang {n}
 compare viewer	Delete	Xóa
 compare viewer	Insert	Chèn
 compare viewer	Edit	Sửa
-compare viewer	Change	Thay đổi
 compare viewer	Old	Cũ
 compare viewer	New	Mới
 compare viewer	Overlay	Chồng lớp
 compare viewer	Lines only in the current file	Nét chỉ có trong tệp hiện tại
 compare viewer	Lines only in the chosen file	Nét chỉ có trong tệp đã chọn
 compare viewer	Same place	Cùng vị trí
+compare viewer	Previous + overlay	Bản trước + chồng lớp
+compare viewer	Words only in the current file or changed	Từ chỉ có trong tệp hiện tại hoặc đã đổi
+compare viewer	Words only in the chosen file or changed	Từ chỉ có trong tệp đã chọn hoặc đã đổi
 compare viewer	Red: words only in the current file or changed / Green: words only in the chosen file or changed	Đỏ: từ chỉ có trong tệp hiện tại hoặc đã thay đổi / Xanh lục: từ chỉ có trong tệp đã chọn hoặc đã thay đổi
 compare viewer	Only words are shown. For pictures and drawings, use Overlay.	Chỉ hiển thị chữ. Với hình ảnh và bản vẽ, hãy dùng chồng lớp.
 compare viewer	Only the first {n} pages were compared (current {a}, chosen {b}).	Chỉ so sánh {n} trang đầu (hiện tại {a}, đã chọn {b}).
+compare viewer	the current file	tệp hiện tại
+compare viewer	the chosen file	tệp đã chọn
+compare viewer	Lines only in {name}	Nét chỉ có trong {name}
+compare viewer	Words only in {name} or changed	Từ chỉ có trong {name} hoặc đã đổi
+compare viewer	Red: words only in {a} or changed / Green: words only in {b} or changed	Đỏ: từ chỉ có trong {a} hoặc đã đổi / Xanh lục: từ chỉ có trong {b} hoặc đã đổi
+compare viewer	Only the first {n} pages were compared ({an} {a}, {bn} {b}).	Chỉ so sánh {n} trang đầu ({an} {a}, {bn} {b}).
+compare viewer	{name} + overlay	{name} + chồng lớp
 compare viewer	Couldn't build the overlay.	Không thể tạo bản chồng lớp.

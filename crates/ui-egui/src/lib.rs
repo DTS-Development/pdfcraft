@@ -71,7 +71,10 @@ mod sign_ui;
 mod stamps_ui;
 pub use host_annots::{is_annot_sync_message, AnnotCommand, AnnotEvent, AnnotInbox, HostAnnotFn};
 pub use host_bytes::{BytesInbox, BytesPurpose, BytesReply, BytesRequest, HostBytesFn};
-pub use host_compare::{CompareCommand, CompareEvent, CompareInbox, HostCompareFn, MAX_COMPARE_BYTES, overlay_style_from_json};
+pub use compare_ui::{CompareNames, CompareView};
+pub use host_compare::{
+    ChangeItem, ChangeList, ChangeSide, CompareCommand, CompareEvent, CompareInbox, CompareOp, HostCompareFn, MAX_COMPARE_BYTES, SideColors, names_from_json, overlay_style_from_json, side_colors_from_json,
+};
 pub use host_popup::{PopupAction, parse_actions as parse_popup_actions};
 pub use host_lock::{HOST_LOCK, commands_manifest, open_scope, parse_mode, policy_overrides, with_policy};
 pub use host_stamp::{HostStampFn, MAX_PNG_BYTES, SIGN_BOX_SIZE, StampCommand, StampEvent, StampInbox};
@@ -704,8 +707,8 @@ pub struct PdfCraftApp {
     pub host_compare: Option<HostCompareFn>,
     /// A compare request was taken; one frame compares once.
     compare_taken: bool,
-    /// PPM: the host's compare id and the (overlay shown, overlay building) last told to it.
-    compare_view_sent: Option<(String, (bool, bool))>,
+    /// PPM: the host's compare id and the (view, overlay building) last told to it.
+    compare_view_sent: Option<(String, (compare_ui::CompareView, bool))>,
     /// The stamp waiting for its one click (never stored in the settings).
     pub(crate) armed_stamp: Option<host_stamp::ArmedStamp>,
     /// The host's watermark text, drawn on each page's picture under its annotations, on the
@@ -2440,6 +2443,10 @@ impl PdfCraftApp {
             self.right_before_read = None;
         }
         if panel == Some(RightPanel::Comments) && self.comments_panel_hidden() {
+            return;
+        }
+        // The host kept the list of differences away (`changeList: false`).
+        if panel == Some(RightPanel::Compare) && self.compare.as_ref().is_some_and(|c| !c.change_list) {
             return;
         }
         if panel == Some(RightPanel::Comments) {

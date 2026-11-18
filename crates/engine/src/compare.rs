@@ -128,17 +128,19 @@ pub const OVERLAY_CHOSEN: [u8; 3] = [0, 90, 255];
 pub const OVERLAY_SAME: [u8; 3] = [140, 140, 140];
 
 /// How an overlay is inked: the current file's colour, the chosen file's colour, and how strong
-/// every mark is (1 as dark as the ink was, 0 invisible). Both-files ink stays [`OVERLAY_SAME`].
+/// each file's marks are (1 as dark as the ink was, 0 invisible). Ink in both files stays
+/// [`OVERLAY_SAME`] and is as strong as the stronger of the two.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OverlayStyle {
     pub current: [u8; 3],
     pub chosen: [u8; 3],
-    pub strength: f32,
+    pub strength_current: f32,
+    pub strength_chosen: f32,
 }
 
 impl Default for OverlayStyle {
     fn default() -> Self {
-        Self { current: OVERLAY_CURRENT, chosen: OVERLAY_CHOSEN, strength: 1.0 }
+        Self { current: OVERLAY_CURRENT, chosen: OVERLAY_CHOSEN, strength_current: 1.0, strength_chosen: 1.0 }
     }
 }
 
@@ -170,7 +172,7 @@ pub fn overlay_page_styled_into(
     height: u32,
     style: &OverlayStyle,
 ) {
-    let strength = style.strength.clamp(0.0, 1.0);
+    let (sc, sh) = (style.strength_current.clamp(0.0, 1.0), style.strength_chosen.clamp(0.0, 1.0));
     out.clear();
     out.resize(width as usize * height as usize * 4, 255);
     fn row<'a>(img: (&'a [u8], u32, u32), y: u32) -> &'a [u8] {
@@ -190,11 +192,10 @@ pub fn overlay_page_styled_into(
                 continue;
             }
             let (rgb, k) = match (a > 0.0, b > 0.0) {
-                (true, true) => (OVERLAY_SAME, a.max(b)),
-                (true, false) => (style.current, a),
-                _ => (style.chosen, b),
+                (true, true) => (OVERLAY_SAME, a.max(b) * sc.max(sh)),
+                (true, false) => (style.current, a * sc),
+                _ => (style.chosen, b * sh),
             };
-            let k = k * strength;
             for (c, v) in rgb.iter().enumerate() {
                 line[x * 4 + c] = (255.0 - (255.0 - f32::from(*v)) * k).round() as u8;
             }
@@ -474,7 +475,7 @@ mod overlay_tests {
     #[test]
     fn the_host_picks_the_colours_and_a_strength_that_fades_the_ink() {
         let (cur, chosen) = (strip(&[0, 1]), strip(&[1, 2]));
-        let style = OverlayStyle { current: [0, 200, 0], chosen: [200, 0, 200], strength: 1.0 };
+        let style = OverlayStyle { current: [0, 200, 0], chosen: [200, 0, 200], strength_current: 1.0, strength_chosen: 1.0 };
         let mut out = Vec::new();
         overlay_page_styled_into(&mut out, (&cur, 4, 1), (&chosen, 4, 1), 4, 1, &style);
         assert_eq!((px(&out, 0), px(&out, 1), px(&out, 2)), ([0, 200, 0], OVERLAY_SAME, [200, 0, 200]));
@@ -484,10 +485,25 @@ mod overlay_tests {
             out.clone()
         });
         // Half strength: halfway between paper and the colour; none: paper.
-        overlay_page_styled_into(&mut out, (&cur, 4, 1), (&chosen, 4, 1), 4, 1, &OverlayStyle { strength: 0.5, ..style });
+        overlay_page_styled_into(&mut out, (&cur, 4, 1), (&chosen, 4, 1), 4, 1, &OverlayStyle { strength_current: 0.5, strength_chosen: 0.5, ..style });
         assert_eq!(px(&out, 0), [128, 228, 128]);
-        overlay_page_styled_into(&mut out, (&cur, 4, 1), (&chosen, 4, 1), 4, 1, &OverlayStyle { strength: 0.0, ..style });
+        overlay_page_styled_into(&mut out, (&cur, 4, 1), (&chosen, 4, 1), 4, 1, &OverlayStyle { strength_current: 0.0, strength_chosen: 0.0, ..style });
         assert!((0..4).all(|i| px(&out, i) == [255, 255, 255]));
+    }
+
+    #[test]
+    fn each_files_ink_has_its_own_strength_and_the_same_place_takes_the_stronger() {
+        let (cur, chosen) = (strip(&[0, 1]), strip(&[1, 2]));
+        let base = OverlayStyle { current: [0, 200, 0], chosen: [200, 0, 200], strength_current: 1.0, strength_chosen: 1.0 };
+        let mut out = Vec::new();
+        // The current file's ink hidden, the chosen file's at 0.5: the same place shows as the stronger (0.5).
+        overlay_page_styled_into(&mut out, (&cur, 4, 1), (&chosen, 4, 1), 4, 1, &OverlayStyle { strength_current: 0.0, strength_chosen: 0.5, ..base });
+        assert_eq!(px(&out, 0), [255, 255, 255], "ink only in the current file is hidden");
+        assert_eq!(px(&out, 1), [198, 198, 198], "the same place follows the stronger");
+        assert_eq!(px(&out, 2), [228, 128, 228]);
+        // Equal strengths behave as one strength did.
+        overlay_page_styled_into(&mut out, (&cur, 4, 1), (&chosen, 4, 1), 4, 1, &OverlayStyle { strength_current: 0.5, strength_chosen: 0.5, ..base });
+        assert_eq!(px(&out, 0), [128, 228, 128]);
     }
 
     #[test]
