@@ -313,15 +313,22 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 /// - `pdfcraft:stamp-armed` `{ id }`, `pdfcraft:stamp-placed` `{ id, page }`,
 ///   `pdfcraft:stamp-cancelled` `{ id }` and `pdfcraft:stamp-failed` `{ id, error }` (to the
 ///   parent) report how a stamp request went.
-/// - `pdfcraft:compare` (from the parent): `{ id, old: { name, bytes }, new: { name, bytes }, mode?, policy?, overlay?, view?, lockView? }`
+/// - `pdfcraft:compare` (from the parent): `{ id, old: { name, bytes }, new: { name, bytes }, mode?, policy?, overlay?, side?, view?, lockView? }`
 ///   opens the old file in a background tab and the new file as the active one, then runs the
-///   Compare Files comparison. `overlay` is `{ colorA?, colorB?, opacity? }`: the ink of the old and the new
-///   file in the overlay (`#rgb`/`#rrggbb`) and how strong it is (0 to 1); a value that can't be read fails the compare.
-///   `view` (`"side"` default, or `"overlay"`) is the view the comparison opens on (an overlay reports `compare-view` with `building`
-///   as usual); `lockView: true` takes the switch between the two away from the user (an overlay that fails to build goes back to side by side). A window compares once; `pdfcraft:compare-done`
+///   Compare Files comparison. `overlay` is `{ colorA?, colorB?, opacity?, opacityA?, opacityB? }`: the ink of the old and the new
+///   file in the overlay (`#rgb`/`#rrggbb`) and how strong it is (0 to 1; `opacityA` / `opacityB` for one file win over `opacity`; ink in
+///   both files is as strong as the stronger one); a value that can't be read fails the compare. `side` is `{ colorA?, colorB? }`: the
+///   shading of the old and the new file's words in the side-by-side view (`#rgb`/`#rrggbb`; the viewer's colours when missing).
+///   `view` (`"side"` default, `"overlay"`, or `"overlay-side"`, the old file beside the overlay) is the view the comparison opens on (an overlay reports `compare-view` with `building`
+///   as usual, its `view` being one of the three); `lockView: true` takes the switch among them away from the user (an overlay that fails to build goes back to side by side). A window compares once; `pdfcraft:compare-done`
 ///   `{ id, replaced, inserted, deleted, visual }` or `pdfcraft:compare-failed` `{ id, error }`
 ///   (to the parent) report the outcome. In this mode the Compare panel has no Mark as
 ///   comments or Report.
+/// - `pdfcraft:compare-preview` (from the parent): `{ id, old: { name, bytes }, new: { name, bytes }, mode?, policy? }` opens the two files side by
+///   side (the new one on the left, scrolled and zoomed together) without comparing: no shading, no change list, no view switch. It counts as the
+///   window's one comparison. Answered with `pdfcraft:compare-preview-done` `{ id }` or `pdfcraft:compare-preview-failed` `{ id, error }`.
+/// - `pdfcraft:compare-run` (from the parent): `{ id, overlay?, side?, view?, lockView? }` compares the two files a preview opened, as `pdfcraft:compare`
+///   does (same options, same answers: `compare-done`, `compare-failed`, `compare-view`). Without an open preview, or a second time, it fails with `compare-failed`.
 /// - `pdfcraft:goto` (from the parent): `{ id, page, rect? }` scrolls to the page (from 0, as in `stamp-place`), or to
 ///   `rect` `{ x, y, width, height }` on it (points on the page as shown, top-left origin; its centre goes to the middle
 ///   of the window at the zoom as it is). Answered with `pdfcraft:goto-done` `{ id }` or `pdfcraft:goto-failed`
@@ -460,16 +467,25 @@ mod host {
                         }
                         return;
                     }
-                    Some("pdfcraft:compare") => {
+                    Some(kind @ ("pdfcraft:compare" | "pdfcraft:compare-preview" | "pdfcraft:compare-run")) => {
+                        use pdfcraft_ui_egui::{CompareEvent, CompareOp};
+                        let op = match kind {
+                            "pdfcraft:compare-preview" => CompareOp::Preview,
+                            "pdfcraft:compare-run" => CompareOp::Run,
+                            _ => CompareOp::Compare,
+                        };
                         let id = string(&data, "id").unwrap_or_default();
-                        match compare_request(&data) {
+                        match compare_request(&data, op) {
                             Ok(command) => {
                                 if let Ok(mut q) = compares.lock() {
                                     q.push(command);
                                 }
                                 ctx.request_repaint();
                             }
-                            Err(error) => bridge.post_compare(&pdfcraft_ui_egui::CompareEvent::Failed { id: id.chars().take(128).collect(), error }),
+                            Err(error) => {
+                                let id = id.chars().take(128).collect();
+                                bridge.post_compare(&if op == CompareOp::Preview { CompareEvent::PreviewFailed { id, error } } else { CompareEvent::Failed { id, error } })
+                            }
                         }
                         return;
                     }
@@ -674,10 +690,22 @@ mod host {
                 E::Failed { id, error } => {
                     vec![("type", "pdfcraft:compare-failed".into()), ("id", id.as_str().into()), ("error", error.as_str().into())]
                 }
-                E::View { id, overlay, building } => vec![
+                E::PreviewDone { id } => vec![("type", "pdfcraft:compare-preview-done".into()), ("id", id.as_str().into())],
+                E::PreviewFailed { id, error } => {
+                    vec![("type", "pdfcraft:compare-preview-failed".into()), ("id", id.as_str().into()), ("error", error.as_str().into())]
+                }
+                E::View { id, view, building } => vec![
                     ("type", "pdfcraft:compare-view".into()),
                     ("id", id.as_str().into()),
-                    ("view", if *overlay { "overlay" } else { "side" }.into()),
+                    (
+                        "view",
+                        match view {
+                            pdfcraft_ui_egui::CompareView::Side => "side",
+                            pdfcraft_ui_egui::CompareView::Overlay => "overlay",
+                            pdfcraft_ui_egui::CompareView::OverlaySide => "overlay-side",
+                        }
+                        .into(),
+                    ),
                     ("building", JsValue::from_bool(*building)),
                 ],
             };
@@ -895,40 +923,59 @@ mod host {
         Ok((name.chars().take(200).collect(), array.to_vec()))
     }
 
-    /// Read a `pdfcraft:compare` message; the error is what the parent is told.
-    fn compare_request(data: &JsValue) -> Result<pdfcraft_ui_egui::CompareCommand, String> {
+    /// Read a `pdfcraft:compare`, `-preview` or `-run` message; the error is what the parent is told. A preview has no looks
+    /// to read (nothing is compared yet) and a run has no files (the preview opened them).
+    fn compare_request(data: &JsValue, op: pdfcraft_ui_egui::CompareOp) -> Result<pdfcraft_ui_egui::CompareCommand, String> {
+        use pdfcraft_ui_egui::CompareOp;
         let id = string(data, "id").ok_or_else(|| "id must be a string".to_string())?;
         // The same rules as an open: `mode` and `policy`, and the narrowest without them.
         let scope = pdfcraft_ui_egui::open_scope(string(data, "mode").as_deref());
         let ownership = pdfcraft_ui_egui::with_policy(pdfcraft_ui_egui::Ownership { scope, ..Default::default() }, policy_overrides(data));
+        let json_of = |key: &str| -> Result<Option<serde_json::Value>, String> {
+            let v = js_sys::Reflect::get(data, &JsValue::from_str(key)).unwrap_or(JsValue::UNDEFINED);
+            if op == CompareOp::Preview || v.is_undefined() || v.is_null() {
+                return Ok(None);
+            }
+            let json = js_sys::JSON::stringify(&v).ok().and_then(|s| s.as_string()).ok_or_else(|| format!("{key} is not plain data"))?;
+            serde_json::from_str::<serde_json::Value>(&json).map(Some).map_err(|e| e.to_string())
+        };
         let overlay = js_sys::Reflect::get(data, &JsValue::from_str("overlay")).unwrap_or(JsValue::UNDEFINED);
-        let overlay = if overlay.is_undefined() || overlay.is_null() {
+        let overlay = if op == CompareOp::Preview || overlay.is_undefined() || overlay.is_null() {
             None
         } else {
             let json = js_sys::JSON::stringify(&overlay).ok().and_then(|s| s.as_string()).ok_or_else(|| "overlay is not plain data".to_string())?;
             let value = serde_json::from_str::<serde_json::Value>(&json).map_err(|e| e.to_string())?;
             Some(pdfcraft_ui_egui::overlay_style_from_json(&value)?)
         };
-        // `view` is "side" or "overlay" (anything else fails the compare); `lockView` must be a boolean.
-        let view_overlay = match js_sys::Reflect::get(data, &JsValue::from_str("view")).unwrap_or(JsValue::UNDEFINED) {
-            v if v.is_undefined() || v.is_null() => false,
+        let side = match json_of("side")? {
+            Some(value) => pdfcraft_ui_egui::side_colors_from_json(&value)?,
+            None => Default::default(),
+        };
+        // `view` is "side", "overlay" or "overlay-side" (anything else fails the compare); `lockView` must be a boolean.
+        let view = match js_sys::Reflect::get(data, &JsValue::from_str("view")).unwrap_or(JsValue::UNDEFINED) {
+            v if v.is_undefined() || v.is_null() || op == CompareOp::Preview => pdfcraft_ui_egui::CompareView::Side,
             v => match v.as_string().as_deref() {
-                Some("overlay") => true,
-                Some("side") => false,
-                _ => return Err("view must be \"side\" or \"overlay\"".into()),
+                Some("overlay") => pdfcraft_ui_egui::CompareView::Overlay,
+                Some("overlay-side") => pdfcraft_ui_egui::CompareView::OverlaySide,
+                Some("side") => pdfcraft_ui_egui::CompareView::Side,
+                _ => return Err("view must be \"side\", \"overlay\" or \"overlay-side\"".into()),
             },
         };
         let lock_view = match js_sys::Reflect::get(data, &JsValue::from_str("lockView")).unwrap_or(JsValue::UNDEFINED) {
-            v if v.is_undefined() || v.is_null() => false,
+            v if v.is_undefined() || v.is_null() || op == CompareOp::Preview => false,
             v => v.as_bool().ok_or("lockView must be a boolean")?,
         };
+        // The files: a run has none; a compare or a preview needs both.
+        let (old, new) = if op == CompareOp::Run { (Default::default(), Default::default()) } else { (compare_file(data, "old")?, compare_file(data, "new")?) };
         Ok(pdfcraft_ui_egui::CompareCommand {
             id,
-            old: compare_file(data, "old")?,
-            new: compare_file(data, "new")?,
+            op,
+            old,
+            new,
             ownership,
             overlay,
-            view_overlay,
+            side,
+            view,
             lock_view,
         })
     }

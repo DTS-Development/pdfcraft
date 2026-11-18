@@ -9,6 +9,7 @@ use std::sync::Arc;
 use pdfcraft_engine::compare::Kind;
 
 use crate::PdfCraftApp;
+use crate::compare_ui::CompareView;
 
 const MAX_ID_CHARS: usize = 128;
 const MAX_ERROR_CHARS: usize = 200;
@@ -16,24 +17,37 @@ const MAX_ERROR_CHARS: usize = 200;
 /// The most bytes either file may have; the bridge checks it before copying into memory.
 pub const MAX_COMPARE_BYTES: usize = 200 << 20;
 
+/// Which request: compare at once, open the two files without comparing (`compare-preview`), or compare
+/// the files a preview opened (`compare-run`; its `old` and `new` are empty).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompareOp {
+    Compare,
+    Preview,
+    Run,
+}
+
 /// What the host asks for: `(name, bytes)` of each file, and the rules both open under (its
 /// `mode` and `policy`, read like an open's; the narrowest when it names none).
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompareCommand {
     pub id: String,
+    pub op: CompareOp,
     pub old: (String, Vec<u8>),
     pub new: (String, Vec<u8>),
     pub ownership: pdfcraft_engine::Ownership,
     /// How the overlay is inked (`overlay` of the message); the viewer's colours when none.
     pub overlay: Option<pdfcraft_engine::compare::OverlayStyle>,
-    /// `view` of the message: open on the overlay instead of side by side.
-    pub view_overlay: bool,
+    /// The shading colours of the side-by-side view (`side` of the message).
+    pub side: SideColors,
+    /// `view` of the message: the view the comparison opens on.
+    pub view: CompareView,
     /// `lockView` of the message: the user can't switch the view.
     pub lock_view: bool,
 }
 
 /// Read the host's `overlay` object: `colorA` (the old file's ink), `colorB` (the new file's ink),
-/// `opacity` (0 to 1). A value of the wrong type or out of range is an error, never ignored.
+/// `opacity` (0 to 1, both files), `opacityA` / `opacityB` (one file's, which win over `opacity`). A value
+/// of the wrong type or out of range is an error, never ignored.
 pub fn overlay_style_from_json(v: &serde_json::Value) -> Result<pdfcraft_engine::compare::OverlayStyle, String> {
     let obj = v.as_object().ok_or("overlay must be an object")?;
     let mut style = pdfcraft_engine::compare::OverlayStyle::default();
@@ -41,15 +55,55 @@ pub fn overlay_style_from_json(v: &serde_json::Value) -> Result<pdfcraft_engine:
         let text = value.as_str().ok_or_else(|| format!("{name} must be a string"))?;
         Ok(crate::watermark::parse_rgb(text).map_err(|_| format!("{name} must be #rgb or #rrggbb"))?.map(|c| (c * 255.0).round() as u8))
     };
+    let opacity = |value: &serde_json::Value, name: &str| -> Result<f32, String> {
+        value.as_f64().filter(|n| (0.0..=1.0).contains(n)).map(|n| n as f32).ok_or_else(|| format!("{name} must be a number from 0 to 1"))
+    };
     for (key, value) in obj {
         match key.as_str() {
             "colorA" => style.chosen = rgb(value, "colorA")?,
             "colorB" => style.current = rgb(value, "colorB")?,
-            "opacity" => style.strength = value.as_f64().filter(|n| (0.0..=1.0).contains(n)).ok_or("opacity must be a number from 0 to 1")? as f32,
+            "opacity" | "opacityA" | "opacityB" => {
+                opacity(value, key)?;
+            }
             other => return Err(format!("unknown overlay field {other}")),
         }
     }
+    // `opacity` first, then the one-file values over it, whatever order the keys came in.
+    if let Some(v) = obj.get("opacity") {
+        let n = opacity(v, "opacity")?;
+        (style.strength_current, style.strength_chosen) = (n, n);
+    }
+    if let Some(v) = obj.get("opacityA") {
+        style.strength_chosen = opacity(v, "opacityA")?;
+    }
+    if let Some(v) = obj.get("opacityB") {
+        style.strength_current = opacity(v, "opacityB")?;
+    }
     Ok(style)
+}
+
+/// Read the host's `side` object: `colorA` (the old file's shading), `colorB` (the new file's), each
+/// `#rgb` or `#rrggbb`; a colour left out stays as the viewer has it. Nothing else is allowed.
+pub fn side_colors_from_json(v: &serde_json::Value) -> Result<SideColors, String> {
+    let obj = v.as_object().ok_or("side must be an object")?;
+    let mut out = SideColors::default();
+    for (key, value) in obj {
+        let text = value.as_str().ok_or_else(|| format!("{key} must be a string"))?;
+        let rgb = || crate::watermark::parse_rgb(text).map(|c| c.map(|v| (v * 255.0).round() as u8)).map_err(|_| format!("{key} must be #rgb or #rrggbb"));
+        match key.as_str() {
+            "colorA" => out.old = Some(rgb()?),
+            "colorB" => out.new = Some(rgb()?),
+            other => return Err(format!("unknown side field {other}")),
+        }
+    }
+    Ok(out)
+}
+
+/// The host's shading colours of the side-by-side view: the old file's words and the new file's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SideColors {
+    pub old: Option<[u8; 3]>,
+    pub new: Option<[u8; 3]>,
 }
 
 /// What the host is told.
@@ -57,10 +111,13 @@ pub fn overlay_style_from_json(v: &serde_json::Value) -> Result<pdfcraft_engine:
 pub enum CompareEvent {
     Done { id: String, replaced: usize, inserted: usize, deleted: usize, visual: usize },
     Failed { id: String, error: String },
-    /// PPM: which view the comparison shows (side by side or the overlay) and whether the overlay
-    /// is still being built; sent after `Done` and again whenever either changes, so the host can
-    /// word its status line like the viewer's.
-    View { id: String, overlay: bool, building: bool },
+    /// The two files of a `compare-preview` are open side by side.
+    PreviewDone { id: String },
+    PreviewFailed { id: String, error: String },
+    /// PPM: which view the comparison shows (side by side, the overlay, or the old file beside the overlay)
+    /// and whether the overlay is still being built; sent after `Done` and again whenever either changes,
+    /// so the host can word its status line like the viewer's.
+    View { id: String, view: CompareView, building: bool },
 }
 
 /// Requests from the host, drained every frame.
@@ -88,11 +145,11 @@ impl PdfCraftApp {
         }
         let Some((id, sent)) = self.compare_view_sent.as_ref() else { return };
         let Some(c) = self.compare.as_ref().filter(|c| c.ppm) else { return };
-        let now = (c.overlay_shown, c.overlay_job.is_some());
+        let now = (c.view(), c.overlay_job.is_some());
         if now == *sent {
             return;
         }
-        let event = CompareEvent::View { id: id.clone(), overlay: now.0, building: now.1 };
+        let event = CompareEvent::View { id: id.clone(), view: now.0, building: now.1 };
         self.emit_compare(event);
         if let Some((_, sent)) = self.compare_view_sent.as_mut() {
             *sent = now;
@@ -103,45 +160,68 @@ impl PdfCraftApp {
         self.emit_compare(CompareEvent::Failed { id: cut(id, MAX_ID_CHARS), error: cut(error, MAX_ERROR_CHARS) });
     }
 
-    /// Once a frame: take the host's requests and run the first one.
+    /// Once a frame: take the host's requests and run them in order.
     pub(crate) fn host_compare_tick(&mut self) {
         self.report_compare_view();
         let commands: Vec<CompareCommand> = self.compare_inbox.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
         for command in commands {
-            if command.id.is_empty() || command.id.chars().count() > MAX_ID_CHARS {
-                self.fail_compare(&command.id, "the request id is missing or too long");
+            let id = command.id.clone();
+            let too_long = id.is_empty() || id.chars().count() > MAX_ID_CHARS;
+            let fail = |app: &Self, error: &str| match command.op {
+                CompareOp::Preview => app.emit_compare(CompareEvent::PreviewFailed { id: cut(&id, MAX_ID_CHARS), error: cut(error, MAX_ERROR_CHARS) }),
+                _ => app.fail_compare(&id, error),
+            };
+            if too_long {
+                fail(self, "the request id is missing or too long");
+            } else if command.op == CompareOp::Run {
+                // Only the files a preview opened, and once.
+                if !self.compare.as_ref().is_some_and(|c| c.preview) {
+                    fail(self, "no preview is open: send compare-preview first");
+                    continue;
+                }
+                match self.run_host_compare(command.overlay, command.side, command.view, command.lock_view) {
+                    Ok(counts) => self.report_compare_done(command.id, counts),
+                    Err(error) => fail(self, &error),
+                }
             } else if self.compare_taken {
-                self.fail_compare(&command.id, "busy: this window already compares");
+                fail(self, "busy: this window already compares");
             } else {
                 self.compare_taken = true;
-                match self.start_host_compare(command.old, command.new, command.ownership, command.overlay, (command.view_overlay, command.lock_view))
-                {
-                    Ok((replaced, inserted, deleted, visual)) => {
-                        self.emit_compare(CompareEvent::Done { id: command.id.clone(), replaced, inserted, deleted, visual });
-                        // The host starts from side by side, so only a change from that is told.
-                        // An overlay asked for at the start is told at once as building, so a quick build can't hide it.
-                        let started = self.compare.as_ref().filter(|c| c.ppm && c.overlay_shown).map(|c| (true, c.overlay_job.is_some()));
-                        if let Some((overlay, building)) = started.filter(|(_, building)| *building) {
-                            self.emit_compare(CompareEvent::View { id: command.id.clone(), overlay, building });
+                let opened = self.open_compare_pair(command.old, command.new, command.ownership);
+                match (opened, command.op) {
+                    (Err(error), _) => fail(self, &error),
+                    (Ok(()), CompareOp::Preview) => {
+                        if let Some(old) = self.compare_old {
+                            let ppm = self.host_lock;
+                            self.end_compare();
+                            if let Some(new) = self.active_ids().map(|(_, id)| id) {
+                                self.compare = Some(crate::compare_ui::CompareState::preview(old, new, ppm));
+                            }
                         }
-                        self.compare_view_sent = Some((command.id, started.filter(|(_, building)| *building).unwrap_or((false, false))));
+                        self.emit_compare(CompareEvent::PreviewDone { id: cut(&id, MAX_ID_CHARS) });
                     }
-                    Err(error) => self.fail_compare(&command.id, &error),
+                    (Ok(()), _) => match self.run_host_compare(command.overlay, command.side, command.view, command.lock_view) {
+                        Ok(counts) => self.report_compare_done(command.id, counts),
+                        Err(error) => fail(self, &error),
+                    },
                 }
             }
         }
     }
 
-    /// Open both files (old in the background, new active) and compare them: the counts of
-    /// replaced, inserted, deleted and visual differences.
-    fn start_host_compare(
-        &mut self,
-        old: (String, Vec<u8>),
-        new: (String, Vec<u8>),
-        ownership: pdfcraft_engine::Ownership,
-        overlay: Option<pdfcraft_engine::compare::OverlayStyle>,
-        (view_overlay, lock_view): (bool, bool),
-    ) -> Result<(usize, usize, usize, usize), String> {
+    /// Tell the host the counts, and the view when it starts on one that builds (so a quick build can't hide it).
+    fn report_compare_done(&mut self, id: String, (replaced, inserted, deleted, visual): (usize, usize, usize, usize)) {
+        self.emit_compare(CompareEvent::Done { id: id.clone(), replaced, inserted, deleted, visual });
+        // The host starts from side by side, so only a change from that is told.
+        let started = self.compare.as_ref().filter(|c| c.ppm && c.overlay_shown).map(|c| (c.view(), c.overlay_job.is_some()));
+        if let Some((view, building)) = started.filter(|(_, building)| *building) {
+            self.emit_compare(CompareEvent::View { id: id.clone(), view, building });
+        }
+        self.compare_view_sent = Some((id, started.filter(|(_, building)| *building).unwrap_or((CompareView::Side, false))));
+    }
+
+    /// Open both files (old in the background, new active). `compare_old` names the old one after.
+    fn open_compare_pair(&mut self, old: (String, Vec<u8>), new: (String, Vec<u8>), ownership: pdfcraft_engine::Ownership) -> Result<(), String> {
         // A prompt or a host file still on its way in is not ours to take over.
         if self.password_prompt.is_some() || self.annot_open_waiting || self.host_open_pending() {
             return Err("a document is still being opened".into());
@@ -173,19 +253,54 @@ impl PdfCraftApp {
         }
         self.end_compare();
         self.compare_old = Some(self.views[before].id);
+        Ok(())
+    }
+
+    /// Compare the two open files and apply the host's looks: the counts of replaced, inserted, deleted
+    /// and visual differences.
+    fn run_host_compare(
+        &mut self,
+        overlay: Option<pdfcraft_engine::compare::OverlayStyle>,
+        side: SideColors,
+        view: CompareView,
+        lock_view: bool,
+    ) -> Result<(usize, usize, usize, usize), String> {
+        // The new file is the active one (a preview may have been left on the other tab).
+        if let Some(new) = self.compare.as_ref().map(|c| c.new) {
+            self.active = self.views.iter().position(|v| v.id == new).or(self.active);
+        }
         self.run_compare();
         if let (Some(style), Some(c)) = (overlay, self.compare.as_mut()) {
             c.overlay_style = style;
         }
+        self.apply_side_colors(side);
         if let Some(c) = self.compare.as_mut() {
             c.lock_view = lock_view;
         }
-        if view_overlay {
-            // The same path as the user's Overlay button: the build starts and `View` reports it.
-            self.show_overlay(true);
+        if view != CompareView::Side {
+            // The same path as the user's Overlay buttons: the build starts and `View` reports it.
+            self.set_view(view);
         }
         let Some(s) = self.compare.as_ref() else { return Err("the comparison failed".into()) };
         Ok((s.result.count(Kind::Replaced), s.result.count(Kind::Inserted), s.result.count(Kind::Deleted), s.visual.len()))
+    }
+
+    /// PPM: shade the old and the new file's words in the host's colours (the alpha stays the viewer's).
+    fn apply_side_colors(&mut self, side: SideColors) {
+        let Some(c) = self.compare.as_mut().filter(|c| c.ppm) else { return };
+        if side == SideColors::default() {
+            return;
+        }
+        let rgb = |c: [u8; 3]| egui::Color32::from_rgb(c[0], c[1], c[2]);
+        c.mark_colors = [side.old.map_or(c.mark_colors[0], rgb), side.new.map_or(c.mark_colors[1], rgb)];
+        c.marks_custom = true;
+        let (old, new, colors) = (c.old, c.new, c.mark_colors);
+        for view in &mut self.views {
+            let colour = if view.id == old { colors[0] } else if view.id == new { colors[1] } else { continue };
+            for mark in &mut view.compare_marks {
+                mark.2 = colour;
+            }
+        }
     }
 }
 
@@ -205,7 +320,7 @@ mod tests {
     #[test]
     fn the_overlay_style_is_read_strictly() {
         let style = overlay_style_from_json(&serde_json::json!({ "colorA": "#00f", "colorB": "#ff8000", "opacity": 0.5 })).unwrap();
-        assert_eq!((style.chosen, style.current, style.strength), ([0, 0, 255], [255, 128, 0], 0.5));
+        assert_eq!((style.chosen, style.current, (style.strength_current, style.strength_chosen)), ([0, 0, 255], [255, 128, 0], (0.5, 0.5)));
         assert_eq!(overlay_style_from_json(&serde_json::json!({})).unwrap(), Default::default());
         for bad in [
             serde_json::json!({ "colorA": "red" }),
@@ -221,7 +336,7 @@ mod tests {
     #[test]
     fn the_hosts_overlay_style_reaches_the_overlay_build() {
         let (mut h, _) = app(true);
-        let style = pdfcraft_engine::compare::OverlayStyle { current: [0, 200, 0], chosen: [200, 0, 200], strength: 0.5 };
+        let style = pdfcraft_engine::compare::OverlayStyle { current: [0, 200, 0], chosen: [200, 0, 200], strength_current: 0.5, strength_chosen: 0.5 };
         send(&mut h, CompareCommand { overlay: Some(style), ..command("c1") });
         assert_eq!(h.state().compare.as_ref().unwrap().overlay_style, style);
     }
@@ -235,9 +350,11 @@ mod tests {
             id: id.into(),
             old: ("old.pdf".into(), text_pdf("Delivery within five days. Returns accepted.")),
             new: ("new.pdf".into(), text_pdf("Delivery within three days. Returns accepted for a week.")),
+            op: CompareOp::Compare,
             ownership: Default::default(),
             overlay: None,
-            view_overlay: false,
+            side: SideColors::default(),
+            view: CompareView::Side,
             lock_view: false,
         }
     }
@@ -587,13 +704,13 @@ mod tests {
         send(&mut h, command("c1"));
         h.run_steps(2);
         assert_eq!(events.borrow().len(), 1, "only Done: side by side is where the host starts");
-        let view = |overlay, building| CompareEvent::View { id: "c1".into(), overlay, building };
+        let view = |view, building| CompareEvent::View { id: "c1".into(), view, building };
         h.state_mut().show_overlay(true);
         h.run_steps(6);
         h.state_mut().show_overlay(false);
         h.run_steps(2);
         let events = events.borrow();
-        assert_eq!(events[1..], [view(true, true), view(true, false), view(false, false)], "{events:?}");
+        assert_eq!(events[1..], [view(CompareView::Overlay, true), view(CompareView::Overlay, false), view(CompareView::Side, false)], "{events:?}");
     }
 
     /// A hosted ppm window whose events are collected, with the compare request `c` sent.
@@ -615,13 +732,13 @@ mod tests {
 
     #[test]
     fn the_host_can_open_the_comparison_on_the_overlay_and_is_told_it_builds() {
-        let (mut h, events) = ppm_with(CompareCommand { view_overlay: true, ..command("c1") });
+        let (mut h, events) = ppm_with(CompareCommand { view: CompareView::Overlay, ..command("c1") });
         h.run_steps(8);
         assert!(h.state().compare.as_ref().unwrap().overlay_shown);
-        let view = |overlay, building| CompareEvent::View { id: "c1".into(), overlay, building };
+        let view = |view, building| CompareEvent::View { id: "c1".into(), view, building };
         let events = events.borrow();
         assert!(matches!(events[0], CompareEvent::Done { .. }));
-        assert_eq!(events[1..], [view(true, true), view(true, false)], "{events:?}");
+        assert_eq!(events[1..], [view(CompareView::Overlay, true), view(CompareView::Overlay, false)], "{events:?}");
     }
 
     #[test]
@@ -643,7 +760,7 @@ mod tests {
 
     #[test]
     fn a_locked_overlay_that_fails_to_build_goes_back_to_side_by_side_and_the_host_hears_it() {
-        let (mut h, events) = ppm_with(CompareCommand { view_overlay: true, lock_view: true, ..command("c1") });
+        let (mut h, events) = ppm_with(CompareCommand { view: CompareView::Overlay, lock_view: true, ..command("c1") });
         h.run_steps(1);
         // The build fails as it would on a broken page pair.
         let c = h.state_mut().compare.as_mut().unwrap();
@@ -653,7 +770,7 @@ mod tests {
         let c = h.state().compare.as_ref().unwrap();
         assert!(!c.overlay_shown && c.overlay_failed);
         let events = events.borrow();
-        assert_eq!(events.last(), Some(&CompareEvent::View { id: "c1".into(), overlay: false, building: false }), "{events:?}");
+        assert_eq!(events.last(), Some(&CompareEvent::View { id: "c1".into(), view: CompareView::Side, building: false }), "{events:?}");
     }
 
     #[test]
@@ -687,5 +804,141 @@ mod tests {
             assert_eq!(state.session.watermark_key(id), Some("CONFIDENTIAL"), "{}", state.session.get(id).unwrap().name);
         }
         assert_eq!(saved(&h)[..2], before[..2], "no file takes it");
+    }
+
+    #[test]
+    fn opacity_a_and_b_win_over_opacity_whatever_the_key_order() {
+        let read = |v: serde_json::Value| overlay_style_from_json(&v).map(|s| (s.strength_chosen, s.strength_current));
+        // A is the old file (chosen), B the new (current).
+        assert_eq!(read(serde_json::json!({ "opacityA": 0.0, "opacityB": 0.4 })), Ok((0.0, 0.4)));
+        assert_eq!(read(serde_json::json!({ "opacityB": 0.4, "opacity": 0.8 })), Ok((0.8, 0.4)));
+        assert_eq!(read(serde_json::json!({ "opacityA": 0.1, "opacity": 0.8 })), Ok((0.1, 0.8)));
+        assert_eq!(read(serde_json::json!({ "opacity": 0.5 })), Ok((0.5, 0.5)));
+        assert_eq!(read(serde_json::json!({})), Ok((1.0, 1.0)));
+        for bad in [serde_json::json!({ "opacityA": 2 }), serde_json::json!({ "opacityB": "1" }), serde_json::json!({ "opacityC": 1 })] {
+            assert!(read(bad.clone()).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_side_colours_are_read_strictly() {
+        let c = side_colors_from_json(&serde_json::json!({ "colorA": "#00f", "colorB": "#ff8000" })).unwrap();
+        assert_eq!((c.old, c.new), (Some([0, 0, 255]), Some([255, 128, 0])));
+        assert_eq!(side_colors_from_json(&serde_json::json!({})).unwrap(), SideColors::default());
+        assert_eq!(side_colors_from_json(&serde_json::json!({ "colorB": "#fff" })).unwrap().old, None);
+        for bad in [serde_json::json!({ "colorA": "red" }), serde_json::json!({ "colorA": 3 }), serde_json::json!({ "opacity": 0.5 }), serde_json::json!([])] {
+            assert!(side_colors_from_json(&bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_hosts_side_colours_shade_both_files_and_the_viewers_alpha_stays() {
+        use crate::compare_ui::ppm;
+        let side = SideColors { old: Some([39, 50, 245]), new: None };
+        let (mut h, _) = ppm_with(CompareCommand { side, ..command("c1") });
+        h.run_steps(2);
+        let s = h.state().compare.as_ref().unwrap();
+        let (new_v, old_v) = (h.state().views.iter().find(|v| v.id == s.new).unwrap(), h.state().views.iter().find(|v| v.id == s.old).unwrap());
+        let blue = egui::Color32::from_rgb(39, 50, 245);
+        assert!(!old_v.compare_marks.is_empty() && old_v.compare_marks.iter().all(|m| m.2 == blue), "the old file's words take the host's colour");
+        assert!(!new_v.compare_marks.is_empty() && new_v.compare_marks.iter().all(|m| m.2 == ppm::BASE), "the new file keeps the viewer's colour when none is named");
+        assert_eq!((new_v.compare_alpha, old_v.compare_alpha), (ppm::MARK_ALPHA, ppm::MARK_ALPHA));
+        assert_eq!(s.mark_colors, [blue, ppm::BASE]);
+        // No colour named: nothing changes and the strip keeps its colour-name note.
+        let (mut h, _) = ppm_with(command("c2"));
+        h.run_steps(2);
+        let s = h.state().compare.as_ref().unwrap();
+        assert!(!s.marks_custom && s.mark_colors == [ppm::TARGET, ppm::BASE]);
+    }
+
+    #[test]
+    fn the_host_can_open_on_the_old_file_beside_the_overlay_and_the_user_can_switch() {
+        let (mut h, events) = ppm_with(CompareCommand { view: CompareView::OverlaySide, ..command("c1") });
+        h.run_steps(8);
+        let s = h.state().compare.as_ref().unwrap();
+        assert_eq!(s.view(), CompareView::OverlaySide);
+        assert!(s.overlay_view.is_some(), "the overlay was built");
+        let view = |view, building| CompareEvent::View { id: "c1".into(), view, building };
+        assert_eq!(events.borrow()[1..], [view(CompareView::OverlaySide, true), view(CompareView::OverlaySide, false)], "{:?}", events.borrow());
+        // The old file's shading is only off while the halves are drawn: its marks are still there.
+        let old = h.state().compare.as_ref().unwrap().old;
+        assert!(!h.state().views.iter().find(|v| v.id == old).unwrap().compare_marks.is_empty());
+        h.get_by_label("Overlay").click();
+        h.run_steps(4);
+        assert_eq!(h.state().compare.as_ref().unwrap().view(), CompareView::Overlay);
+        h.get_by_label("Previous + overlay").click();
+        h.run_steps(4);
+        assert_eq!(h.state().compare.as_ref().unwrap().view(), CompareView::OverlaySide);
+        assert_eq!(events.borrow().last(), Some(&view(CompareView::OverlaySide, false)));
+        h.get_by_label("Side by side").click();
+        h.run_steps(4);
+        let s = h.state().compare.as_ref().unwrap();
+        assert!(!s.overlay_shown && !s.overlay_beside);
+    }
+
+    #[test]
+    fn a_locked_view_keeps_the_overlay_beside_button_from_answering() {
+        let (mut h, _) = ppm_with(CompareCommand { lock_view: true, ..command("c1") });
+        h.run_steps(2);
+        h.get_by_label("Previous + overlay").click();
+        h.run_steps(4);
+        assert_eq!(h.state().compare.as_ref().unwrap().view(), CompareView::Side);
+    }
+
+    fn preview(id: &str) -> CompareCommand {
+        CompareCommand { op: CompareOp::Preview, ..command(id) }
+    }
+
+    fn run(id: &str) -> CompareCommand {
+        CompareCommand { op: CompareOp::Run, old: Default::default(), new: Default::default(), ..command(id) }
+    }
+
+    #[test]
+    fn a_preview_opens_both_files_without_comparing_and_a_run_then_compares_them() {
+        let (mut h, events) = ppm_with(preview("p1"));
+        h.run_steps(2);
+        assert_eq!(*events.borrow(), vec![CompareEvent::PreviewDone { id: "p1".into() }]);
+        let s = h.state().compare.as_ref().unwrap();
+        assert!(s.preview && s.side_by_side && s.result.changes.is_empty());
+        assert_eq!(h.state().right, None, "no change list");
+        assert!(h.state().views.iter().all(|v| v.compare_marks.is_empty()), "no shading");
+        assert_eq!(h.state().views.len(), 2);
+        assert!(h.query_by_label("Overlay").is_none() && h.query_by_label("Side by side").is_none(), "no view switch");
+        // The run compares the same two files (no bytes again).
+        h.state().compare_inbox.lock().unwrap().push(CompareCommand { view: CompareView::Side, ..run("r1") });
+        h.run_steps(4);
+        let events = events.borrow();
+        assert!(matches!(events[1], CompareEvent::Done { ref id, replaced: 2, .. } if id == "r1"), "{events:?}");
+        let s = h.state().compare.as_ref().unwrap();
+        assert!(!s.preview && !s.result.changes.is_empty());
+        assert_eq!(h.state().views.len(), 2, "the files were not opened again");
+        assert!(h.state().views.iter().all(|v| !v.compare_marks.is_empty()));
+    }
+
+    #[test]
+    fn a_run_without_a_preview_fails_and_so_does_a_second_run_or_a_compare_during_a_preview() {
+        let (mut h, events) = ppm_with(run("r0"));
+        h.run_steps(2);
+        assert!(matches!(&events.borrow()[0], CompareEvent::Failed { id, .. } if id == "r0"), "{:?}", events.borrow());
+        assert!(h.state().compare.is_none());
+        let (mut h, events) = ppm_with(preview("p1"));
+        h.state().compare_inbox.lock().unwrap().push(command("c1"));
+        h.run_steps(4);
+        assert!(matches!(&events.borrow()[1], CompareEvent::Failed { id, error } if id == "c1" && error.starts_with("busy")), "{:?}", events.borrow());
+        assert!(h.state().compare.as_ref().unwrap().preview, "the preview is still there");
+        h.state().compare_inbox.lock().unwrap().push(run("r1"));
+        h.state().compare_inbox.lock().unwrap().push(run("r2"));
+        h.run_steps(4);
+        let events = events.borrow();
+        assert!(matches!(events[2], CompareEvent::Done { .. }), "{events:?}");
+        assert!(matches!(&events[3], CompareEvent::Failed { id, .. } if id == "r2"), "{events:?}");
+    }
+
+    #[test]
+    fn a_preview_that_cannot_open_is_told_as_a_preview_failure() {
+        let (mut h, events) = ppm_with(CompareCommand { old: ("old.pdf".into(), b"not a pdf".to_vec()), ..preview("p1") });
+        h.run_steps(2);
+        assert!(matches!(&events.borrow()[0], CompareEvent::PreviewFailed { id, .. } if id == "p1"), "{:?}", events.borrow());
+        assert!(h.state().compare.is_none());
     }
 }

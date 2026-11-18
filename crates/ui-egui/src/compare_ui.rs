@@ -41,6 +41,59 @@ pub struct CompareState {
     pub overlay_style: pdfcraft_engine::compare::OverlayStyle,
     /// PPM: the host fixed the view (`lockView`): the user can't switch between side by side and the overlay.
     pub lock_view: bool,
+    /// PPM: the overlay is shown beside the old file (`overlay-side`) rather than alone; only meaningful with `overlay_shown`.
+    pub overlay_beside: bool,
+    /// PPM: the two files are open side by side and nothing is compared yet (`compare-preview`):
+    /// no shading, no change list, no view switch.
+    pub preview: bool,
+    /// PPM: the shading colours of the old and the new file's words (the viewer's own unless the host named them).
+    pub mark_colors: [Color32; 2],
+    /// PPM: the host named a shading colour, so the strip's note shows colour dots rather than colour names.
+    pub marks_custom: bool,
+}
+
+/// What a PPM comparison shows: the two halves, the overlay alone, or the old file beside the overlay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompareView {
+    Side,
+    Overlay,
+    OverlaySide,
+}
+
+impl CompareState {
+    /// The two files open side by side and nothing compared yet (`compare-preview`).
+    pub fn preview(old: DocId, new: DocId, ppm: bool) -> Self {
+        Self {
+            old,
+            new,
+            result: Comparison::default(),
+            visual: Vec::new(),
+            selected: None,
+            side_by_side: true,
+            leader: 1,
+            prev_scroll: [egui::Vec2::ZERO; 2],
+            ppm,
+            overlay_shown: false,
+            overlay_job: None,
+            overlay: None,
+            overlay_view: None,
+            overlay_failed: false,
+            overlay_style: Default::default(),
+            lock_view: false,
+            overlay_beside: false,
+            preview: true,
+            mark_colors: [ppm::TARGET, ppm::BASE],
+            marks_custom: false,
+        }
+    }
+
+    pub fn view(&self) -> CompareView {
+        match (self.overlay_shown, self.overlay_beside) {
+            (false, _) => CompareView::Side,
+            (true, false) => CompareView::Overlay,
+            (true, true) => CompareView::OverlaySide,
+        }
+    }
 }
 
 /// The PPM build follows the viewer's compare screen: the current file on the left, the chosen
@@ -131,6 +184,10 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, state: &Option<CompareState>,
         ui.label(egui::RichText::new(tl!("Compare this file with an older version: Compare files… in All tools.")).color(t.text_muted));
         return None;
     };
+    if s.preview {
+        ui.label(egui::RichText::new(tl!("Compare this file with an older version: Compare files… in All tools.")).color(t.text_muted));
+        return None;
+    }
     if s.ppm {
         return ppm_panel(ui, t, s);
     }
@@ -249,8 +306,8 @@ fn ppm_panel(ui: &mut egui::Ui, t: &Tokens, s: &CompareState) -> Option<PanelAct
             ui.painter().rect_filled(rect, 4.0, t.selected);
         }
         let (kind, bar) = match ch.kind {
-            Kind::Inserted => (tl_ctx!(ppm::CTX, "Delete"), ppm::BASE),
-            Kind::Deleted => (tl_ctx!(ppm::CTX, "Insert"), ppm::TARGET),
+            Kind::Inserted => (tl_ctx!(ppm::CTX, "Delete"), s.mark_colors[1]),
+            Kind::Deleted => (tl_ctx!(ppm::CTX, "Insert"), s.mark_colors[0]),
             Kind::Replaced => (tl_ctx!(ppm::CTX, "Edit"), t.border),
         };
         ui.painter().rect_filled(egui::Rect::from_min_size(rect.min + egui::vec2(4.0, 4.0), egui::vec2(4.0, PPM_ROW_H - 8.0)), 2.0, bar);
@@ -354,6 +411,10 @@ impl PdfCraftApp {
                     overlay_failed: false,
                     overlay_style: Default::default(),
                     lock_view: false,
+                    overlay_beside: false,
+                    preview: false,
+                    mark_colors: [ppm::TARGET, ppm::BASE],
+                    marks_custom: false,
                 });
                 self.right = Some(RightPanel::Compare);
                 self.notify(if n == 0 {
@@ -436,9 +497,13 @@ impl PdfCraftApp {
     /// also cancels a build that is still going.
     pub(crate) fn show_overlay(&mut self, on: bool) {
         let Some(c) = self.compare.as_mut() else { return };
+        if c.preview {
+            return;
+        }
         c.overlay_shown = on;
         if !on {
             c.overlay_job = None;
+            c.overlay_beside = false;
             return;
         }
         if c.overlay.is_some() || c.overlay_failed || c.overlay_job.is_some() {
@@ -457,6 +522,16 @@ impl PdfCraftApp {
         if let Some(ctx) = &self.ctx {
             ctx.request_repaint();
         }
+    }
+
+    /// PPM: show `view` (the host's `view`, or the strip's buttons); the overlay is built once and kept.
+    pub(crate) fn set_view(&mut self, view: CompareView) {
+        let Some(c) = self.compare.as_mut() else { return };
+        if c.preview {
+            return;
+        }
+        c.overlay_beside = view == CompareView::OverlaySide;
+        self.show_overlay(view != CompareView::Side);
     }
 
     /// PPM: one more page pair of the overlay a frame, so the window keeps drawing and the
@@ -537,20 +612,24 @@ fn legend_colours(style: &pdfcraft_engine::compare::OverlayStyle) -> [[u8; 3]; 3
     [style.current, style.chosen, pdfcraft_engine::compare::OVERLAY_SAME]
 }
 
-/// PPM: the strip above the pages, like the viewer's header row and legend. Returns whether
-/// the overlay was asked for (`Some(true)`) or the halves (`Some(false)`).
-fn ppm_strip(ui: &mut egui::Ui, rect: egui::Rect, t: &Tokens, c: &CompareState) -> Option<bool> {
+/// PPM: the strip above the pages, like the viewer's header row and legend. Returns the view the
+/// user asked for, when it is not the one shown.
+fn ppm_strip(ui: &mut egui::Ui, rect: egui::Rect, t: &Tokens, c: &CompareState) -> Option<CompareView> {
     let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(8.0, 4.0))));
     let mut ask = None;
     let building = c.overlay_job.is_some();
     ui.horizontal_wrapped(|ui| {
         // A host that fixed the view (`lockView`) shows the buttons, but they don't answer.
         ui.add_enabled_ui(!c.lock_view, |ui| {
-            if widgets::pill_button(ui, tl!("Side by side"), !c.overlay_shown).clicked() && c.overlay_shown {
-                ask = Some(false);
-            }
-            if widgets::pill_button(ui, tl_ctx!(ppm::CTX, "Overlay"), c.overlay_shown).clicked() && !c.overlay_shown {
-                ask = Some(true);
+            let shown = c.view();
+            for (view, label) in [
+                (CompareView::Side, tl!("Side by side")),
+                (CompareView::Overlay, tl_ctx!(ppm::CTX, "Overlay")),
+                (CompareView::OverlaySide, tl_ctx!(ppm::CTX, "Previous + overlay")),
+            ] {
+                if widgets::pill_button(ui, label, shown == view).clicked() && shown != view {
+                    ask = Some(view);
+                }
             }
         });
         // While building, the host's status line says so (like the viewer's header); the strip stays quiet.
@@ -559,6 +638,16 @@ fn ppm_strip(ui: &mut egui::Ui, rect: egui::Rect, t: &Tokens, c: &CompareState) 
                 (ppm::rgb(legend_colours(&c.overlay_style)[0]), tl_ctx!(ppm::CTX, "Lines only in the current file")),
                 (ppm::rgb(legend_colours(&c.overlay_style)[1]), tl_ctx!(ppm::CTX, "Lines only in the chosen file")),
                 (ppm::rgb(legend_colours(&c.overlay_style)[2]), tl_ctx!(ppm::CTX, "Same place")),
+            ] {
+                let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                ui.painter().rect_filled(dot, egui::CornerRadius::same(2), colour);
+                ui.label(egui::RichText::new(label).small());
+            }
+        } else if !c.overlay_shown && c.marks_custom {
+            // The words are shaded in the host's colours, so the note names them with dots, not colour names.
+            for (colour, label) in [
+                (c.mark_colors[1], tl_ctx!(ppm::CTX, "Words only in the current file or changed")),
+                (c.mark_colors[0], tl_ctx!(ppm::CTX, "Words only in the chosen file or changed")),
             ] {
                 let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
                 ui.painter().rect_filled(dot, egui::CornerRadius::same(2), colour);
@@ -642,14 +731,36 @@ pub(crate) fn compare_area(app: &mut PdfCraftApp, old: usize, new: usize, ui: &m
     if ppm_on {
         // A page pair of the overlay a frame; the status below shows how far it got.
         app.step_overlay();
-        let strip = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), ppm::STRIP_H));
-        ui.painter().rect_filled(strip, 0.0, t.panel);
-        if let Some(ask) =
-            app.compare.as_ref().and_then(|c| ppm_strip(ui, strip, &t, c)).filter(|_| !app.compare.as_ref().is_some_and(|c| c.lock_view))
-        {
-            app.show_overlay(ask);
+        // Before the comparison runs (`compare-preview`) there is nothing to switch or to read: the halves only.
+        let previewing = app.compare.as_ref().is_some_and(|c| c.preview);
+        if !previewing {
+            let strip = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), ppm::STRIP_H));
+            ui.painter().rect_filled(strip, 0.0, t.panel);
+            if let Some(ask) =
+                app.compare.as_ref().and_then(|c| ppm_strip(ui, strip, &t, c)).filter(|_| !app.compare.as_ref().is_some_and(|c| c.lock_view))
+            {
+                app.set_view(ask);
+            }
+            rect.min.y += ppm::STRIP_H;
         }
-        rect.min.y += ppm::STRIP_H;
+        if let Some(c) = app.compare.as_ref().filter(|c| c.overlay_shown && c.overlay_beside) {
+            // The old file on the left, the overlay on the right; the old file's word shading is off here.
+            let failed = c.overlay_failed;
+            let old_marks = std::mem::take(&mut app.views[old].compare_marks);
+            let drawn = with_overlay_view(app, |app, oi| draw_halves(app, ui, rect, (old, oi), false, Some(tl_ctx!(ppm::CTX, "Overlay").to_string())));
+            if drawn.is_none() {
+                // Still building (or failed): the old file alone, and the right half says so.
+                let left = egui::Rect::from_min_size(rect.min, egui::vec2(((rect.width() - 1.0) / 2.0).max(1.0), rect.height()));
+                let name = app.session.get(app.views[old].id).map(|d| d.name.clone()).unwrap_or_default();
+                draw_half(app, ui, &t, left, old, &name, 0);
+                if failed {
+                    let right = egui::Rect::from_min_max(egui::pos2(left.max.x + 1.0, rect.min.y), rect.max);
+                    ui.put(right, egui::Label::new(egui::RichText::new(tl_ctx!(ppm::CTX, "Couldn't build the overlay.")).color(t.text_muted)));
+                }
+            }
+            app.views[old].compare_marks = old_marks;
+            return;
+        }
         if let Some(c) = app.compare.as_ref().filter(|c| c.overlay_shown) {
             let body = rect;
             let failed = c.overlay_failed;
@@ -661,14 +772,33 @@ pub(crate) fn compare_area(app: &mut PdfCraftApp, old: usize, new: usize, ui: &m
             return;
         }
     }
+    draw_halves(app, ui, rect, (old, new), ppm_on, None);
+}
+
+/// One half of a side-by-side view: its caption (a name) over the document in `r`.
+fn draw_half(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, r: egui::Rect, index: usize, label: &str, k: usize) {
+    let caption_h = 22.0;
+    let caption = egui::Rect::from_min_size(r.min, egui::vec2(r.width(), caption_h));
+    ui.painter().rect_filled(caption, 0.0, t.panel);
+    ui.painter().text(egui::pos2(caption.min.x + 10.0, caption.center().y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(12.0), t.text_muted);
+    let body = egui::Rect::from_min_max(egui::pos2(r.min.x, r.min.y + caption_h), r.max);
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt(("compare-half", k)));
+    child.set_clip_rect(body);
+    crate::canvas::document_area(app, index, &mut child);
+}
+
+/// Two views in the two halves of `rect`, scrolled and zoomed together: `(old, new)` are the views in the old
+/// and the new role (the leader, 0 old and 1 new, follows whichever half the pointer is over), `new_left` puts
+/// the new role on the left. `new_label` names the new role's half when it is not a file (the overlay).
+fn draw_halves(app: &mut PdfCraftApp, ui: &mut egui::Ui, rect: egui::Rect, (old, new): (usize, usize), new_left: bool, new_label: Option<String>) {
+    let t = Tokens::get(ui.ctx());
     let gap = 1.0;
     let half_w = ((rect.width() - gap) / 2.0).max(1.0);
-    let caption_h = 22.0;
     let left = egui::Rect::from_min_size(rect.min, egui::vec2(half_w, rect.height()));
     let right = egui::Rect::from_min_size(egui::pos2(rect.min.x + half_w + gap, rect.min.y), egui::vec2(half_w, rect.height()));
     // The PPM build puts the current (new) file on the left like the viewer's base; the leader
     // (0 old, 1 new) follows whichever file a half shows.
-    let (left_is, right_is) = if ppm_on { (1, 0) } else { (0, 1) };
+    let (left_is, right_is) = if new_left { (1, 0) } else { (0, 1) };
     // Who leads: the half under the pointer (remembered), the new file at first.
     if let Some(p) = ui.input(|i| i.pointer.hover_pos())
         && let Some(c) = app.compare.as_mut()
@@ -696,30 +826,18 @@ pub(crate) fn compare_area(app: &mut PdfCraftApp, old: usize, new: usize, ui: &m
             v.rotation = rotation;
         }
     }
-    let shown = if ppm_on { [new, old] } else { [old, new] };
+    let shown = if new_left { [new, old] } else { [old, new] };
     let names = shown.map(|i| app.session.get(app.views[i].id).map(|d| d.name.clone()).unwrap_or_default());
     ui.painter().vline(rect.min.x + half_w, rect.y_range(), egui::Stroke::new(gap, t.border));
-    let halves = if ppm_on { [(left, new), (right, old)] } else { [(left, old), (right, new)] };
+    let halves = if new_left { [(left, new), (right, old)] } else { [(left, old), (right, new)] };
     for (k, (r, index)) in halves.into_iter().enumerate() {
-        let caption = egui::Rect::from_min_size(r.min, egui::vec2(r.width(), caption_h));
-        ui.painter().rect_filled(caption, 0.0, t.panel);
         // The viewer's halves are headed by the file name alone.
-        let label = if ppm_on {
-            names[k].clone()
-        } else {
-            crate::i18n::fmt(if k == 0 { tl!("Old file: {name}") } else { tl!("New file: {name}") }, &[("name", &names[k])])
+        let label = match (&new_label, index == new) {
+            (Some(l), true) => l.clone(),
+            _ if new_left || new_label.is_some() => names[k].clone(),
+            _ => crate::i18n::fmt(if k == 0 { tl!("Old file: {name}") } else { tl!("New file: {name}") }, &[("name", &names[k])]),
         };
-        ui.painter().text(
-            egui::pos2(caption.min.x + 10.0, caption.center().y),
-            egui::Align2::LEFT_CENTER,
-            label,
-            egui::FontId::proportional(12.0),
-            t.text_muted,
-        );
-        let body = egui::Rect::from_min_max(egui::pos2(r.min.x, r.min.y + caption_h), r.max);
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt(("compare-half", k)));
-        child.set_clip_rect(body);
-        crate::canvas::document_area(app, index, &mut child);
+        draw_half(app, ui, &t, r, index, &label, k);
     }
     // After both drew: the leader's scroll, when it moved, is the follower's next offset.
     let offsets = [app.views[old].last_scroll, app.views[new].last_scroll];
@@ -733,6 +851,7 @@ pub(crate) fn compare_area(app: &mut PdfCraftApp, old: usize, new: usize, ui: &m
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::{legend_colours, visible_rows};
@@ -741,7 +860,7 @@ mod tests {
     fn the_overlay_legend_follows_the_overlay_colours() {
         use pdfcraft_engine::compare::{OverlayStyle, OVERLAY_CHOSEN, OVERLAY_CURRENT, OVERLAY_SAME};
         assert_eq!(legend_colours(&OverlayStyle::default()), [OVERLAY_CURRENT, OVERLAY_CHOSEN, OVERLAY_SAME]);
-        let style = OverlayStyle { current: [0, 170, 0], chosen: [255, 0, 255], strength: 0.8 };
+        let style = OverlayStyle { current: [0, 170, 0], chosen: [255, 0, 255], strength_current: 0.8, strength_chosen: 0.8 };
         assert_eq!(legend_colours(&style), [[0, 170, 0], [255, 0, 255], OVERLAY_SAME]);
     }
 
