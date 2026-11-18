@@ -2699,13 +2699,13 @@ compare viewer	Edit	바뀜
 compare viewer	Old	이전
 compare viewer	New	새 문서
 compare viewer	Overlay	겹쳐 보기
-compare viewer	Lines only in the current file	기준에만 있는 선
-compare viewer	Lines only in the chosen file	비교에만 있는 선
+compare viewer	Lines only in the current file	새 문서에만 있는 선
+compare viewer	Lines only in the chosen file	이전 문서에만 있는 선
 compare viewer	Same place	같은 곳
 compare viewer	Previous + overlay	이전 문서 + 겹침
-compare viewer	Words only in the current file or changed	기준에만 있거나 바뀐 글자
-compare viewer	Words only in the chosen file or changed	비교 문서에만 있거나 바뀐 글자
-compare viewer	Red: words only in the current file or changed / Green: words only in the chosen file or changed	빨강: 기준에만 있거나 바뀐 글자 / 초록: 비교 문서에만 있거나 바뀐 글자
+compare viewer	Words only in the current file or changed	새 문서에만 있거나 바뀐 글자
+compare viewer	Words only in the chosen file or changed	이전 문서에만 있거나 바뀐 글자
+compare viewer	Red: words only in the current file or changed / Green: words only in the chosen file or changed	빨강: 새 문서에만 있거나 바뀐 글자 / 초록: 이전 문서에만 있거나 바뀐 글자
 compare viewer	Only words are shown. For pictures and drawings, use Overlay.	글자 차이만 표시합니다. 그림·도면 차이는 겹쳐 보기에서 보세요.
-compare viewer	Only the first {n} pages were compared (current {a}, chosen {b}).	앞 {n}쪽만 비교했습니다(기준 {a}쪽, 비교 {b}쪽).
+compare viewer	Only the first {n} pages were compared (current {a}, chosen {b}).	앞 {n}쪽만 비교했습니다(새 문서 {a}쪽, 이전 {b}쪽).
 compare viewer	Couldn't build the overlay.	비교하지 못했습니다.
