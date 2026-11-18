@@ -348,6 +348,10 @@ impl PdfCraftApp {
         changes: bool,
         change_list: bool,
     ) -> Result<CompareDone, String> {
+        // A preview's two files must both still be open: with one tab gone the other would be compared with itself.
+        if self.compare.as_ref().is_some_and(|c| !(self.views.iter().any(|v| v.id == c.old) && self.views.iter().any(|v| v.id == c.new))) {
+            return Err("a file of the preview is no longer open".into());
+        }
         // The new file is the active one (a preview may have been left on the other tab).
         if let Some(new) = self.compare.as_ref().map(|c| c.new) {
             self.active = self.views.iter().position(|v| v.id == new).or(self.active);
@@ -1081,6 +1085,19 @@ mod tests {
         assert!(matches!(events.last(), Some(CompareEvent::Failed { id, .. }) if id == "r1"), "{events:?}");
         assert!(!events.iter().any(|e| matches!(e, CompareEvent::Done { .. })), "no compare-done with zero counts: {events:?}");
         assert!(h.state().compare.as_ref().is_some_and(|c| c.preview), "the preview is still open");
+    }
+
+    #[test]
+    fn a_run_fails_when_one_file_of_the_preview_is_gone() {
+        let (mut h, events) = ppm_with(preview("p1"));
+        h.run_steps(2);
+        let new = h.state().compare.as_ref().unwrap().new;
+        h.state_mut().views.retain(|v| v.id != new);
+        h.state_mut().active = Some(0);
+        send(&mut h, run("r1"));
+        let events = events.borrow();
+        assert!(matches!(events.last(), Some(CompareEvent::Failed { id, .. }) if id == "r1"), "{events:?}");
+        assert!(!events.iter().any(|e| matches!(e, CompareEvent::Done { .. })), "{events:?}");
     }
 
     #[test]
