@@ -443,17 +443,16 @@ impl PdfCraftApp {
     fn report_popup_click(&mut self, doc: DocId) {
         let Some(click) = self.views.iter_mut().find(|v| v.id == doc).and_then(|v| v.host_popup_click.take()) else { return };
         let Some(state) = self.session.get(doc) else { return };
-        let (Some(annot_id), Some(info), Some(a)) = (
-            state.annot_name_at(click.page, click.index),
-            state.info.pages.get(click.page),
-            state.info.annotations.iter().find(|a| a.page == click.page && a.index == click.index),
-        ) else {
+        // The click was on an annotation by name; where it is now is looked up again (the server may have changed the list since).
+        let Some((page, index)) = state.annot_position(&click.name) else { return };
+        let (Some(info), Some(a)) = (state.info.pages.get(page), state.info.annotations.iter().find(|a| a.page == page && a.index == index)) else {
             return;
         };
+        let annot_id = click.name;
         // Hundredths of a point: the rectangle is stored in f32, and the page doesn't need its noise.
         let rect = user_rect_to_view(info, a.rect.map(f64::from)).map(|v| (v * 100.0).round() / 100.0);
         if let Some(report) = self.host_annots.as_ref() {
-            report(&AnnotEvent::PopupAction { id: click.id, annot_id, page: click.page, rect });
+            report(&AnnotEvent::PopupAction { id: click.id, annot_id, page, rect });
         }
     }
 
@@ -1270,6 +1269,64 @@ mod tests {
         stamps.lock().unwrap().push(crate::StampCommand::AnnotationPopupActions { actions: Vec::new() });
         h.run_steps(3);
         assert!(h.query_by_label("Go there").is_none());
+    }
+
+    /// A reply is part of its comment: it has no bar of its own.
+    #[test]
+    fn a_reply_has_no_bar_but_its_comment_has() {
+        use egui_kittest::kittest::Queryable;
+        let app = PdfCraftApp::new();
+        app.ownership_inbox.lock().unwrap().push(share());
+        app.startup_inbox.lock().unwrap().push(("a.pdf".into(), pdf()));
+        let (inbox, stamps) = (app.annot_inbox.clone(), app.stamp_inbox.clone());
+        let mut h = egui_kittest::Harness::builder().build_eframe(move |_| app);
+        for _ in 0..20 {
+            h.run_steps(2);
+        }
+        let reply = RemoteAnnot {
+            annot_id: "re".into(),
+            author_id: "u-kim".into(),
+            xfdf: r##"<?xml version="1.0" encoding="UTF-8" ?><xfdf xmlns="http://ns.adobe.com/xfdf/" xml:space="preserve"><annots><text page="0" name="re" rect="20,40,40,60" title="Kim" inreplyto="parent" replyType="R"><contents>re</contents></text></annots></xfdf>"##.into(),
+        };
+        inbox.lock().unwrap().push(AnnotCommand::Reset { seq: 0, items: vec![square("parent"), reply] });
+        stamps.lock().unwrap().push(popup_actions(&[("go", "Go there", "navigation")]));
+        h.run_steps(4);
+        inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: "re".into() });
+        h.run_steps(4);
+        assert!(h.query_by_label("Go there").is_none(), "no bar on a reply");
+        inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: "parent".into() });
+        h.run_steps(4);
+        assert!(h.query_by_label("Go there").is_some(), "the bar on its comment (a document that can be edited too)");
+    }
+
+    /// A click waits for the next tick; a server change in between must not make it speak of another annotation.
+    #[test]
+    fn a_click_is_not_reported_for_another_annotation_after_the_list_changes() {
+        let heard: std::rc::Rc<std::cell::RefCell<Vec<AnnotEvent>>> = Default::default();
+        let sink = heard.clone();
+        let mut app = PdfCraftApp::new();
+        app.ownership_inbox.lock().unwrap().push(pdfcraft_engine::Ownership { read_only: true, ..share() });
+        app.startup_inbox.lock().unwrap().push(("a.pdf".into(), pdf()));
+        app.host_annots = Some(Box::new(move |e| sink.borrow_mut().push(e.clone())));
+        let inbox = app.annot_inbox.clone();
+        let mut h = egui_kittest::Harness::builder().build_eframe(move |_| app);
+        for _ in 0..20 {
+            h.run_steps(2);
+        }
+        inbox.lock().unwrap().push(AnnotCommand::Reset { seq: 0, items: vec![square("first"), square("second")] });
+        h.run_steps(3);
+        // The click on "first" is recorded, then the server deletes "first" before the tick that reports it.
+        h.state_mut().views[0].host_popup_click = Some(crate::host_popup::PopupClick { id: "go".into(), name: "first".into() });
+        inbox.lock().unwrap().push(AnnotCommand::Apply { upserts: vec![], deletes: vec!["first".into()] });
+        h.run_steps(3);
+        let spoken: Vec<String> = heard.borrow().iter().filter_map(|e| if let AnnotEvent::PopupAction { annot_id, .. } = e { Some(annot_id.clone()) } else { None }).collect();
+        assert!(spoken.is_empty(), "a click on a deleted annotation is dropped, not told for the one that took its place: {spoken:?}");
+
+        // On an annotation that is still there, the click is told with where it is now.
+        h.state_mut().views[0].host_popup_click = Some(crate::host_popup::PopupClick { id: "go".into(), name: "second".into() });
+        h.run_steps(3);
+        let spoken: Vec<String> = heard.borrow().iter().filter_map(|e| if let AnnotEvent::PopupAction { annot_id, .. } = e { Some(annot_id.clone()) } else { None }).collect();
+        assert_eq!(spoken, ["second"]);
     }
 
     /// A read-only (viewer-only) shared document shows other people's annotations as they come.

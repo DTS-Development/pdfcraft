@@ -32,12 +32,12 @@ pub struct PopupAction {
     pub icon: String,
 }
 
-/// A click waiting for the app to report it: the annotation's page and index in `/Annots`, and the action's id.
+/// A click waiting for the app to report it: the action's id and the annotation's id (its position can move
+/// before the click is reported, so it is looked up again then).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PopupClick {
-    pub page: usize,
-    pub index: usize,
     pub id: String,
+    pub name: String,
 }
 
 /// The `actions` of a `pdfcraft:annotation-popup-actions` message: `null`, missing or `[]` take the buttons away.
@@ -114,8 +114,10 @@ pub(crate) fn show(ui: &mut egui::Ui, viewport: Rect, view: &mut DocView, doc: &
             });
         });
     });
-    if let Some(id) = chosen {
-        view.host_popup_click = Some(PopupClick { page, index, id });
+    if let Some(id) = chosen
+        && let Some(name) = doc.annot_name_at(page, index)
+    {
+        view.host_popup_click = Some(PopupClick { id, name });
     }
 }
 

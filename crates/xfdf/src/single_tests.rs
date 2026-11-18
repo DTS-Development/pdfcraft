@@ -423,6 +423,36 @@ fn the_position_exports_and_the_list_follow_the_raised_limit() {
 }
 
 #[test]
+fn the_list_judges_a_kept_picture_like_the_export_without_writing_it() {
+    // A picture stamp whose export is just over the default limit: the list must agree with the export at the edge.
+    let original = noisy_png(160_000);
+    let x = stamp_xml("p", &url_of("image/png", &original));
+    let mut doc = blank();
+    assert_eq!(apply_remote(&mut doc, &[RemoteItem { annot_id: "p", author_id: "u", xfdf: &x }], &[]).failed, vec![]);
+    let len = utf16_len(&export_annotation_in(&doc, &AnnotIndex::new(&doc).with_max_len(8_000_000), "p").unwrap().xfdf);
+    assert!(len > MAX_XFDF_LEN, "the picture must make the export pass the default limit: {len}");
+    let exportable = |max: usize| list_annotations_with(&doc, max).into_iter().find(|e| e.nm.as_deref() == Some("p")).map(|e| e.exportable);
+    assert_eq!(exportable(len), Some(true));
+    assert_eq!(exportable(len - 1), Some(false));
+    assert_eq!(exportable(MAX_XFDF_LEN), Some(false));
+    assert_eq!(exportable(8_000_000), Some(true));
+}
+
+#[test]
+fn an_export_stops_writing_at_its_total_budget() {
+    let src = note_with_attachment(300_000);
+    let index = list_annotations(&src).into_iter().find(|e| e.nm.as_deref() == Some("att")).unwrap().index;
+    let req = ExportRequest { page: 0, index, name: "att", in_reply_to: None };
+    let one = utf16_len(&export_positions_with(&src, &[req.clone()], 2_000_000).remove(0).unwrap().xfdf);
+    let out = export_positions_within(&src, &[req.clone(), req.clone(), req.clone()], 2_000_000, one);
+    // The budget is checked before each one: the second still fits (one written is not over one), the third doesn't.
+    assert!(out[0].is_ok() && out[1].is_ok(), "{:?}", out.iter().map(|r| r.is_ok()).collect::<Vec<_>>());
+    assert!(matches!(out[2], Err(DataError::OverBudget { max }) if max == one));
+    let out = export_positions_within(&src, &[req.clone(), req.clone()], 2_000_000, one - 1);
+    assert!(out[0].is_ok() && matches!(out[1], Err(DataError::OverBudget { .. })));
+}
+
+#[test]
 fn full_export_is_unchanged_by_the_database_form() {
     // The user-facing XFDF export has no custom data or pictures.
     let mut src = blank();

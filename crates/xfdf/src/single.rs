@@ -199,6 +199,24 @@ pub fn export_annotation_in(doc: &Document, idx: &AnnotIndex, nm: &str) -> Resul
 /// The XFDF document of the annotation dictionary `d` on zero-based `page`, with `names` giving the
 /// id of each annotation (for `inreplyto`) and `nm` this one's.
 pub(crate) fn element_xfdf(doc: &Document, d: &Dict, page: usize, names: &HashMap<ObjRef, String>, nm: &str, max_len: usize) -> Result<AnnotXfdf, DataError> {
+    element_xfdf_in(doc, d, page, names, nm, max_len, false)
+}
+
+thread_local! {
+    /// While a length-only check runs: the characters of the kept picture that were counted but not written.
+    static UNWRITTEN_PICTURE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// Whether `element_xfdf` would succeed, without writing the kept picture's base64 (only its length is counted):
+/// a list of what can be exchanged doesn't have to encode every picture the host's raised limit lets through.
+pub(crate) fn check_element_xfdf(doc: &Document, d: &Dict, page: usize, names: &HashMap<ObjRef, String>, nm: &str, max_len: usize) -> Result<(), DataError> {
+    UNWRITTEN_PICTURE.with(|c| c.set(Some(0)));
+    let r = element_xfdf_in(doc, d, page, names, nm, max_len, true);
+    UNWRITTEN_PICTURE.with(|c| c.set(None));
+    r.map(|_| ())
+}
+
+fn element_xfdf_in(doc: &Document, d: &Dict, page: usize, names: &HashMap<ObjRef, String>, nm: &str, max_len: usize, length_only: bool) -> Result<AnnotXfdf, DataError> {
     if utf16_len(nm) > MAX_ID_LEN {
         return Err(DataError::Invalid("the annotation name is too long".into()));
     }
@@ -218,7 +236,7 @@ pub(crate) fn element_xfdf(doc: &Document, d: &Dict, page: usize, names: &HashMa
         return Err(DataError::Invalid("this kind of annotation has no XFDF form".into()));
     };
     let xfdf = format!("{PREFIX}{}{SUFFIX}", element.trim_end());
-    let len = utf16_len(&xfdf);
+    let len = utf16_len(&xfdf) + if length_only { UNWRITTEN_PICTURE.with(|c| c.get()).unwrap_or(0) } else { 0 };
     if len > max_len {
         return Err(DataError::TooLarge { len, max: max_len });
     }
@@ -264,6 +282,15 @@ fn picture_url(doc: &Document, d: &Dict) -> Option<String> {
         return None;
     }
     // The file the stamp came from goes out as it is; only a stamp without one is re-encoded.
+    // A length-only check counts the base64 of a kept picture instead of writing it.
+    if UNWRITTEN_PICTURE.with(|c| c.get()).is_some()
+        && let Some(r) = d.reference(PICTURE_SOURCE_KEY.as_bytes())
+        && let Object::Stream(s) = &*doc.get(r)
+        && let Some(mime) = sniff(&s.raw)
+    {
+        UNWRITTEN_PICTURE.with(|c| c.set(c.get().map(|n| n + s.raw.len().div_ceil(3) * 4)));
+        return Some(format!("data:{mime};base64,"));
+    }
     let kept = d.reference(PICTURE_SOURCE_KEY.as_bytes()).and_then(|r| match &*doc.get(r) {
         Object::Stream(s) => Some(s.raw.to_vec()),
         _ => None,
