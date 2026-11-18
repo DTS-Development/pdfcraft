@@ -21,7 +21,7 @@ use std::sync::Arc;
 use pdfcraft_cos::{CosError, Document, SaveOptions, write_full};
 use pdfcraft_edit::{EditError, flatten_export};
 use pdfcraft_render::{ExtractError, OpenError, PageText, extract_pages_each};
-use pdfcraft_xfdf::{ExportRequest, RemoteItem, apply_remote, export_positions, list_annotations, strip_positions};
+use pdfcraft_xfdf::{ExportRequest, RemoteItem, apply_remote, export_positions_within, list_annotations_with, strip_positions};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
@@ -50,9 +50,10 @@ struct ListEntry {
     exportable: bool,
 }
 
-pub fn list_json(pdf: Vec<u8>) -> Result<String, String> {
+pub fn list_json(pdf: Vec<u8>, max_len: Option<usize>) -> Result<String, String> {
+    let max_len = check_max_len(max_len)?;
     let doc = open(pdf)?;
-    let list: Vec<ListEntry> = list_annotations(&doc)
+    let list: Vec<ListEntry> = list_annotations_with(&doc, max_len)
         .into_iter()
         .map(|e| ListEntry {
             page: e.page + 1,
@@ -87,17 +88,47 @@ struct ExportOut {
     error: Option<String>,
 }
 
+/// The host's `maxAnnotationXfdfLength` (UTF-16 units of one annotation's XFDF): none is the default 200,000; a
+/// value outside 200,000..=8,000,000 is refused rather than clamped.
+fn check_max_len(max_len: Option<usize>) -> Result<usize, String> {
+    let (lo, hi) = (pdfcraft_xfdf::MAX_XFDF_LEN, pdfcraft_xfdf::MAX_XFDF_LEN_CEILING);
+    match max_len {
+        None => Ok(lo),
+        Some(n) if (lo..=hi).contains(&n) => Ok(n),
+        Some(_) => Err(format!("maxAnnotationXfdfLength must be from {lo} to {hi}")),
+    }
+}
+
+/// What one `exportXfdf` call may write in all (UTF-16 units) once the host raised the per-annotation limit: a PDF
+/// can make thousands of annotations refer to one big picture, and the answer is one string. At the default limit
+/// there is none (as before).
+const RAISED_EXPORT_BUDGET: usize = 64_000_000;
+
+fn export_budget(max_len: usize) -> usize {
+    if max_len > pdfcraft_xfdf::MAX_XFDF_LEN { RAISED_EXPORT_BUDGET } else { usize::MAX }
+}
+
+/// What JavaScript passes for `maxAnnotationXfdfLength`: a whole number, or nothing.
+fn max_len_from_js(n: Option<f64>) -> Result<Option<usize>, String> {
+    match n {
+        None => Ok(None),
+        Some(n) if n.is_finite() && n.fract() == 0.0 && (0.0..=1e9).contains(&n) => Ok(Some(n as usize)),
+        Some(_) => Err("maxAnnotationXfdfLength must be a whole number from 200000 to 8000000".into()),
+    }
+}
+
 /// 1-based page → zero-based; 0 stays out of range so it is reported as missing.
 fn page0(page: usize) -> usize {
     page.wrapping_sub(1)
 }
 
-pub fn export_json(pdf: Vec<u8>, requests: &str) -> Result<String, String> {
+pub fn export_json(pdf: Vec<u8>, requests: &str, max_len: Option<usize>) -> Result<String, String> {
+    let max_len = check_max_len(max_len)?;
     let input: Vec<ExportIn> = serde_json::from_str(requests).map_err(|e| format!("bad export request: {e}"))?;
     let doc = open(pdf)?;
     let reqs: Vec<ExportRequest> =
         input.iter().map(|r| ExportRequest { page: page0(r.page), index: r.index, name: &r.name, in_reply_to: r.in_reply_to.as_deref() }).collect();
-    let out: Vec<ExportOut> = export_positions(&doc, &reqs)
+    let out: Vec<ExportOut> = export_positions_within(&doc, &reqs, max_len, export_budget(max_len))
         .into_iter()
         .zip(&input)
         .map(|(res, r)| match res {
@@ -344,13 +375,13 @@ pub fn decrypt_pdf(pdf: Vec<u8>) -> Result<Vec<u8>, String> {
 }
 
 #[wasm_bindgen]
-pub fn list(pdf: Vec<u8>) -> Result<String, JsError> {
-    list_json(pdf).map_err(|e| JsError::new(&e))
+pub fn list(pdf: Vec<u8>, max_len: Option<f64>) -> Result<String, JsError> {
+    max_len_from_js(max_len).and_then(|n| list_json(pdf, n)).map_err(|e| JsError::new(&e))
 }
 
 #[wasm_bindgen(js_name = exportXfdf)]
-pub fn export_xfdf(pdf: Vec<u8>, requests: &str) -> Result<String, JsError> {
-    export_json(pdf, requests).map_err(|e| JsError::new(&e))
+pub fn export_xfdf(pdf: Vec<u8>, requests: &str, max_len: Option<f64>) -> Result<String, JsError> {
+    max_len_from_js(max_len).and_then(|n| export_json(pdf, requests, n)).map_err(|e| JsError::new(&e))
 }
 
 #[wasm_bindgen]
@@ -384,11 +415,28 @@ mod tests {
 
     #[test]
     fn bad_input_is_an_error_not_a_panic() {
-        assert!(list_json(b"not a pdf".to_vec()).is_err());
-        assert!(export_json(Vec::new(), "[]").is_err());
+        assert!(list_json(b"not a pdf".to_vec(), None).is_err());
+        assert!(export_json(Vec::new(), "[]", None).is_err());
         assert!(strip_pdf(b"x".to_vec(), "not json").unwrap_err().contains("bad strip request"));
         assert!(merge_pdf(b"x".to_vec(), "{}").unwrap_err().contains("bad merge request"));
         assert!(flatten_pdf(b"not a pdf".to_vec()).is_err());
+    }
+
+    #[test]
+    fn the_xfdf_length_option_is_held_to_its_range() {
+        assert!(max_len_from_js(Some(250000.5)).is_err());
+        assert!(max_len_from_js(Some(4294967296.0 + 200000.0)).is_err());
+        assert!(max_len_from_js(Some(f64::NAN)).is_err() && max_len_from_js(Some(-1.0)).is_err());
+        assert_eq!(max_len_from_js(Some(300000.0)), Ok(Some(300000)));
+        assert_eq!(export_budget(200_000), usize::MAX);
+        assert_eq!(export_budget(200_001), RAISED_EXPORT_BUDGET);
+        assert_eq!(check_max_len(None), Ok(200_000));
+        assert_eq!(check_max_len(Some(200_000)), Ok(200_000));
+        assert_eq!(check_max_len(Some(8_000_000)), Ok(8_000_000));
+        assert!(check_max_len(Some(199_999)).is_err() && check_max_len(Some(8_000_001)).is_err());
+        assert!(list_json(sample(), Some(10)).unwrap_err().contains("maxAnnotationXfdfLength"));
+        assert!(export_json(sample(), "[]", Some(9_000_000)).unwrap_err().contains("maxAnnotationXfdfLength"));
+        assert!(list_json(sample(), Some(1_000_000)).is_ok());
     }
 
     #[test]
@@ -424,7 +472,7 @@ mod tests {
     #[test]
     fn flatten_bakes_comments_and_keeps_links() {
         let out = flatten_pdf(sample()).unwrap();
-        let list: Vec<serde_json::Value> = serde_json::from_str(&list_json(out).unwrap()).unwrap();
+        let list: Vec<serde_json::Value> = serde_json::from_str(&list_json(out, None).unwrap()).unwrap();
         let kinds: Vec<&str> = list.iter().filter_map(|e| e["subtype"].as_str()).collect();
         assert_eq!(kinds, ["Link"]);
     }
@@ -535,7 +583,7 @@ mod tests {
     #[test]
     fn decrypt_keeps_annotations_of_an_encrypted_pdf() {
         let enc = encrypted(sample(), pdfcraft_cos::Algorithm::Aes128, "", "owner-pw", true);
-        let list: Vec<serde_json::Value> = serde_json::from_str(&list_json(decrypt_pdf(enc).unwrap()).unwrap()).unwrap();
+        let list: Vec<serde_json::Value> = serde_json::from_str(&list_json(decrypt_pdf(enc).unwrap(), None).unwrap()).unwrap();
         let kinds: Vec<&str> = list.iter().filter_map(|e| e["subtype"].as_str()).collect();
         assert_eq!(kinds, ["Link", "Square"]);
     }

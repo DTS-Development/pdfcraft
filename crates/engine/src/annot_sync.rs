@@ -136,8 +136,8 @@ mod xf {
     }
 
     /// One scan of the document, for exporting many of its annotations.
-    pub fn index(doc: &Cos) -> pdfcraft_xfdf::AnnotIndex {
-        pdfcraft_xfdf::AnnotIndex::new(doc)
+    pub fn index(doc: &Cos, max_len: usize) -> pdfcraft_xfdf::AnnotIndex {
+        pdfcraft_xfdf::AnnotIndex::new(doc).with_max_len(max_len)
     }
 
     /// The annotation named `nm` as XFDF (the xfdf crate cuts `subtype` to the host's 100 units).
@@ -206,6 +206,8 @@ pub(crate) struct SyncState {
     /// The `/NM`s of sign boxes a signature just replaced; if another user placed one, the server
     /// is told it is gone (the only deletion of someone else's annotation the actor's edit sends).
     signed_away: BTreeSet<String>,
+    /// The export limit the host chose (`Ownership::max_xfdf_len`, 0 = default).
+    max_len: usize,
 }
 
 impl SyncState {
@@ -440,7 +442,7 @@ fn diff(cos: &Cos, actor: &str, st: &mut SyncState) {
         }
         // An annotation that cannot be written out stays as it was on the server, and the user
         // hears of it once; it is tried again when it changes.
-        let Some(x) = xf::export(cos, index.get_or_insert_with(|| xf::index(cos)), &nm) else {
+        let Some(x) = xf::export(cos, index.get_or_insert_with(|| xf::index(cos, st.max_len)), &nm) else {
             if !st.failed.contains_key(&nm) {
                 st.problems.push(nm.clone());
             }
@@ -524,7 +526,7 @@ impl Document {
         if self.sync.is_some() {
             return;
         }
-        let mut st = SyncState { seen: self.generation, ..Default::default() };
+        let mut st = SyncState { seen: self.generation, max_len: self.ownership.max_xfdf_len, ..Default::default() };
         if let (Some(actor), Some(editor)) = (self.ownership.actor.as_deref(), self.editor.as_ref()) {
             diff(&editor.cos, actor, &mut st);
         }
@@ -904,6 +906,7 @@ impl Session {
             }
         }
         let reason = doc.read_only_reason.clone().unwrap_or_default();
+        let max_len = doc.ownership.max_xfdf_len;
         let editor = doc.editor.as_mut().ok_or(EditError::ReadOnly(reason))?;
         let mut pictures = pdfcraft_xfdf::PictureCache::default();
         let doc_items: Vec<&RemoteAnnot> = live.iter().chain(&current_only).collect();
@@ -915,7 +918,7 @@ impl Session {
         let before: HashMap<&str, u64> = if own_changed.is_empty() {
             HashMap::new()
         } else {
-            let idx = xf::index(&editor.cos);
+            let idx = xf::index(&editor.cos, max_len);
             own_changed.iter().filter_map(|nm| xf::export(&editor.cos, &idx, nm).map(|x| (*nm, hash_of(&x.xfdf)))).collect()
         };
         // The pages the items are on before and after: the ones to draw again.
@@ -953,7 +956,7 @@ impl Session {
                     on_states.iter().copied().filter(|a| !cached_mine.contains(&a.annot_id) || here.contains(&a.annot_id)).collect();
                 let (mut items, mut gone) = (items, deletes.clone());
                 if !before.is_empty() {
-                    let idx = xf::index(state);
+                    let idx = xf::index(state, max_len);
                     // A version that can't be exported (here or in the working document) is not known to be the same.
                     let same = |nm: &str| match (xf::export(state, &idx, nm), before.get(nm)) {
                         (Some(x), Some(b)) => hash_of(&x.xfdf) == *b,
@@ -999,7 +1002,7 @@ impl Session {
         for (nm, arc, page, fp, mine) in entries {
             let server = hashes.get(nm.as_str()).copied().unwrap_or(0);
             if mine {
-                let xfdf = xf::export(cos, index.get_or_insert_with(|| xf::index(cos)), &nm).map_or(0, |x| hash_of(&x.xfdf));
+                let xfdf = xf::export(cos, index.get_or_insert_with(|| xf::index(cos, st.max_len)), &nm).map_or(0, |x| hash_of(&x.xfdf));
                 st.mine.insert(nm, Entry { page, fp, xfdf, server, arc, synced: true });
             } else if server != 0 {
                 st.remote.insert(nm, server);

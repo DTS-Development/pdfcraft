@@ -39,6 +39,8 @@ pub struct CompareState {
     pub overlay_failed: bool,
     /// PPM: the host's overlay colours (the viewer's own when it names none).
     pub overlay_style: pdfcraft_engine::compare::OverlayStyle,
+    /// PPM: the host fixed the view (`lockView`): the user can't switch between side by side and the overlay.
+    pub lock_view: bool,
 }
 
 /// The PPM build follows the viewer's compare screen: the current file on the left, the chosen
@@ -351,6 +353,7 @@ impl PdfCraftApp {
                     overlay_view: None,
                     overlay_failed: false,
                     overlay_style: Default::default(),
+                    lock_view: false,
                 });
                 self.right = Some(RightPanel::Compare);
                 self.notify(if n == 0 {
@@ -541,12 +544,15 @@ fn ppm_strip(ui: &mut egui::Ui, rect: egui::Rect, t: &Tokens, c: &CompareState) 
     let mut ask = None;
     let building = c.overlay_job.is_some();
     ui.horizontal_wrapped(|ui| {
-        if widgets::pill_button(ui, tl!("Side by side"), !c.overlay_shown).clicked() && c.overlay_shown {
-            ask = Some(false);
-        }
-        if widgets::pill_button(ui, tl_ctx!(ppm::CTX, "Overlay"), c.overlay_shown).clicked() && !c.overlay_shown {
-            ask = Some(true);
-        }
+        // A host that fixed the view (`lockView`) shows the buttons, but they don't answer.
+        ui.add_enabled_ui(!c.lock_view, |ui| {
+            if widgets::pill_button(ui, tl!("Side by side"), !c.overlay_shown).clicked() && c.overlay_shown {
+                ask = Some(false);
+            }
+            if widgets::pill_button(ui, tl_ctx!(ppm::CTX, "Overlay"), c.overlay_shown).clicked() && !c.overlay_shown {
+                ask = Some(true);
+            }
+        });
         // While building, the host's status line says so (like the viewer's header); the strip stays quiet.
         if c.overlay_shown && !building {
             for (colour, label) in [
@@ -638,7 +644,9 @@ pub(crate) fn compare_area(app: &mut PdfCraftApp, old: usize, new: usize, ui: &m
         app.step_overlay();
         let strip = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), ppm::STRIP_H));
         ui.painter().rect_filled(strip, 0.0, t.panel);
-        if let Some(ask) = app.compare.as_ref().and_then(|c| ppm_strip(ui, strip, &t, c)) {
+        if let Some(ask) =
+            app.compare.as_ref().and_then(|c| ppm_strip(ui, strip, &t, c)).filter(|_| !app.compare.as_ref().is_some_and(|c| c.lock_view))
+        {
             app.show_overlay(ask);
         }
         rect.min.y += ppm::STRIP_H;

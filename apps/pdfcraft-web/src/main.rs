@@ -203,6 +203,8 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   `pdfcraft:failed` instead of opening without the checks. `mode` (`"viewer"` or `"builder"`)
 ///   is how much editing a host-lock build allows: `"builder"` everything it doesn't lock for
 ///   every host, anything else, or nothing, only comments. A build without the lock ignores it.
+///   `maxAnnotationXfdfLength` (a whole number from 200000 to 8000000, UTF-16 units of one annotation's XFDF as it goes out
+///   to the page, counted after `&quot;` escaping) raises the size an annotation may have to be saved; out of range refuses the open.
 ///   `annotSync` (a boolean, needs `actor`) turns on sharing the annotations through the page: edits
 ///   to annotations no longer make the file dirty, and the user's changes go out as
 ///   `pdfcraft:annots-changed` instead of `pdfcraft:save`. `commentsPanel: false` hides this
@@ -300,13 +302,23 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   user creates from now on (`/PpmCustomData`, so it is saved and goes out as `<trn-custom-data>` in `annots-changed`),
 ///   until the next message; `null` or `{}` stops. Not on sign boxes, signatures, copied pages' comments, or what the
 ///   server applies. A value the comment already has is kept. Needs a user (`actor`), like marking comments as theirs.
+/// - `pdfcraft:annotation-popup-actions` (from the parent): `{ actions }`, a list of `{ id, label, icon }` (at most 8; `id` 1 to
+///   64 characters of letters, digits and `-_.:`, no two alike; `label` 1 to 20 characters, the button's tooltip and name; `icon`
+///   the name of one of the embedded icons), puts one icon button each on a bar that floats next to the selected annotation of a
+///   document shared with the page (`annotSync`), for every document, also those opened later, until it is sent again. `null`,
+///   missing or `[]` takes the bar away; a list that can't be used does too and is logged. Sign boxes and replies have no bar;
+///   signatures do. It is there in viewer and `readOnly` documents too. A new list shows in an open bar at once. A click goes
+///   to the parent as `pdfcraft:annotation-popup-action` `{ id, annotId, page, rect }` (`page` from 0, `rect` `{ x, y, width,
+///   height }` in points on the page as shown, top-left origin, like `sign-box-selected`).
 /// - `pdfcraft:stamp-armed` `{ id }`, `pdfcraft:stamp-placed` `{ id, page }`,
 ///   `pdfcraft:stamp-cancelled` `{ id }` and `pdfcraft:stamp-failed` `{ id, error }` (to the
 ///   parent) report how a stamp request went.
-/// - `pdfcraft:compare` (from the parent): `{ id, old: { name, bytes }, new: { name, bytes }, mode?, policy?, overlay? }`
+/// - `pdfcraft:compare` (from the parent): `{ id, old: { name, bytes }, new: { name, bytes }, mode?, policy?, overlay?, view?, lockView? }`
 ///   opens the old file in a background tab and the new file as the active one, then runs the
 ///   Compare Files comparison. `overlay` is `{ colorA?, colorB?, opacity? }`: the ink of the old and the new
-///   file in the overlay (`#rgb`/`#rrggbb`) and how strong it is (0 to 1); a value that can't be read fails the compare. A window compares once; `pdfcraft:compare-done`
+///   file in the overlay (`#rgb`/`#rrggbb`) and how strong it is (0 to 1); a value that can't be read fails the compare.
+///   `view` (`"side"` default, or `"overlay"`) is the view the comparison opens on (an overlay reports `compare-view` with `building`
+///   as usual); `lockView: true` takes the switch between the two away from the user (an overlay that fails to build goes back to side by side). A window compares once; `pdfcraft:compare-done`
 ///   `{ id, replaced, inserted, deleted, visual }` or `pdfcraft:compare-failed` `{ id, error }`
 ///   (to the parent) report the outcome. In this mode the Compare panel has no Mark as
 ///   comments or Report.
@@ -562,6 +574,26 @@ mod host {
                         };
                         if let Ok(mut q) = stamps.lock() {
                             q.push(pdfcraft_ui_egui::StampCommand::AnnotationDefaults { custom_data: pairs });
+                        }
+                        ctx.request_repaint();
+                        return;
+                    }
+                    Some("pdfcraft:annotation-popup-actions") => {
+                        // `actions` is a list of `{ id, label, icon }` (at most 8) or null/missing/[] to take them away. A list that can't be used
+                        // takes them away too (never a stale one) and says why in the console.
+                        let value = js_sys::Reflect::get(&data, &JsValue::from_str("actions")).unwrap_or(JsValue::UNDEFINED);
+                        let json = if value.is_undefined() || value.is_null() { None } else { js_sys::JSON::stringify(&value).ok().and_then(|s| s.as_string()) };
+                        let parsed = match json.as_deref().map(serde_json::from_str::<serde_json::Value>) {
+                            None => pdfcraft_ui_egui::parse_popup_actions(None),
+                            Some(Ok(v)) => pdfcraft_ui_egui::parse_popup_actions(Some(&v)),
+                            Some(Err(e)) => Err(e.to_string()),
+                        };
+                        let actions = parsed.unwrap_or_else(|error| {
+                            eframe::web_sys::console::warn_1(&format!("PdfCraft: pdfcraft:annotation-popup-actions refused: {error}").into());
+                            Vec::new()
+                        });
+                        if let Ok(mut q) = stamps.lock() {
+                            q.push(pdfcraft_ui_egui::StampCommand::AnnotationPopupActions { actions });
                         }
                         ctx.request_repaint();
                         return;
@@ -877,7 +909,28 @@ mod host {
             let value = serde_json::from_str::<serde_json::Value>(&json).map_err(|e| e.to_string())?;
             Some(pdfcraft_ui_egui::overlay_style_from_json(&value)?)
         };
-        Ok(pdfcraft_ui_egui::CompareCommand { id, old: compare_file(data, "old")?, new: compare_file(data, "new")?, ownership, overlay })
+        // `view` is "side" or "overlay" (anything else fails the compare); `lockView` must be a boolean.
+        let view_overlay = match js_sys::Reflect::get(data, &JsValue::from_str("view")).unwrap_or(JsValue::UNDEFINED) {
+            v if v.is_undefined() || v.is_null() => false,
+            v => match v.as_string().as_deref() {
+                Some("overlay") => true,
+                Some("side") => false,
+                _ => return Err("view must be \"side\" or \"overlay\"".into()),
+            },
+        };
+        let lock_view = match js_sys::Reflect::get(data, &JsValue::from_str("lockView")).unwrap_or(JsValue::UNDEFINED) {
+            v if v.is_undefined() || v.is_null() => false,
+            v => v.as_bool().ok_or("lockView must be a boolean")?,
+        };
+        Ok(pdfcraft_ui_egui::CompareCommand {
+            id,
+            old: compare_file(data, "old")?,
+            new: compare_file(data, "new")?,
+            ownership,
+            overlay,
+            view_overlay,
+            lock_view,
+        })
     }
 
     /// Read a `pdfcraft:stamp-add` message; the error is what the parent is told.
@@ -1039,7 +1092,16 @@ mod host {
         } else {
             !get_panel.as_bool().ok_or_else(|| "commentsPanel must be a boolean".to_string())?
         };
-        let own = pdfcraft_ui_egui::Ownership { actor, read_only, scope, annot_sync, hide_comments_panel, replace, ..Default::default() };
+        // `maxAnnotationXfdfLength`: a whole number of UTF-16 units from the default up to the ceiling; anything else refuses the open.
+        let max = get("maxAnnotationXfdfLength");
+        let max_xfdf_len = if max.is_undefined() || max.is_null() {
+            0
+        } else {
+            let (lo, hi) = (pdfcraft_ui_egui::XFDF_LEN_MIN, pdfcraft_ui_egui::XFDF_LEN_MAX);
+            let n = max.as_f64().filter(|n| n.fract() == 0.0 && *n >= lo as f64 && *n <= hi as f64);
+            n.ok_or_else(|| format!("maxAnnotationXfdfLength must be a whole number from {lo} to {hi}"))? as usize
+        };
+        let own = pdfcraft_ui_egui::Ownership { actor, read_only, scope, annot_sync, hide_comments_panel, replace, max_xfdf_len, ..Default::default() };
         Ok(pdfcraft_ui_egui::with_policy(own, policy_overrides(data)))
     }
 

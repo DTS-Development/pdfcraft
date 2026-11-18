@@ -364,6 +364,94 @@ fn export_errors_and_size_limit() {
     assert!(matches!(export_annotation(&src, &"x".repeat(201)), Err(DataError::Invalid(_))));
 }
 
+/// A note carrying a PDFTron `trn-attachments` value (a JSON string array of `n` base64 characters), the way the
+/// page's `annotations.apply` would store it: under `/PpmCustomData`.
+fn note_with_attachment(n: usize) -> Document {
+    let mut src = blank();
+    let idx = add(&mut src, 0, Shape::Note { at: [100.0, 500.0], icon: NoteIcon::Comment }, "hi", "att");
+    let attachments = format!("[\"{}\"]", "A".repeat(n));
+    let custom = serde_json::json!({ "trn-attachments": attachments, "iframeComment": "true" }).to_string();
+    set_extra(&mut src, 0, idx, "PpmCustomData", &custom).unwrap();
+    src
+}
+
+#[test]
+fn a_raised_limit_exports_an_annotation_with_a_big_attachment() {
+    for n in [300_000, 1_500_000] {
+        let src = note_with_attachment(n);
+        // The default limit refuses it ...
+        assert!(matches!(export_annotation(&src, "att"), Err(DataError::TooLarge { .. })), "{n}");
+        // ... and a raised one counts the escaped text (each `"` of the attachment list is `&quot;`).
+        let idx = AnnotIndex::new(&src).with_max_len(8_000_000);
+        let item = export_annotation_in(&src, &idx, "att").unwrap_or_else(|e| panic!("{n}: {e}"));
+        assert!(item.xfdf.contains("&quot;trn-attachments&quot;"), "{n}");
+        assert!(utf16_len(&item.xfdf) > n && utf16_len(&item.xfdf) > MAX_XFDF_LEN, "{n}");
+        // Between the size and the limit: too large by exactly the length the error reports.
+        let len = utf16_len(&item.xfdf);
+        let Err(DataError::TooLarge { len: got, max }) = export_annotation_in(&src, &AnnotIndex::new(&src).with_max_len(len - 1), "att") else {
+            if len - 1 < MAX_XFDF_LEN {
+                continue;
+            }
+            panic!("{n}: a limit one short of the length must refuse");
+        };
+        assert_eq!((got, max), (len, len - 1));
+    }
+}
+
+#[test]
+fn a_limit_is_held_to_the_default_and_the_ceiling() {
+    let src = note_with_attachment(300_000);
+    // Below the default is the default; above the ceiling is the ceiling.
+    assert!(matches!(export_annotation_in(&src, &AnnotIndex::new(&src).with_max_len(10), "att"), Err(DataError::TooLarge { max: MAX_XFDF_LEN, .. })));
+    let big = note_with_attachment(MAX_XFDF_LEN_CEILING);
+    assert!(matches!(
+        export_annotation_in(&big, &AnnotIndex::new(&big).with_max_len(usize::MAX), "att"),
+        Err(DataError::TooLarge { max: MAX_XFDF_LEN_CEILING, .. })
+    ));
+}
+
+#[test]
+fn the_position_exports_and_the_list_follow_the_raised_limit() {
+    let src = note_with_attachment(1_500_000);
+    let at = |s: &Document| list_annotations(s).into_iter().find(|e| e.nm.as_deref() == Some("att")).unwrap();
+    let req = [ExportRequest { page: 0, index: at(&src).index, name: "att", in_reply_to: None }];
+    let first = export_positions(&src, &req).remove(0);
+    assert!(matches!(first, Err(DataError::TooLarge { .. })), "{:?}", first.map(|x| x.xfdf.len()));
+    assert!(export_positions_with(&src, &req, 2_000_000)[0].is_ok());
+    assert!(!at(&src).exportable);
+    assert!(list_annotations_with(&src, 2_000_000).iter().any(|e| e.nm.as_deref() == Some("att") && e.exportable));
+}
+
+#[test]
+fn the_list_judges_a_kept_picture_like_the_export_without_writing_it() {
+    // A picture stamp whose export is just over the default limit: the list must agree with the export at the edge.
+    let original = noisy_png(160_000);
+    let x = stamp_xml("p", &url_of("image/png", &original));
+    let mut doc = blank();
+    assert_eq!(apply_remote(&mut doc, &[RemoteItem { annot_id: "p", author_id: "u", xfdf: &x }], &[]).failed, vec![]);
+    let len = utf16_len(&export_annotation_in(&doc, &AnnotIndex::new(&doc).with_max_len(8_000_000), "p").unwrap().xfdf);
+    assert!(len > MAX_XFDF_LEN, "the picture must make the export pass the default limit: {len}");
+    let exportable = |max: usize| list_annotations_with(&doc, max).into_iter().find(|e| e.nm.as_deref() == Some("p")).map(|e| e.exportable);
+    assert_eq!(exportable(len), Some(true));
+    assert_eq!(exportable(len - 1), Some(false));
+    assert_eq!(exportable(MAX_XFDF_LEN), Some(false));
+    assert_eq!(exportable(8_000_000), Some(true));
+}
+
+#[test]
+fn an_export_stops_writing_at_its_total_budget() {
+    let src = note_with_attachment(300_000);
+    let index = list_annotations(&src).into_iter().find(|e| e.nm.as_deref() == Some("att")).unwrap().index;
+    let req = ExportRequest { page: 0, index, name: "att", in_reply_to: None };
+    let one = utf16_len(&export_positions_with(&src, &[req.clone()], 2_000_000).remove(0).unwrap().xfdf);
+    let out = export_positions_within(&src, &[req.clone(), req.clone(), req.clone()], 2_000_000, one);
+    // The budget is checked before each one: the second still fits (one written is not over one), the third doesn't.
+    assert!(out[0].is_ok() && out[1].is_ok(), "{:?}", out.iter().map(|r| r.is_ok()).collect::<Vec<_>>());
+    assert!(matches!(out[2], Err(DataError::OverBudget { max }) if max == one));
+    let out = export_positions_within(&src, &[req.clone(), req.clone()], 2_000_000, one - 1);
+    assert!(out[0].is_ok() && matches!(out[1], Err(DataError::OverBudget { .. })));
+}
+
 #[test]
 fn full_export_is_unchanged_by_the_database_form() {
     // The user-facing XFDF export has no custom data or pictures.

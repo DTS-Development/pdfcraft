@@ -455,6 +455,9 @@ pub struct DocView {
     /// The selection whose action bar was closed by its Copy button: the bar stays hidden
     /// until the selection changes, as it does once a markup button consumes the selection.
     actions_dismissed: Option<Selection>,
+    /// The host's buttons for the selected annotation (mirrored from the app each frame) and a click on one, not yet reported.
+    pub(crate) host_popup: Arc<Vec<crate::host_popup::PopupAction>>,
+    pub(crate) host_popup_click: Option<crate::host_popup::PopupClick>,
     /// The drag in progress started a text selection: the wheel scrolls the page during it
     /// (#721), which egui's scroll area refuses while anything is dragged.
     selection_drag: bool,
@@ -757,6 +760,8 @@ impl DocView {
             find: None,
             selection: None,
             actions_dismissed: None,
+            host_popup: Arc::new(Vec::new()),
+            host_popup_click: None,
             selection_drag: false,
             clicks: 0,
             last_press_time: 0.0,
@@ -3847,6 +3852,10 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
     view.auto_scroll.paint(ui, avail);
     if unobstructed && matches!(tool, QuickTool::Select | QuickTool::ColumnSelect) {
         copy_selected |= selection_actions(ui, avail, view, info, prefs, allowed && !comments_hidden, can_copy);
+    }
+    // The host's own buttons next to the selected annotation (viewer and read-only documents too).
+    if unobstructed && matches!(tool, QuickTool::Select | QuickTool::Fill(_)) {
+        crate::host_popup::show(ui, avail, view, doc);
     }
 
     // Collect all main-page demand, including cached surfaces, for byte admission later.

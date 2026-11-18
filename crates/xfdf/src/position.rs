@@ -6,7 +6,7 @@
 //! subtype counts, links and pop-ups too), so a list taken once stays valid for the exports and
 //! the strip that follow it as long as the document isn't changed in between.
 
-use super::single::{annots_of, element_xfdf};
+use super::single::{MAX_XFDF_LEN, MAX_XFDF_LEN_CEILING, annots_of, check_element_xfdf, element_xfdf, utf16_len};
 use std::collections::HashSet;
 
 use super::*;
@@ -58,6 +58,12 @@ fn entries(doc: &Document) -> Vec<(usize, usize, ObjRef)> {
 /// Every entry of every page's `/Annots`, in order. An entry that isn't a reference to a
 /// dictionary is skipped (its index is still counted).
 pub fn list_annotations(doc: &Document) -> Vec<AnnotEntry> {
+    list_annotations_with(doc, MAX_XFDF_LEN)
+}
+
+/// [`list_annotations`] with the export limit the host raised (see [`AnnotIndex::with_max_len`]).
+pub fn list_annotations_with(doc: &Document, max_len: usize) -> Vec<AnnotEntry> {
+    let max_len = max_len.clamp(MAX_XFDF_LEN, MAX_XFDF_LEN_CEILING);
     let found = entries(doc);
     let at: HashMap<ObjRef, (usize, usize)> = found.iter().map(|&(p, i, r)| (r, (p, i))).collect();
     let mut list: Vec<AnnotEntry> = found
@@ -73,7 +79,7 @@ pub fn list_annotations(doc: &Document) -> Vec<AnnotEntry> {
                 names.entry(t).or_insert_with(|| "b".to_string());
             }
             let kind_ok = SUBTYPES.iter().any(|(s, _)| s.as_bytes() == subtype.as_bytes()) && !NOT_EXCHANGED.contains(&subtype.as_bytes());
-            let exportable = kind_ok && (d.get(b"IRT").is_none() || irt.is_some()) && element_xfdf(doc, d, page, &names, "a").is_ok();
+            let exportable = kind_ok && (d.get(b"IRT").is_none() || irt.is_some()) && check_element_xfdf(doc, d, page, &names, "a", max_len).is_ok();
             Some(AnnotEntry { page, index, subtype, nm: text_of(doc, d, b"NM"), title: text_of(doc, d, b"T"), irt, exportable })
         })
         .collect();
@@ -98,6 +104,19 @@ pub fn list_annotations(doc: &Document) -> Vec<AnnotEntry> {
 /// element's `name` (whatever the file's `/NM` is) and `in_reply_to` the `inreplyto` of a reply.
 /// The document is not changed.
 pub fn export_positions(doc: &Document, requests: &[ExportRequest]) -> Vec<Result<AnnotXfdf, DataError>> {
+    export_positions_with(doc, requests, MAX_XFDF_LEN)
+}
+
+/// [`export_positions`] with the export limit the host raised (clamped like [`AnnotIndex::with_max_len`]).
+pub fn export_positions_with(doc: &Document, requests: &[ExportRequest], max_len: usize) -> Vec<Result<AnnotXfdf, DataError>> {
+    export_positions_within(doc, requests, max_len, usize::MAX)
+}
+
+/// [`export_positions_with`] that stops writing once the XFDF written so far passes `budget` UTF-16 units in total:
+/// the requests after that are answered with [`DataError::OverBudget`] (a server that raised the per-annotation
+/// limit bounds what one call can build, whatever the file makes the annotations refer to).
+pub fn export_positions_within(doc: &Document, requests: &[ExportRequest], max_len: usize, budget: usize) -> Vec<Result<AnnotXfdf, DataError>> {
+    let max_len = max_len.clamp(MAX_XFDF_LEN, MAX_XFDF_LEN_CEILING);
     let pages = pdfcraft_model::pages(doc);
     // Each page's /Annots is read once, not once per request.
     let mut lists: HashMap<usize, Vec<Object>> = HashMap::new();
@@ -121,6 +140,7 @@ pub fn export_positions(doc: &Document, requests: &[ExportRequest]) -> Vec<Resul
         }
     }
     let mut out = Vec::with_capacity(requests.len());
+    let mut written = 0usize;
     for (r, t) in requests.iter().zip(&targets) {
         let Some(obj) = *t else {
             out.push(Err(DataError::NotFound(format!("page {} index {}", r.page + 1, r.index))));
@@ -132,7 +152,13 @@ pub fn export_positions(doc: &Document, requests: &[ExportRequest]) -> Vec<Resul
         // The parent the caller named wins over whatever the file's parent was exported as: that one
         // entry is swapped in the shared map for this call and put back, instead of copying the map.
         let swapped = d.get(b"IRT").and_then(Object::as_ref).zip(r.in_reply_to).map(|(irt, parent)| (irt, names.insert(irt, parent.to_string())));
-        out.push(element_xfdf(doc, &d, r.page, &names, r.name));
+        if written > budget {
+            out.push(Err(DataError::OverBudget { max: budget }));
+        } else {
+            let item = element_xfdf(doc, &d, r.page, &names, r.name, max_len);
+            written = written.saturating_add(item.as_ref().map_or(0, |x| utf16_len(&x.xfdf)));
+            out.push(item);
+        }
         if let Some((irt, before)) = swapped {
             match before {
                 Some(old) => names.insert(irt, old),

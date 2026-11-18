@@ -208,6 +208,58 @@ mod tests {
         assert!(matches!(&replies.borrow()[0], BytesReply::Failed { reason, .. } if reason == "not-ready"));
     }
 
+    /// A check of a shared (annotSync) document hands out the bytes, annotations with the host's own
+    /// custom data (`/PpmCustomData`) included, where a save is refused.
+    #[test]
+    fn a_check_of_a_shared_document_carries_the_custom_data_of_applied_annotations() {
+        use crate::host_annots::AnnotCommand;
+        use pdfcraft_engine::RemoteAnnot;
+        let replies: Replies = Rc::default();
+        let sink = replies.clone();
+        let mut h = Harness::builder().with_size(egui::vec2(1000.0, 700.0)).build_eframe(move |_| {
+            let mut app = PdfCraftApp::new();
+            app.ownership_inbox.lock().unwrap().push(Ownership {
+                scope: EditScope::Viewer,
+                actor: Some("alice".into()),
+                annot_sync: true,
+                ..Default::default()
+            });
+            app.startup_inbox.lock().unwrap().push(("a.pdf".into(), pdf()));
+            app.host_bytes = Some(Box::new(move |r| {
+                sink.borrow_mut().push(r.clone());
+                Ok(())
+            }));
+            app.host_save = Some(Box::new(|_, _, _, _| Ok(())));
+            app.host_annots = Some(Box::new(|_| {}));
+            app
+        });
+        for _ in 0..20 {
+            h.run_steps(2);
+        }
+        // A save is refused for a shared document; a check is not.
+        ask(&mut h, "s", BytesPurpose::Save);
+        assert!(matches!(&replies.borrow()[0], BytesReply::Failed { reason, .. } if reason == "saving is not allowed"));
+        let (_, doc) = h.state().active_ids().unwrap();
+        let json = serde_json::json!({"trn-attachments": "QUJD", "commentId": "c-1", "iframeComment": "true", "tagNo": "T-9"})
+            .to_string()
+            .replace('"', "&quot;");
+        let xfdf = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" ?><xfdf xmlns="http://ns.adobe.com/xfdf/" xml:space="preserve"><annots><square page="0" name="n1" rect="10,10,60,60" title="Kim" flags="print"><trn-custom-data bytes="{json}"/></square></annots></xfdf>"#
+        );
+        h.state()
+            .annot_inbox
+            .lock()
+            .unwrap()
+            .push(AnnotCommand::Apply { upserts: vec![RemoteAnnot { annot_id: "n1".into(), author_id: "u-kim".into(), xfdf }], deletes: vec![] });
+        h.run_steps(3);
+        assert!(h.state().session.get(doc).unwrap().annot_position("n1").is_some(), "applied");
+        ask(&mut h, "k", BytesPurpose::Check);
+        let replies = replies.borrow();
+        let BytesReply::Bytes { bytes, .. } = &replies[1] else { panic!("{:?}", replies[1]) };
+        let text = String::from_utf8_lossy(bytes);
+        assert!(text.contains("PpmCustomData") && text.contains("trn-attachments") && text.contains("c-1"), "custom data is in the file");
+    }
+
     #[test]
     fn a_viewer_never_reports_pages_changed() {
         let (mut h, replies) = app(EditScope::Viewer, true);
