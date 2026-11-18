@@ -1141,6 +1141,37 @@ mod tests {
         (h, inbox)
     }
 
+    /// A user's click selects an annotation in a read-only (viewer) shared document, and the page hears
+    /// `annots-selected`: the host's popup buttons hang on this.
+    #[test]
+    fn a_click_selects_an_annotation_of_a_read_only_shared_document_and_the_page_hears_it() {
+        let heard: std::rc::Rc<std::cell::RefCell<Vec<AnnotEvent>>> = Default::default();
+        let sink = heard.clone();
+        let mut app = PdfCraftApp::new();
+        app.ownership_inbox.lock().unwrap().push(pdfcraft_engine::Ownership { read_only: true, ..share() });
+        app.startup_inbox.lock().unwrap().push(("a.pdf".into(), pdf()));
+        app.host_annots = Some(Box::new(move |e| sink.borrow_mut().push(e.clone())));
+        let inbox = app.annot_inbox.clone();
+        let mut h = egui_kittest::Harness::builder().build_eframe(move |_| app);
+        for _ in 0..20 {
+            h.run_steps(2);
+        }
+        assert!(h.state().session.get(h.state().views[0].id).unwrap().ownership().read_only);
+        let xfdf = r##"<?xml version="1.0" encoding="UTF-8" ?><xfdf xmlns="http://ns.adobe.com/xfdf/" xml:space="preserve"><annots><square page="0" name="big" rect="5,5,195,295" title="Kim" flags="print" interior-color="#FF0000"/></annots></xfdf>"##;
+        let item = RemoteAnnot { annot_id: "big".into(), author_id: "u-kim".into(), xfdf: xfdf.into() };
+        inbox.lock().unwrap().push(AnnotCommand::Reset { seq: 0, items: vec![item] });
+        h.run_steps(4);
+        let center = h.state().views[0].viewport_rect().center();
+        h.hover_at(center);
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton { pos: center, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+            h.run_steps(2);
+        }
+        h.run_steps(3);
+        let heard = heard.borrow();
+        assert!(heard.contains(&AnnotEvent::Selected(Some("big".into()))), "selected by the click in a read-only document: {heard:?}");
+    }
+
     /// A read-only (viewer-only) shared document shows other people's annotations as they come.
     #[test]
     fn a_read_only_shared_document_takes_the_remote_annotations() {

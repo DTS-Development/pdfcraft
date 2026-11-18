@@ -26,6 +26,10 @@ pub struct CompareCommand {
     pub ownership: pdfcraft_engine::Ownership,
     /// How the overlay is inked (`overlay` of the message); the viewer's colours when none.
     pub overlay: Option<pdfcraft_engine::compare::OverlayStyle>,
+    /// `view` of the message: open on the overlay instead of side by side.
+    pub view_overlay: bool,
+    /// `lockView` of the message: the user can't switch the view.
+    pub lock_view: bool,
 }
 
 /// Read the host's `overlay` object: `colorA` (the old file's ink), `colorB` (the new file's ink),
@@ -78,6 +82,10 @@ impl PdfCraftApp {
 
     /// PPM: tell the host when the view or the overlay build changes.
     fn report_compare_view(&mut self) {
+        // A locked view can't be fixed by the user's hand: an overlay that failed to build goes back to side by side.
+        if self.compare.as_ref().is_some_and(|c| c.ppm && c.lock_view && c.overlay_failed && c.overlay_shown) {
+            self.show_overlay(false);
+        }
         let Some((id, sent)) = self.compare_view_sent.as_ref() else { return };
         let Some(c) = self.compare.as_ref().filter(|c| c.ppm) else { return };
         let now = (c.overlay_shown, c.overlay_job.is_some());
@@ -106,11 +114,17 @@ impl PdfCraftApp {
                 self.fail_compare(&command.id, "busy: this window already compares");
             } else {
                 self.compare_taken = true;
-                match self.start_host_compare(command.old, command.new, command.ownership, command.overlay) {
+                match self.start_host_compare(command.old, command.new, command.ownership, command.overlay, (command.view_overlay, command.lock_view))
+                {
                     Ok((replaced, inserted, deleted, visual)) => {
                         self.emit_compare(CompareEvent::Done { id: command.id.clone(), replaced, inserted, deleted, visual });
                         // The host starts from side by side, so only a change from that is told.
-                        self.compare_view_sent = Some((command.id, (false, false)));
+                        // An overlay asked for at the start is told at once as building, so a quick build can't hide it.
+                        let started = self.compare.as_ref().filter(|c| c.ppm && c.overlay_shown).map(|c| (true, c.overlay_job.is_some()));
+                        if let Some((overlay, building)) = started.filter(|(_, building)| *building) {
+                            self.emit_compare(CompareEvent::View { id: command.id.clone(), overlay, building });
+                        }
+                        self.compare_view_sent = Some((command.id, started.filter(|(_, building)| *building).unwrap_or((false, false))));
                     }
                     Err(error) => self.fail_compare(&command.id, &error),
                 }
@@ -126,6 +140,7 @@ impl PdfCraftApp {
         new: (String, Vec<u8>),
         ownership: pdfcraft_engine::Ownership,
         overlay: Option<pdfcraft_engine::compare::OverlayStyle>,
+        (view_overlay, lock_view): (bool, bool),
     ) -> Result<(usize, usize, usize, usize), String> {
         // A prompt or a host file still on its way in is not ours to take over.
         if self.password_prompt.is_some() || self.annot_open_waiting || self.host_open_pending() {
@@ -161,6 +176,13 @@ impl PdfCraftApp {
         self.run_compare();
         if let (Some(style), Some(c)) = (overlay, self.compare.as_mut()) {
             c.overlay_style = style;
+        }
+        if let Some(c) = self.compare.as_mut() {
+            c.lock_view = lock_view;
+        }
+        if view_overlay {
+            // The same path as the user's Overlay button: the build starts and `View` reports it.
+            self.show_overlay(true);
         }
         let Some(s) = self.compare.as_ref() else { return Err("the comparison failed".into()) };
         Ok((s.result.count(Kind::Replaced), s.result.count(Kind::Inserted), s.result.count(Kind::Deleted), s.visual.len()))
@@ -215,6 +237,8 @@ mod tests {
             new: ("new.pdf".into(), text_pdf("Delivery within three days. Returns accepted for a week.")),
             ownership: Default::default(),
             overlay: None,
+            view_overlay: false,
+            lock_view: false,
         }
     }
 
@@ -570,6 +594,63 @@ mod tests {
         h.run_steps(2);
         let events = events.borrow();
         assert_eq!(events[1..], [view(true, true), view(true, false), view(false, false)], "{events:?}");
+    }
+
+    /// A hosted ppm window whose events are collected, with the compare request `c` sent.
+    fn ppm_with(c: CompareCommand) -> (Harness<'static, PdfCraftApp>, Rc<RefCell<Vec<CompareEvent>>>) {
+        let events: Rc<RefCell<Vec<CompareEvent>>> = Rc::default();
+        let sink = events.clone();
+        let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_| {
+            let mut app = PdfCraftApp::new();
+            app.set_option("language", "en").unwrap();
+            app.host_lock = true;
+            app.host_save = Some(Box::new(|_, _, _, _| Ok(())));
+            app.host_compare = Some(Box::new(move |e| sink.borrow_mut().push(e.clone())));
+            app
+        });
+        h.run_steps(3);
+        send(&mut h, c);
+        (h, events)
+    }
+
+    #[test]
+    fn the_host_can_open_the_comparison_on_the_overlay_and_is_told_it_builds() {
+        let (mut h, events) = ppm_with(CompareCommand { view_overlay: true, ..command("c1") });
+        h.run_steps(8);
+        assert!(h.state().compare.as_ref().unwrap().overlay_shown);
+        let view = |overlay, building| CompareEvent::View { id: "c1".into(), overlay, building };
+        let events = events.borrow();
+        assert!(matches!(events[0], CompareEvent::Done { .. }));
+        assert_eq!(events[1..], [view(true, true), view(true, false)], "{events:?}");
+    }
+
+    #[test]
+    fn a_locked_view_ignores_the_switch_buttons_and_an_open_one_does_not() {
+        let (mut h, _) = ppm_with(CompareCommand { lock_view: true, ..command("c1") });
+        h.run_steps(2);
+        h.get_by_label("Overlay").click();
+        h.run_steps(4);
+        assert!(!h.state().compare.as_ref().unwrap().overlay_shown, "locked on side by side");
+        let (mut h, _) = ppm_with(command("c2"));
+        h.run_steps(2);
+        h.get_by_label("Overlay").click();
+        h.run_steps(4);
+        assert!(h.state().compare.as_ref().unwrap().overlay_shown, "unlocked: the button switches");
+    }
+
+    #[test]
+    fn a_locked_overlay_that_fails_to_build_goes_back_to_side_by_side_and_the_host_hears_it() {
+        let (mut h, events) = ppm_with(CompareCommand { view_overlay: true, lock_view: true, ..command("c1") });
+        h.run_steps(1);
+        // The build fails as it would on a broken page pair.
+        let c = h.state_mut().compare.as_mut().unwrap();
+        c.overlay_job = None;
+        c.overlay_failed = true;
+        h.run_steps(4);
+        let c = h.state().compare.as_ref().unwrap();
+        assert!(!c.overlay_shown && c.overlay_failed);
+        let events = events.borrow();
+        assert_eq!(events.last(), Some(&CompareEvent::View { id: "c1".into(), overlay: false, building: false }), "{events:?}");
     }
 
     #[test]

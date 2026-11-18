@@ -303,10 +303,12 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 /// - `pdfcraft:stamp-armed` `{ id }`, `pdfcraft:stamp-placed` `{ id, page }`,
 ///   `pdfcraft:stamp-cancelled` `{ id }` and `pdfcraft:stamp-failed` `{ id, error }` (to the
 ///   parent) report how a stamp request went.
-/// - `pdfcraft:compare` (from the parent): `{ id, old: { name, bytes }, new: { name, bytes }, mode?, policy?, overlay? }`
+/// - `pdfcraft:compare` (from the parent): `{ id, old: { name, bytes }, new: { name, bytes }, mode?, policy?, overlay?, view?, lockView? }`
 ///   opens the old file in a background tab and the new file as the active one, then runs the
 ///   Compare Files comparison. `overlay` is `{ colorA?, colorB?, opacity? }`: the ink of the old and the new
-///   file in the overlay (`#rgb`/`#rrggbb`) and how strong it is (0 to 1); a value that can't be read fails the compare. A window compares once; `pdfcraft:compare-done`
+///   file in the overlay (`#rgb`/`#rrggbb`) and how strong it is (0 to 1); a value that can't be read fails the compare.
+///   `view` (`"side"` default, or `"overlay"`) is the view the comparison opens on (an overlay reports `compare-view` with `building`
+///   as usual); `lockView: true` takes the switch between the two away from the user (an overlay that fails to build goes back to side by side). A window compares once; `pdfcraft:compare-done`
 ///   `{ id, replaced, inserted, deleted, visual }` or `pdfcraft:compare-failed` `{ id, error }`
 ///   (to the parent) report the outcome. In this mode the Compare panel has no Mark as
 ///   comments or Report.
@@ -877,7 +879,28 @@ mod host {
             let value = serde_json::from_str::<serde_json::Value>(&json).map_err(|e| e.to_string())?;
             Some(pdfcraft_ui_egui::overlay_style_from_json(&value)?)
         };
-        Ok(pdfcraft_ui_egui::CompareCommand { id, old: compare_file(data, "old")?, new: compare_file(data, "new")?, ownership, overlay })
+        // `view` is "side" or "overlay" (anything else fails the compare); `lockView` must be a boolean.
+        let view_overlay = match js_sys::Reflect::get(data, &JsValue::from_str("view")).unwrap_or(JsValue::UNDEFINED) {
+            v if v.is_undefined() || v.is_null() => false,
+            v => match v.as_string().as_deref() {
+                Some("overlay") => true,
+                Some("side") => false,
+                _ => return Err("view must be \"side\" or \"overlay\"".into()),
+            },
+        };
+        let lock_view = match js_sys::Reflect::get(data, &JsValue::from_str("lockView")).unwrap_or(JsValue::UNDEFINED) {
+            v if v.is_undefined() || v.is_null() => false,
+            v => v.as_bool().ok_or("lockView must be a boolean")?,
+        };
+        Ok(pdfcraft_ui_egui::CompareCommand {
+            id,
+            old: compare_file(data, "old")?,
+            new: compare_file(data, "new")?,
+            ownership,
+            overlay,
+            view_overlay,
+            lock_view,
+        })
     }
 
     /// Read a `pdfcraft:stamp-add` message; the error is what the parent is told.
