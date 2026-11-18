@@ -283,7 +283,6 @@ fn visible_rows(top: f32, clip_min: f32, clip_max: f32, row_h: f32, n: usize) ->
 fn ppm_panel(ui: &mut egui::Ui, t: &Tokens, s: &CompareState) -> Option<PanelAction> {
     let c = &s.result;
     let mut action = None;
-    ui.label(egui::RichText::new(tl_ctx!(ppm::CTX, "Change list")).font(theme::semibold(14.0)));
     ui.label(crate::i18n::fmt(tl_ctx!(ppm::CTX, "{n} differences"), &[("n", &c.changes.len().to_string())]));
     if c.identical() {
         ui.label(tl!("No differences in the text."));
@@ -323,7 +322,7 @@ fn ppm_panel(ui: &mut egui::Ui, t: &Tokens, s: &CompareState) -> Option<PanelAct
                     String::new()
                 };
                 ui.add(egui::Label::new(egui::RichText::new(head).small().color(t.text_muted)).truncate().selectable(false));
-                ui.add(egui::Label::new(egui::RichText::new(format!("{}  {kind}", tl_ctx!(ppm::CTX, "Change"))).strong()).truncate().selectable(false));
+                ui.add(egui::Label::new(egui::RichText::new(kind).strong()).truncate().selectable(false));
                 // "Old" is the current file's side and "New" the chosen file's, as in the viewer.
                 let side = |ui: &mut egui::Ui, show: bool, mark: &str, label: &str, text: &str| {
                     let line = if show { format!("{label} {mark}{}: {text}", words(text)) } else { String::new() };

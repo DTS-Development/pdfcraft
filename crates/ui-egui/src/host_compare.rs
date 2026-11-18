@@ -677,12 +677,12 @@ mod tests {
         use egui_kittest::kittest::Queryable;
         let mut h = ppm_compared(1400.0);
         h.run_steps(2);
-        let rows: Vec<_> = h.get_all_by_label_contains("Change  ").collect();
+        let rows: Vec<_> = h.get_all_by_label_contains("Old -").collect();
         assert!(rows.len() >= 2, "two changes, two rows");
         rows[1].click();
         h.run_steps(3);
         assert_eq!(h.state().compare.as_ref().unwrap().selected, Some(1));
-        let rows: Vec<_> = h.get_all_by_label_contains("Change  ").collect();
+        let rows: Vec<_> = h.get_all_by_label_contains("Old -").collect();
         rows[0].click();
         h.run_steps(3);
         assert_eq!(h.state().compare.as_ref().unwrap().selected, Some(0));
