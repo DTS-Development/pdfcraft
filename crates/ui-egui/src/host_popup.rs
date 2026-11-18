@@ -1,6 +1,7 @@
 //! The host's buttons on the bar of a selected annotation (`pdfcraft:annotation-popup-actions`).
 //!
-//! The host sets a list of `{ id, label, icon }` (at most 8). While an annotation of a shared document
+//! The host sets a list of `{ id, label, icon, closeOnClick? }` (at most 8). With `closeOnClick: true` the annotation is
+//! deselected (the bar goes) right after the click is reported. While an annotation of a shared document
 //! (`annotSync`) is selected, a small bar with one icon button per action floats next to it; a click tells
 //! the page `pdfcraft:annotation-popup-action` with the action's `id`, the annotation's id, its page (from 0)
 //! and its place on the page as shown (the same space as `sign-box-selected` and `goto`).
@@ -30,6 +31,8 @@ pub struct PopupAction {
     pub label: String,
     /// The name of one of the embedded icons (`icons::exists`).
     pub icon: String,
+    /// Deselect the annotation after the click is reported (the bar goes away).
+    pub close_on_click: bool,
 }
 
 /// A click waiting for the app to report it: the action's id and the annotation's id (its position can move
@@ -38,6 +41,7 @@ pub struct PopupAction {
 pub(crate) struct PopupClick {
     pub id: String,
     pub name: String,
+    pub close: bool,
 }
 
 /// The `actions` of a `pdfcraft:annotation-popup-actions` message: `null`, missing or `[]` take the buttons away.
@@ -51,7 +55,7 @@ pub fn parse_actions(value: Option<&serde_json::Value>) -> Result<Vec<PopupActio
     let mut out: Vec<PopupAction> = Vec::with_capacity(list.len());
     for (i, item) in list.iter().enumerate() {
         let obj = item.as_object().ok_or_else(|| format!("actions[{i}] must be an object"))?;
-        if let Some(key) = obj.keys().find(|k| !matches!(k.as_str(), "id" | "label" | "icon")) {
+        if let Some(key) = obj.keys().find(|k| !matches!(k.as_str(), "id" | "label" | "icon" | "closeOnClick")) {
             return Err(format!("actions[{i}]: unknown field {key}"));
         }
         let text = |key: &str| obj.get(key).and_then(|v| v.as_str()).ok_or_else(|| format!("actions[{i}].{key} must be a string"));
@@ -66,13 +70,17 @@ pub fn parse_actions(value: Option<&serde_json::Value>) -> Result<Vec<PopupActio
         if units == 0 || units > MAX_LABEL_UNITS || label.chars().any(char::is_control) || label != label.trim() {
             return Err(format!("actions[{i}].label must be 1 to {MAX_LABEL_UNITS} characters, without control characters or outer spaces"));
         }
+        let close_on_click = match obj.get("closeOnClick") {
+            None => false,
+            Some(v) => v.as_bool().ok_or_else(|| format!("actions[{i}].closeOnClick must be a boolean"))?,
+        };
         if !crate::icons::exists(icon) {
             return Err(format!("actions[{i}].icon: unknown icon {icon}"));
         }
         if out.iter().any(|a| a.id == id) {
             return Err(format!("actions[{i}].id {id} is used twice"));
         }
-        out.push(PopupAction { id: id.into(), label: label.into(), icon: icon.into() });
+        out.push(PopupAction { id: id.into(), label: label.into(), icon: icon.into(), close_on_click });
     }
     Ok(out)
 }
@@ -108,16 +116,16 @@ pub(crate) fn show(ui: &mut egui::Ui, viewport: Rect, view: &mut DocView, doc: &
             ui.horizontal(|ui| {
                 for action in actions.iter() {
                     if crate::icons::button(ui, &action.icon, 30.0, false, &action.label).clicked() {
-                        chosen = Some(action.id.clone());
+                        chosen = Some((action.id.clone(), action.close_on_click));
                     }
                 }
             });
         });
     });
-    if let Some(id) = chosen
+    if let Some((id, close)) = chosen
         && let Some(name) = doc.annot_name_at(page, index)
     {
-        view.host_popup_click = Some(PopupClick { id, name });
+        view.host_popup_click = Some(PopupClick { id, name, close });
     }
 }
 
@@ -142,7 +150,7 @@ mod tests {
         let list =
             ok(json!([{"id": "open-sheet", "label": "코멘트", "icon": "message-square"}, {"id": "go:1.a_b", "label": "Locate", "icon": "compass"}]));
         assert_eq!(list.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["open-sheet", "go:1.a_b"]);
-        assert_eq!(list[0], PopupAction { id: "open-sheet".into(), label: "코멘트".into(), icon: "message-square".into() });
+        assert_eq!(list[0], PopupAction { id: "open-sheet".into(), label: "코멘트".into(), icon: "message-square".into(), close_on_click: false });
     }
 
     #[test]

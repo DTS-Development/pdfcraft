@@ -302,13 +302,16 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   user creates from now on (`/PpmCustomData`, so it is saved and goes out as `<trn-custom-data>` in `annots-changed`),
 ///   until the next message; `null` or `{}` stops. Not on sign boxes, signatures, copied pages' comments, or what the
 ///   server applies. A value the comment already has is kept. Needs a user (`actor`), like marking comments as theirs.
-/// - `pdfcraft:annotation-popup-actions` (from the parent): `{ actions }`, a list of `{ id, label, icon }` (at most 8; `id` 1 to
-///   64 characters of letters, digits and `-_.:`, no two alike; `label` 1 to 20 characters, the button's tooltip and name; `icon`
-///   the name of one of the embedded icons), puts one icon button each on a bar that floats next to the selected annotation of a
+/// - `pdfcraft:annotation-popup-actions` (from the parent): `{ actions }`, a list of `{ id, label, icon, closeOnClick? }` (at most 8;
+///   `id` 1 to 64 characters of letters, digits and `-_.:`, no two alike; `label` 1 to 20 characters, the button's tooltip and name; `icon`
+///   the name of one of the embedded icons; `closeOnClick: true` deselects the annotation right after the click is reported, so
+///   the bar goes away; an editor without it refuses the whole list as an unknown field), puts one icon button each on a bar that floats next to the selected annotation of a
 ///   document shared with the page (`annotSync`), for every document, also those opened later, until it is sent again. `null`,
 ///   missing or `[]` takes the bar away; a list that can't be used does too and is logged. Sign boxes and replies have no bar;
 ///   signatures do. It is there in viewer and `readOnly` documents too. A new list shows in an open bar at once. A click goes
-///   to the parent as `pdfcraft:annotation-popup-action` `{ id, annotId, page, rect }` (`page` from 0, `rect` `{ x, y, width,
+///   to the parent as `pdfcraft:annotation-popup-action` `{ id, annotId, subject?, page, rect }` (`subject` is the annotation's
+///   `/Subj`, else its XFDF tag name such as `square`, cut to 100 UTF-16 units: the same value as an `annots-changed` upsert's
+///   `subtype`; absent for a kind with no XFDF form; `page` from 0, `rect` `{ x, y, width,
 ///   height }` in points on the page as shown, top-left origin, like `sign-box-selected`).
 /// - `pdfcraft:stamp-armed` `{ id }`, `pdfcraft:stamp-placed` `{ id, page }`,
 ///   `pdfcraft:stamp-cancelled` `{ id }` and `pdfcraft:stamp-failed` `{ id, error }` (to the

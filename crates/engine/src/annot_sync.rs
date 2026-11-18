@@ -556,6 +556,13 @@ impl Document {
         at
     }
 
+    /// The subject of the annotation named `nm`, as an `annots-changed` upsert's `subtype` has it (`/Subj`, else the XFDF tag).
+    pub fn annot_subject(&self, nm: &str) -> Option<String> {
+        let editor = self.editor.as_ref()?;
+        let (page, index) = self.annot_position(nm)?;
+        pdfcraft_xfdf::annotation_subject(&editor.cos, &dict_at(&editor.cos, page, index)?)
+    }
+
     /// The `/NM` of the annotation at `(page, index)`.
     pub fn annot_name_at(&self, page: usize, index: usize) -> Option<String> {
         let editor = self.editor.as_ref()?;

@@ -240,17 +240,28 @@ fn element_xfdf_in(doc: &Document, d: &Dict, page: usize, names: &HashMap<ObjRef
     if len > max_len {
         return Err(DataError::TooLarge { len, max: max_len });
     }
+    Ok(AnnotXfdf { annot_id: nm.into(), page, kind: subject_kind(doc, d, tag), xfdf })
+}
+
+/// The annotation's subject as the host's database stores it: `/Subj`, else the XFDF tag, cut to 100 UTF-16 units
+/// (the server counts those, not characters).
+fn subject_kind(doc: &Document, d: &Dict, tag: &str) -> String {
     let kind = text_of(doc, d, b"Subj").filter(|s| !s.trim().is_empty()).unwrap_or_else(|| tag.to_string());
-    // The server counts UTF-16 units, not characters.
     let mut kept = 0;
-    let kind: String = kind
-        .chars()
+    kind.chars()
         .take_while(|c| {
             kept += c.len_utf16();
             kept <= 100
         })
-        .collect();
-    Ok(AnnotXfdf { annot_id: nm.into(), page, kind, xfdf })
+        .collect()
+}
+
+/// The subject (`kind`) of the annotation dictionary `d`, the same value as `AnnotXfdf::kind` and the
+/// `subtype` of an `annots-changed` upsert; `None` for a kind of annotation that has no XFDF form.
+pub fn annotation_subject(doc: &Document, d: &Dict) -> Option<String> {
+    let sub = d.name(b"Subtype")?;
+    let (_, tag) = SUBTYPES.iter().find(|(s, _)| s.as_bytes() == sub)?;
+    Some(subject_kind(doc, d, tag))
 }
 
 /// Bytes of the original picture file a stamp keeps, if it keeps one.

@@ -44,7 +44,7 @@ pub enum AnnotEvent {
     SignBoxSelected { annot_id: String, role: String, signer: Option<String>, page: usize, rect: [f64; 4], from_api: bool },
     /// A button the host put on the selected annotation's bar was clicked: the action's `id`, the annotation, its page (from 0)
     /// and its place on the page as shown (`[x, y, width, height]`, like `SignBoxSelected`).
-    PopupAction { id: String, annot_id: String, page: usize, rect: [f64; 4] },
+    PopupAction { id: String, annot_id: String, subject: Option<String>, page: usize, rect: [f64; 4] },
 }
 
 /// Requests from the host, drained every frame once the shared document is open.
@@ -167,10 +167,13 @@ impl AnnotEvent {
                 }
                 vec![("pdfcraft:sign-box-selected", msg)]
             }
-            Self::PopupAction { id, annot_id, page, rect } => vec![(
-                "pdfcraft:annotation-popup-action",
-                json!({ "id": id, "annotId": annot_id, "page": page, "rect": { "x": rect[0], "y": rect[1], "width": rect[2], "height": rect[3] } }),
-            )],
+            Self::PopupAction { id, annot_id, subject, page, rect } => {
+                let mut msg = json!({ "id": id, "annotId": annot_id, "page": page, "rect": { "x": rect[0], "y": rect[1], "width": rect[2], "height": rect[3] } });
+                if let (Some(subject), Some(m)) = (subject, msg.as_object_mut()) {
+                    m.insert("subject".into(), json!(subject));
+                }
+                vec![("pdfcraft:annotation-popup-action", msg)]
+            }
         }
     }
 }
@@ -448,11 +451,18 @@ impl PdfCraftApp {
         let (Some(info), Some(a)) = (state.info.pages.get(page), state.info.annotations.iter().find(|a| a.page == page && a.index == index)) else {
             return;
         };
+        let subject = state.annot_subject(&click.name);
         let annot_id = click.name;
         // Hundredths of a point: the rectangle is stored in f32, and the page doesn't need its noise.
         let rect = user_rect_to_view(info, a.rect.map(f64::from)).map(|v| (v * 100.0).round() / 100.0);
         if let Some(report) = self.host_annots.as_ref() {
-            report(&AnnotEvent::PopupAction { id: click.id, annot_id, page, rect });
+            report(&AnnotEvent::PopupAction { id: click.id, annot_id, subject, page, rect });
+        }
+        // `closeOnClick`: the selection goes after the action was told (the page hears the action, then `annots-selected` null).
+        if click.close
+            && let Some(v) = self.views.iter_mut().find(|v| v.id == doc)
+        {
+            v.comments.selected = None;
         }
     }
 
@@ -1198,7 +1208,7 @@ mod tests {
     }
 
     fn popup_actions(list: &[(&str, &str, &str)]) -> crate::StampCommand {
-        let actions = list.iter().map(|(id, label, icon)| crate::PopupAction { id: (*id).into(), label: (*label).into(), icon: (*icon).into() }).collect();
+        let actions = list.iter().map(|(id, label, icon)| crate::PopupAction { id: (*id).into(), label: (*label).into(), icon: (*icon).into(), close_on_click: false }).collect();
         crate::StampCommand::AnnotationPopupActions { actions }
     }
 
@@ -1244,7 +1254,7 @@ mod tests {
         h.get_by_label("Go there").click();
         h.run_steps(3);
         let click = heard.borrow().iter().find_map(|e| match e {
-            AnnotEvent::PopupAction { id, annot_id, page, rect } => Some((id.clone(), annot_id.clone(), *page, *rect)),
+            AnnotEvent::PopupAction { id, annot_id, page, rect, .. } => Some((id.clone(), annot_id.clone(), *page, *rect)),
             _ => None,
         });
         let (id, annot_id, page, rect) = click.expect("the click is reported");
@@ -1253,7 +1263,8 @@ mod tests {
         for (got, want) in rect.iter().zip([20.0, 160.0, 100.0, 100.0]) {
             assert!((got - want).abs() < 0.5, "{rect:?}");
         }
-        let json = AnnotEvent::PopupAction { id, annot_id, page, rect }.to_messages();
+        let json = AnnotEvent::PopupAction { id, annot_id, subject: None, page, rect }.to_messages();
+        assert!(json[0].1.get("subject").is_none());
         assert_eq!(json[0].0, "pdfcraft:annotation-popup-action");
         assert_eq!(json[0].1["rect"]["width"], 100.0);
 
@@ -1269,6 +1280,60 @@ mod tests {
         stamps.lock().unwrap().push(crate::StampCommand::AnnotationPopupActions { actions: Vec::new() });
         h.run_steps(3);
         assert!(h.query_by_label("Go there").is_none());
+    }
+
+    /// `closeOnClick` deselects after the click is told (action first, then the selection going); without it the
+    /// selection stays. The event carries the annotation's subject: its `/Subj`, else the XFDF tag name.
+    #[test]
+    fn close_on_click_deselects_after_the_action_and_the_event_has_the_subject() {
+        let heard: std::rc::Rc<std::cell::RefCell<Vec<AnnotEvent>>> = Default::default();
+        let sink = heard.clone();
+        let mut app = PdfCraftApp::new();
+        app.ownership_inbox.lock().unwrap().push(pdfcraft_engine::Ownership { read_only: true, ..share() });
+        app.startup_inbox.lock().unwrap().push(("a.pdf".into(), pdf()));
+        app.host_annots = Some(Box::new(move |e| sink.borrow_mut().push(e.clone())));
+        let inbox = app.annot_inbox.clone();
+        let mut h = egui_kittest::Harness::builder().build_eframe(move |_| app);
+        for _ in 0..20 {
+            h.run_steps(2);
+        }
+        let item = |name: &str, tag: &str, subject: &str| RemoteAnnot {
+            annot_id: name.into(),
+            author_id: "u-kim".into(),
+            xfdf: format!(
+                r##"<?xml version="1.0" encoding="UTF-8" ?><xfdf xmlns="http://ns.adobe.com/xfdf/" xml:space="preserve"><annots><{tag} page="0" name="{name}" rect="20,40,120,140" title="Kim" flags="print"{subject}/></annots></xfdf>"##
+            ),
+        };
+        inbox.lock().unwrap().push(AnnotCommand::Reset { seq: 0, items: vec![item("named", "square", r#" subject="Rectangle""#), item("bare", "circle", "")] });
+        h.run_steps(3);
+        let click = |h: &mut egui_kittest::Harness<'_, PdfCraftApp>, name: &str, close: bool| {
+            inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: name.into() });
+            h.run_steps(3);
+            h.state_mut().views[0].host_popup_click = Some(crate::host_popup::PopupClick { id: "go".into(), name: name.into(), close });
+            h.run_steps(4);
+        };
+        click(&mut h, "named", false);
+        assert!(h.state().views[0].comments.selected.is_some(), "without closeOnClick the annotation stays selected");
+        heard.borrow_mut().clear();
+        click(&mut h, "bare", true);
+        assert!(h.state().views[0].comments.selected.is_none(), "closeOnClick deselects");
+        let heard = heard.borrow();
+        let at = |f: &dyn Fn(&AnnotEvent) -> bool| heard.iter().position(|e| f(e));
+        let action = at(&|e| matches!(e, AnnotEvent::PopupAction { annot_id, .. } if annot_id == "bare")).expect("the action is told");
+        let gone = at(&|e| matches!(e, AnnotEvent::Selected(None))).expect("the deselection is told");
+        assert!(action < gone, "action first, then the selection going: {heard:?}");
+        let subjects: Vec<_> = heard.iter().filter_map(|e| if let AnnotEvent::PopupAction { subject, .. } = e { subject.clone() } else { None }).collect();
+        assert_eq!(subjects, ["circle"], "no /Subj: the XFDF tag name, as the upserts' subtype has it");
+    }
+
+    #[test]
+    fn the_event_has_the_subject_only_when_there_is_one_and_closeonclick_is_read_strictly() {
+        let with = AnnotEvent::PopupAction { id: "a".into(), annot_id: "n".into(), subject: Some("Rectangle".into()), page: 0, rect: [0.0; 4] }.to_messages();
+        assert_eq!(with[0].1["subject"], "Rectangle");
+        let list = |v: serde_json::Value| crate::host_popup::parse_actions(Some(&v));
+        let on = list(serde_json::json!([{"id": "a", "label": "A", "icon": "compass", "closeOnClick": true}])).unwrap();
+        assert!(on[0].close_on_click);
+        assert!(list(serde_json::json!([{"id": "a", "label": "A", "icon": "compass", "closeOnClick": "yes"}])).is_err());
     }
 
     /// A reply is part of its comment: it has no bar of its own.
@@ -1359,14 +1424,14 @@ mod tests {
         inbox.lock().unwrap().push(AnnotCommand::Reset { seq: 0, items: vec![square("first"), square("second")] });
         h.run_steps(3);
         // The click on "first" is recorded, then the server deletes "first" before the tick that reports it.
-        h.state_mut().views[0].host_popup_click = Some(crate::host_popup::PopupClick { id: "go".into(), name: "first".into() });
+        h.state_mut().views[0].host_popup_click = Some(crate::host_popup::PopupClick { id: "go".into(), name: "first".into(), close: false });
         inbox.lock().unwrap().push(AnnotCommand::Apply { upserts: vec![], deletes: vec!["first".into()] });
         h.run_steps(3);
         let spoken: Vec<String> = heard.borrow().iter().filter_map(|e| if let AnnotEvent::PopupAction { annot_id, .. } = e { Some(annot_id.clone()) } else { None }).collect();
         assert!(spoken.is_empty(), "a click on a deleted annotation is dropped, not told for the one that took its place: {spoken:?}");
 
         // On an annotation that is still there, the click is told with where it is now.
-        h.state_mut().views[0].host_popup_click = Some(crate::host_popup::PopupClick { id: "go".into(), name: "second".into() });
+        h.state_mut().views[0].host_popup_click = Some(crate::host_popup::PopupClick { id: "go".into(), name: "second".into(), close: false });
         h.run_steps(3);
         let spoken: Vec<String> = heard.borrow().iter().filter_map(|e| if let AnnotEvent::PopupAction { annot_id, .. } = e { Some(annot_id.clone()) } else { None }).collect();
         assert_eq!(spoken, ["second"]);
