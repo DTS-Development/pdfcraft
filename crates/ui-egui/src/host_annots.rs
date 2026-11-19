@@ -315,7 +315,7 @@ impl PdfCraftApp {
                 AnnotCommand::Select { annot_id, scroll, seq } => {
                     self.run_annot_ops(doc, std::mem::take(&mut ops));
                     // A `goto` that came after this select is the later wish: the selection is made, the view is left to it.
-                    self.select_annot(doc, &annot_id, scroll && seq.0 >= self.goto_seq);
+                    self.select_annot(doc, &annot_id, scroll && seq.not_before(self.goto_seq));
                 }
             }
         }
@@ -1249,7 +1249,7 @@ mod tests {
                 r##"<?xml version="1.0" encoding="UTF-8" ?><xfdf xmlns="http://ns.adobe.com/xfdf/" xml:space="preserve"><annots><square page="{page}" name="{name}" rect="{rect}" title="Kim" flags="print"/></annots></xfdf>"##
             ),
         };
-        inbox.lock().unwrap().push(AnnotCommand::Reset { seq: 0, items: vec![item("top", 0, "20,230,80,280"), item("low", 2, "60,20,140,50"), item("low2", 2, "60,200,140,230")] });
+        inbox.lock().unwrap().push(AnnotCommand::Reset { seq: 0, items: vec![item("top", 0, "20,230,80,280"), item("low", 2, "60,20,140,50"), item("low2", 2, "60,200,140,230"), item("p3top", 2, "20,250,80,290")] });
         h.run_steps(4);
         (h, inbox)
     }
@@ -1328,26 +1328,53 @@ mod tests {
         goto_top(&h);
         h.run_steps(6);
         let top = scroll_y(&h);
-        for same_tick in [true, false] {
+        // Steps between the two: none (one tick), one (the select's reveal is still waiting), and many.
+        for gap in [0usize, 1, 6] {
             // select, then goto to the top: the top wins.
             let (mut h, inbox) = open_for_select();
             select_low(&inbox);
-            if !same_tick {
-                h.run_steps(6);
+            if gap > 0 {
+                h.run_steps(gap);
             }
             goto_top(&h);
             h.run_steps(8);
-            assert!((scroll_y(&h) - top).abs() < 1.0, "select then goto, same_tick={same_tick}: {}", scroll_y(&h));
+            assert!((scroll_y(&h) - top).abs() < 1.0, "select then goto, gap={gap}: {}", scroll_y(&h));
             // goto to the top, then select: the annotation wins.
             let (mut h, inbox) = open_for_select();
             goto_top(&h);
-            if !same_tick {
-                h.run_steps(6);
+            if gap > 0 {
+                h.run_steps(gap);
             }
             select_low(&inbox);
             h.run_steps(8);
-            assert!((scroll_y(&h) - low).abs() < 6.0, "goto then select, same_tick={same_tick}: {} vs {low}", scroll_y(&h));
+            assert!((scroll_y(&h) - low).abs() < 6.0, "goto then select, gap={gap}: {} vs {low}", scroll_y(&h));
         }
+    }
+
+    /// An annotation that is already wholly shown is selected without moving the view, the page being read, or the
+    /// view history: no second `page-changed`.
+    #[test]
+    fn selecting_a_shown_annotation_leaves_the_page_and_history_alone() {
+        let (mut h, inbox) = open_for_select();
+        // The window's middle at the foot of page 2: page 3's top is in the lower half, page 2 is the one being read.
+        h.state().view_inbox.lock().unwrap().push(crate::host_view::ViewCommand::Goto {
+            id: "g".into(),
+            page: 1,
+            rect: Some([60.0, 270.0, 80.0, 30.0]),
+            seq: Default::default(),
+        });
+        h.run_steps(8);
+        assert_eq!(h.state().views[0].current, 1, "page 2 is the one being read");
+        let (y, current, back, forward) = {
+            let v = &h.state().views[0];
+            (v.last_scroll.y, v.current, v.back.clone(), v.forward.clone())
+        };
+        inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: "p3top".into(), scroll: true, seq: Default::default() });
+        h.run_steps(8);
+        let v = &h.state().views[0];
+        assert_eq!(v.comments.selected.map(|(p, _)| p), Some(2), "selected");
+        assert!((v.last_scroll.y - y).abs() < 0.5, "the view stays: {} vs {y}", v.last_scroll.y);
+        assert_eq!((v.current, &v.back, &v.forward), (current, &back, &forward), "page and history untouched");
     }
 
     /// A `goto(rect)` to a place other than the selected annotation's, sent after the select, wins: the view ends where

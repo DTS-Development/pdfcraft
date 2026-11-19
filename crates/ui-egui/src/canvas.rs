@@ -1258,6 +1258,12 @@ impl DocView {
     pub fn go_to_page(&mut self, page: usize) {
         // Any later navigation is the newer wish: an annotation still waiting to be revealed is not.
         self.reveal = None;
+        self.set_current_page(page);
+        self.goto = Some((self.current, 0.0));
+    }
+
+    /// Make `page` the current one, with the view history (Previous view / Next view) as a move there makes it.
+    fn set_current_page(&mut self, page: usize) {
         let page = page.min(self.page_count.saturating_sub(1));
         if page != self.current {
             // The view history (Previous view / Next view).
@@ -1271,7 +1277,6 @@ impl DocView {
         }
         // Partial wheel motion belongs to the old place.
         self.reset_coarse_state();
-        self.goto = Some((page, 0.0));
         self.current = page;
     }
 
@@ -1355,18 +1360,24 @@ impl DocView {
     /// pending (a `goto` just before) has landed first. A box with no usable place falls back to
     /// the page's top.
     pub fn reveal_rect(&mut self, page: usize, rect: [f32; 4], info: &DocInfo) {
-        // One row at a time: the scroll offset the last frame left belongs to another row.
-        let stale = !self.continuous && page.min(self.page_count.saturating_sub(1)) != self.current;
-        self.go_to_page(page);
-        let page = self.current;
+        let page = page.min(self.page_count.saturating_sub(1));
         let Some(p) = info.pages.get(page) else { return };
         let a = p.dest_fraction(Some(rect[0]), Some(rect[1]), self.rotation);
         let b = p.dest_fraction(Some(rect[2]), Some(rect[3]), self.rotation);
-        if let ([Some(ax), Some(ay)], [Some(bx), Some(by)]) = (a, b) {
-            // The caller's `goto` (page top) would win over the reveal; the page is the same.
-            self.goto = None;
-            self.reveal = Some((page, [ax.min(bx), ay.min(by), ax.max(bx), ay.max(by)], stale));
+        let ([Some(ax), Some(ay)], [Some(bx), Some(by)]) = (a, b) else {
+            // No usable place: the page's top.
+            self.go_to_page(page);
+            return;
+        };
+        // One row at a time: the scroll offset the last frame left belongs to another row, so the
+        // row is changed now and the box counts as out of view.
+        let stale = !self.continuous && page != self.current;
+        if stale {
+            self.set_current_page(page);
         }
+        // Where the view stays as it is, nothing else changes: the page being read and the view history are
+        // moved only when the draw really scrolls (`reveal_rect` has no `goto` of its own).
+        self.reveal = Some((page, [ax.min(bx), ay.min(by), ax.max(bx), ay.max(by)], stale));
     }
 
     /// Next page (`true`) or previous page. In two-page view this moves a whole spread: the other
@@ -2948,11 +2959,17 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
             let (max_x, max_y) = ((content_w - avail.width()).max(0.0), (content_h - avail.height()).max(0.0));
             let (x0, x1) = (r.left() + f[0] * r.width(), r.left() + f[2] * r.width());
             let (y0, y1) = (r.top() - y_shift + f[1] * r.height(), r.top() - y_shift + f[3] * r.height());
-            if let Some(x) = reveal_offset(x0, x1, view.last_scroll.x, avail.width(), max_x, stale) {
+            let x = reveal_offset(x0, x1, view.last_scroll.x, avail.width(), max_x, stale);
+            let y = reveal_offset(y0, y1, view.last_scroll.y, avail.height(), max_y, stale);
+            if let Some(x) = x {
                 scroll = scroll.horizontal_scroll_offset(x);
             }
-            if let Some(y) = reveal_offset(y0, y1, view.last_scroll.y, avail.height(), max_y, stale) {
+            if let Some(y) = y {
                 scroll = scroll.vertical_scroll_offset(y);
+            }
+            // The view moves: the annotation's page is the one being read now.
+            if x.is_some() || y.is_some() {
+                view.set_current_page(page);
             }
         }
     }

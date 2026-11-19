@@ -35,6 +35,11 @@ impl PartialEq for Seq {
 }
 
 impl Seq {
+    /// Was this message sent no earlier than the newest `goto` heard (`goto_seq`)? The one place orders are compared.
+    pub fn not_before(self, goto_seq: u64) -> bool {
+        self.0 >= goto_seq
+    }
+
     /// The next number (the first is 1; the default, 0, is older than any).
     pub fn next() -> Self {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -286,8 +291,11 @@ impl PdfCraftApp {
         for command in commands {
             let changed = match command {
                 ViewCommand::Goto { id, page, rect, seq } => {
-                    self.goto_seq = self.goto_seq.max(seq.0);
                     let result = check_id(&id).and_then(|()| self.goto_page(page, rect));
+                    // Only a `goto` that moved the view counts as the later wish; a refused one moved nothing.
+                    if result.is_ok() {
+                        self.goto_seq = self.goto_seq.max(seq.0);
+                    }
                     self.emit_view(match result {
                         Ok(()) => ViewEvent::GotoDone { id },
                         Err(error) => ViewEvent::GotoFailed { id, error },
