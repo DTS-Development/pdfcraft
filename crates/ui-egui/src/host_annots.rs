@@ -1350,6 +1350,35 @@ mod tests {
         }
     }
 
+    /// A `goto(rect)` to a place other than the selected annotation's, sent after the select, wins: the view ends where
+    /// `goto` alone puts it, in the same tick and in the next.
+    #[test]
+    fn a_later_goto_rect_elsewhere_beats_the_select() {
+        use crate::host_view::{Seq, ViewCommand};
+        // low2 is at view y 70..100 of page 3; low at 250..280. Distinct places on the same page.
+        let goto_low2 = |h: &egui_kittest::Harness<'static, PdfCraftApp>| {
+            h.state().view_inbox.lock().unwrap().push(ViewCommand::Goto { id: "g".into(), page: 2, rect: Some([60.0, 70.0, 80.0, 30.0]), seq: Seq::next() });
+        };
+        let (mut h, _) = open_for_select();
+        goto_low2(&h);
+        h.run_steps(8);
+        let alone = scroll_y(&h);
+        let (mut h, inbox) = open_for_select();
+        inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: "low".into(), scroll: true, seq: Seq::next() });
+        h.run_steps(8);
+        assert!((scroll_y(&h) - alone).abs() > 20.0, "the two places differ ({} vs {alone})", scroll_y(&h));
+        for same_tick in [true, false] {
+            let (mut h, inbox) = open_for_select();
+            inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: "low".into(), scroll: true, seq: Seq::next() });
+            if !same_tick {
+                h.run_steps(8);
+            }
+            goto_low2(&h);
+            h.run_steps(10);
+            assert!((scroll_y(&h) - alone).abs() < 6.0, "same_tick={same_tick}: {} vs {alone}", scroll_y(&h));
+        }
+    }
+
     /// The selection goes by `/NM`, never by position: with two annotations on a page, the one named is the one selected.
     #[test]
     fn select_picks_the_annotation_by_its_name_among_several_on_a_page() {
