@@ -404,6 +404,10 @@ pub struct DocView {
     /// (fractions of the displayed page; `None` leaves that axis to `goto`) to put `rel` points
     /// from the viewport's top-left corner.
     goto_point: Option<(usize, Option<f32>, Option<f32>, Vec2)>,
+    /// Pending reveal of an annotation ([`Self::reveal_rect`]): its page, its box as fractions of the
+    /// displayed page `[left, top, right, bottom]`, and whether the layout under the last scroll
+    /// offset is gone (another row is shown now), so the box counts as out of view.
+    reveal: Option<(usize, [f32; 4], bool)>,
     /// Pending keyboard scrolling, in points down (negative: up): ↓ / ↑, and Page Down /
     /// Page Up where the pages scroll.
     pub key_scroll: f32,
@@ -627,6 +631,20 @@ fn sharp_enough(have: u32, want: f32) -> bool {
 }
 
 /// Thumbnail device-pixel density when `demand` pages share the thumbnail allowance.
+/// The scroll offset along one axis that shows `[lo, hi]` (content coordinates) in a window `len`
+/// long at `offset`: `None` when it is wholly in the window already (and `force` is not set), else
+/// the middle of it at the window's middle, held within `0..=max` where the content ends.
+/// A span longer than the window never fits, so it is centred too. A non-finite input moves nothing.
+fn reveal_offset(lo: f32, hi: f32, offset: f32, len: f32, max: f32, force: bool) -> Option<f32> {
+    if !(lo.is_finite() && hi.is_finite() && offset.is_finite() && len.is_finite() && max.is_finite()) {
+        return None;
+    }
+    if !force && lo >= offset && hi <= offset + len {
+        return None;
+    }
+    Some(((lo + hi) / 2.0 - len / 2.0).clamp(0.0, max.max(0.0)))
+}
+
 fn thumbnail_density(demand: usize, ppp: f32) -> f32 {
     let per_thumb = THUMB_BYTES / demand.max(1).next_power_of_two();
     ppp.clamp(0.25, 4.0).min((per_thumb as f32 / (4.0 * THUMB_W * THUMB_H)).sqrt() * 0.98)
@@ -734,6 +752,7 @@ impl DocView {
             forward: Vec::new(),
             goto: None,
             goto_point: None,
+            reveal: None,
             key_scroll: 0.0,
             single_edges: None,
             flash: None,
@@ -858,6 +877,7 @@ impl DocView {
         }
         self.goto = None;
         self.goto_point = None;
+        self.reveal = None;
         self.zoom_anchor = None;
         self.flash = None;
         // A thumbnail drag holds page indexes from before the change.
@@ -1324,6 +1344,26 @@ impl DocView {
         let [fx, fy] = p.dest_fraction(Some((rect[0] + rect[2]) / 2.0), Some((rect[1] + rect[3]) / 2.0), self.rotation);
         if fx.is_some() || fy.is_some() {
             self.goto_point = Some((page, fx, fy, vec2(self.viewport_w, self.viewport_h) / 2.0));
+        }
+    }
+
+    /// Make `rect` (user space) on `page` visible: left alone where it is already wholly in the
+    /// window, otherwise its centre goes to the middle of the window where the page allows, as
+    /// [`Self::go_to_rect`] does. The window is read when the page is next drawn, so a jump still
+    /// pending (a `goto` just before) has landed first. A box with no usable place falls back to
+    /// the page's top.
+    pub fn reveal_rect(&mut self, page: usize, rect: [f32; 4], info: &DocInfo) {
+        // One row at a time: the scroll offset the last frame left belongs to another row.
+        let stale = !self.continuous && page.min(self.page_count.saturating_sub(1)) != self.current;
+        self.go_to_page(page);
+        let page = self.current;
+        let Some(p) = info.pages.get(page) else { return };
+        let a = p.dest_fraction(Some(rect[0]), Some(rect[1]), self.rotation);
+        let b = p.dest_fraction(Some(rect[2]), Some(rect[3]), self.rotation);
+        if let ([Some(ax), Some(ay)], [Some(bx), Some(by)]) = (a, b) {
+            // The caller's `goto` (page top) would win over the reveal; the page is the same.
+            self.goto = None;
+            self.reveal = Some((page, [ax.min(bx), ay.min(by), ax.max(bx), ay.max(by)], stale));
         }
     }
 
@@ -2750,6 +2790,8 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
     if let Some(v) = view.sync_scroll.take() {
         scroll = scroll.scroll_offset(v);
     }
+    // A jump asked for in this frame moves the offset the reveal below reads.
+    let jumped = view.zoom_anchor.is_some() || view.goto.is_some() || view.goto_point.is_some();
     if let Some((page, fx, fy, rel)) = view.zoom_anchor.take() {
         let r = rects[page.min(rects.len() - 1)];
         let point = pos2(r.left() + fx * r.width(), r.top() - y_shift + fy * r.height());
@@ -2889,6 +2931,27 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         }
         if let Some(fy) = fy {
             scroll = scroll.vertical_scroll_offset((r.top() - y_shift + fy * r.height() - rel.y).clamp(0.0, max_y));
+        }
+    }
+    // An annotation to bring into view: nothing moves when it is wholly shown, else its centre goes
+    // to the window's centre. After the jump above lands (a frame later), so the offset read is true.
+    if let Some((page, f, stale)) = view.reveal.take()
+        && !rects.is_empty()
+    {
+        if jumped {
+            view.reveal = Some((page, f, stale));
+            ui.ctx().request_repaint();
+        } else {
+            let r = rects[page.min(rects.len() - 1)];
+            let (max_x, max_y) = ((content_w - avail.width()).max(0.0), (content_h - avail.height()).max(0.0));
+            let (x0, x1) = (r.left() + f[0] * r.width(), r.left() + f[2] * r.width());
+            let (y0, y1) = (r.top() - y_shift + f[1] * r.height(), r.top() - y_shift + f[3] * r.height());
+            if let Some(x) = reveal_offset(x0, x1, view.last_scroll.x, avail.width(), max_x, stale) {
+                scroll = scroll.horizontal_scroll_offset(x);
+            }
+            if let Some(y) = reveal_offset(y0, y1, view.last_scroll.y, avail.height(), max_y, stale) {
+                scroll = scroll.vertical_scroll_offset(y);
+            }
         }
     }
     let selection_wheel = view.selection_drag && navigation_enabled && unobstructed && !single_paging && ui.rect_contains_pointer(avail);
@@ -5450,6 +5513,28 @@ fn grayscale(mut img: egui::ColorImage) -> egui::ColorImage {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reveal_offset_leaves_a_shown_span_and_centres_the_rest() {
+        // Wholly in the window (100..600 at offset 0, 500 long): untouched.
+        assert_eq!(reveal_offset(100.0, 200.0, 0.0, 500.0, 2000.0, false), None);
+        assert_eq!(reveal_offset(0.0, 500.0, 0.0, 500.0, 2000.0, false), None, "flush with both edges");
+        // Below the window: its middle (1150) goes to the window's middle.
+        assert_eq!(reveal_offset(1100.0, 1200.0, 0.0, 500.0, 2000.0, false), Some(900.0));
+        // Above the window after scrolling down.
+        assert_eq!(reveal_offset(100.0, 140.0, 800.0, 500.0, 2000.0, false), Some(0.0), "above: held at the start of the content");
+        // One pixel out is out.
+        assert!(reveal_offset(100.0, 501.0, 0.0, 500.0, 2000.0, false).is_some());
+        // Taller than the window (zoomed in): centred, never "shown".
+        assert_eq!(reveal_offset(300.0, 1100.0, 300.0, 500.0, 2000.0, false), Some(450.0));
+        // At the end of the content the offset stops at `max`.
+        assert_eq!(reveal_offset(1900.0, 1990.0, 0.0, 500.0, 1600.0, false), Some(1600.0));
+        // Content that fits the window has nothing to scroll.
+        assert_eq!(reveal_offset(900.0, 950.0, 0.0, 500.0, 0.0, false), Some(0.0));
+        // A layout that is gone counts as out of view.
+        assert_eq!(reveal_offset(100.0, 200.0, 0.0, 500.0, 2000.0, true), Some(0.0));
+        assert_eq!(reveal_offset(f32::NAN, 200.0, 0.0, 500.0, 2000.0, false), None);
+    }
+
     #[test]
     fn page_size_hint_zone_is_the_bottom_left_quadrant() {
         let area = Rect::from_min_max(pos2(100.0, 50.0), pos2(500.0, 450.0));

@@ -1475,7 +1475,7 @@ mod flow_tests {
         h.state_mut().views[i].comments.selected = None;
         h.run_steps(3);
         let nm = h.state().session.get(doc).unwrap().annot_name_at(0, index).unwrap();
-        h.state().annot_inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: nm });
+        h.state().annot_inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: nm, scroll: true });
         h.run_steps(3);
         assert_eq!(sources(&heard), vec![true, false, true]);
     }
