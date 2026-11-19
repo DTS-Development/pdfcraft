@@ -201,6 +201,11 @@ impl PdfCraftApp {
         self.active_ids().and_then(|(_, id)| self.session.get(id)).is_some_and(|d| d.ownership().hide_menu_button)
     }
 
+    /// The active document's host asked for the zoom controls in the top bar.
+    pub(crate) fn zoom_controls_shown(&self) -> bool {
+        self.active_ids().and_then(|(_, id)| self.session.get(id)).is_some_and(|d| d.ownership().show_zoom_controls)
+    }
+
     /// The active document is kept in the page's database (`annotSync`).
     pub(crate) fn active_shares_annotations(&self) -> bool {
         self.active_ids().and_then(|(_, id)| self.session.get(id)).is_some_and(|d| d.annot_sync())
@@ -843,6 +848,45 @@ mod tests {
         };
         assert_eq!(shown(false), (true, true));
         assert_eq!(shown(true), (false, true));
+    }
+
+    /// `zoomControls: true` puts the zoom group in the top bar: its percentage follows the view,
+    /// and a zoom picked from its list leaves fit mode. A bar too narrow for it leaves it out.
+    #[test]
+    fn the_zoom_controls_follow_the_view_and_give_way_in_a_narrow_bar() {
+        use egui_kittest::kittest::Queryable;
+        let open = |on: bool, width: f32| {
+            let app = PdfCraftApp::new();
+            app.ownership_inbox.lock().unwrap().push(pdfcraft_engine::Ownership { show_zoom_controls: on, ..Default::default() });
+            app.startup_inbox.lock().unwrap().push(("a.pdf".into(), pdf()));
+            let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(width, 800.0)).build_eframe(move |_| app);
+            h.run_steps(4);
+            h
+        };
+        // Off by default: no percentage in the bar.
+        let mut h = open(false, 1600.0);
+        h.state_mut().views[0].set_zoom(1.25);
+        h.run_steps(3);
+        assert!(h.query_by_label("125%").is_none());
+        assert!(!h.state_mut().zoom_controls_shown());
+        // On: the percentage follows zoom set any way, and a listed zoom ends fit mode.
+        let mut h = open(true, 1600.0);
+        assert!(h.state_mut().zoom_controls_shown());
+        h.state_mut().views[0].set_zoom(1.25);
+        h.run_steps(3);
+        h.get_by_label("125%").click();
+        h.run_steps(3);
+        h.get_by_label("50%").click();
+        h.run_steps(3);
+        let v = &h.state_mut().views[0];
+        assert!((v.zoom - 0.5).abs() < 1e-3 && v.fit == crate::canvas::Fit::None, "zoom {} fit {:?}", v.zoom, v.fit);
+        h.run_steps(3);
+        assert!(h.query_by_label("50%").is_some());
+        // A bar too narrow for the group keeps the search box and drops the group.
+        let mut h = open(true, 700.0);
+        h.state_mut().views[0].set_zoom(1.25);
+        h.run_steps(3);
+        assert!(h.query_by_label("125%").is_none() && h.query_by_label("Find tools and commands").is_some());
     }
 
     /// Waiting for a shared open that produced no shared document ends: its messages are dropped
