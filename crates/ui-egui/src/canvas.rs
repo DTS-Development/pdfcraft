@@ -1256,6 +1256,8 @@ impl DocView {
     }
 
     pub fn go_to_page(&mut self, page: usize) {
+        // Any later navigation is the newer wish: an annotation still waiting to be revealed is not.
+        self.reveal = None;
         let page = page.min(self.page_count.saturating_sub(1));
         if page != self.current {
             // The view history (Previous view / Next view).

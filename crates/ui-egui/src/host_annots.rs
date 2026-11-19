@@ -29,6 +29,8 @@ pub enum AnnotCommand {
         annot_id: String,
         /// Bring the annotation into view (the default); `false` selects it and leaves the view alone.
         scroll: bool,
+        /// Where it came in among the host's messages (see [`crate::host_view::Seq`]).
+        seq: crate::host_view::Seq,
     },
 }
 
@@ -125,7 +127,7 @@ impl AnnotCommand {
                     Some(_) => return Err("scroll must be a boolean".into()),
                 };
                 match v.get("annotId").and_then(|x| x.as_str()) {
-                    Some(annot_id) => Ok(Self::Select { annot_id: annot_id.into(), scroll }),
+                    Some(annot_id) => Ok(Self::Select { annot_id: annot_id.into(), scroll, seq: crate::host_view::Seq::next() }),
                     None => Err("annotId must be a string".into()),
                 }
             }
@@ -310,9 +312,10 @@ impl PdfCraftApp {
                 AnnotCommand::Reset { items, seq } => ops.push(AnnotOp::Reset { items, seq }),
                 AnnotCommand::Apply { upserts, deletes } => ops.push(AnnotOp::Apply { upserts, deletes }),
                 AnnotCommand::Reject { items } => ops.push(AnnotOp::Reject(items)),
-                AnnotCommand::Select { annot_id, scroll } => {
+                AnnotCommand::Select { annot_id, scroll, seq } => {
                     self.run_annot_ops(doc, std::mem::take(&mut ops));
-                    self.select_annot(doc, &annot_id, scroll);
+                    // A `goto` that came after this select is the later wish: the selection is made, the view is left to it.
+                    self.select_annot(doc, &annot_id, scroll && seq.0 >= self.goto_seq);
                 }
             }
         }
@@ -564,7 +567,7 @@ mod tests {
             AnnotCommand::from_json("reject", &json!({"items": [{"annotId": "a", "server": null}, {"annotId": "b", "server": it}]})).unwrap();
         let AnnotCommand::Reject { items } = reject else { panic!("not a reject") };
         assert!(items[0].server.is_none() && items[1].server.is_some());
-        assert_eq!(AnnotCommand::from_json("select", &json!({"annotId": "a"})).unwrap(), AnnotCommand::Select { scroll: true, annot_id: "a".into() });
+        assert_eq!(AnnotCommand::from_json("select", &json!({"annotId": "a"})).unwrap(), AnnotCommand::Select { scroll: true, seq: Default::default(), annot_id: "a".into() });
     }
 
     #[test]
@@ -736,7 +739,7 @@ mod tests {
             let mut q = app.annot_inbox.lock().unwrap();
             q.push(AnnotCommand::Reset { seq: 0, items: vec![square("one"), square("two")] });
             q.push(AnnotCommand::Apply { upserts: vec![square("three")], deletes: vec!["one".into()] });
-            q.push(AnnotCommand::Select { scroll: true, annot_id: "three".into() });
+            q.push(AnnotCommand::Select { scroll: true, seq: Default::default(), annot_id: "three".into() });
         }
         let mut h = egui_kittest::Harness::builder().build_eframe(move |_| app);
         h.run_steps(4);
@@ -1246,7 +1249,7 @@ mod tests {
                 r##"<?xml version="1.0" encoding="UTF-8" ?><xfdf xmlns="http://ns.adobe.com/xfdf/" xml:space="preserve"><annots><square page="{page}" name="{name}" rect="{rect}" title="Kim" flags="print"/></annots></xfdf>"##
             ),
         };
-        inbox.lock().unwrap().push(AnnotCommand::Reset { seq: 0, items: vec![item("top", 0, "20,230,80,280"), item("low", 2, "60,20,140,50")] });
+        inbox.lock().unwrap().push(AnnotCommand::Reset { seq: 0, items: vec![item("top", 0, "20,230,80,280"), item("low", 2, "60,20,140,50"), item("low2", 2, "60,200,140,230")] });
         h.run_steps(4);
         (h, inbox)
     }
@@ -1260,7 +1263,7 @@ mod tests {
     #[test]
     fn select_scrolls_to_the_annotation_only_when_it_is_not_shown() {
         let goto = |h: &egui_kittest::Harness<'static, PdfCraftApp>, page: usize, rect: Option<[f64; 4]>| {
-            h.state().view_inbox.lock().unwrap().push(crate::host_view::ViewCommand::Goto { id: "g".into(), page, rect });
+            h.state().view_inbox.lock().unwrap().push(crate::host_view::ViewCommand::Goto { id: "g".into(), page, rect, seq: crate::host_view::Seq::next() });
         };
         // What goto(rect) alone does to the annotation on page 3 (view: 60,252 80x30 from the top).
         let (mut h, _) = open_for_select();
@@ -1271,16 +1274,16 @@ mod tests {
 
         // Select alone, from the top: the same place, not the page's top.
         let (mut h, inbox) = open_for_select();
-        inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: "low".into(), scroll: true });
+        inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: "low".into(), scroll: true, seq: crate::host_view::Seq::next() });
         h.run_steps(6);
         let y = scroll_y(&h);
         assert!((y - centred).abs() < 6.0, "select centres the annotation like goto: {y} vs {centred}");
         assert_eq!(h.state().views[0].comments.selected.map(|(p, _)| p), Some(2));
 
         // Selected again while it is wholly shown: nothing moves, and the page does not change.
-        inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: "top".into(), scroll: false });
+        inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: "top".into(), scroll: false, seq: crate::host_view::Seq::next() });
         h.run_steps(4);
-        inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: "low".into(), scroll: true });
+        inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: "low".into(), scroll: true, seq: crate::host_view::Seq::next() });
         h.run_steps(6);
         assert!((scroll_y(&h) - y).abs() < 0.5, "already shown: the view stays");
 
@@ -1291,25 +1294,80 @@ mod tests {
             if !same_tick {
                 h.run_steps(6);
             }
-            inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: "low".into(), scroll: true });
+            inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: "low".into(), scroll: true, seq: crate::host_view::Seq::next() });
             h.run_steps(8);
             assert!((scroll_y(&h) - centred).abs() < 6.0, "same_tick={same_tick}: {} vs {centred}", scroll_y(&h));
         }
 
         // `scroll: false` selects and leaves the view.
         let (mut h, inbox) = open_for_select();
-        inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: "low".into(), scroll: false });
+        inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: "low".into(), scroll: false, seq: crate::host_view::Seq::next() });
         h.run_steps(6);
         assert_eq!(scroll_y(&h), 0.0);
         assert_eq!(h.state().views[0].comments.selected.map(|(p, _)| p), Some(2));
     }
 
+    /// Whichever of `goto` and `annots-select` was sent last decides where the view ends, in one tick or across ticks
+    /// (the two reach the page through different queues, and the tick takes the `goto` first).
+    #[test]
+    fn the_later_of_goto_and_select_decides_the_view() {
+        use crate::host_view::{Seq, ViewCommand};
+        let goto_top = |h: &egui_kittest::Harness<'static, PdfCraftApp>| {
+            h.state().view_inbox.lock().unwrap().push(ViewCommand::Goto { id: "g".into(), page: 0, rect: None, seq: Seq::next() });
+        };
+        let select_low = |inbox: &std::sync::Arc<std::sync::Mutex<Vec<AnnotCommand>>>| {
+            inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: "low".into(), scroll: true, seq: Seq::next() });
+        };
+        let (mut h, inbox) = open_for_select();
+        select_low(&inbox);
+        h.run_steps(6);
+        let low = scroll_y(&h);
+        assert!(low > 100.0);
+        // Where `goto` to the first page alone leaves the view.
+        let (mut h, _) = open_for_select();
+        goto_top(&h);
+        h.run_steps(6);
+        let top = scroll_y(&h);
+        for same_tick in [true, false] {
+            // select, then goto to the top: the top wins.
+            let (mut h, inbox) = open_for_select();
+            select_low(&inbox);
+            if !same_tick {
+                h.run_steps(6);
+            }
+            goto_top(&h);
+            h.run_steps(8);
+            assert!((scroll_y(&h) - top).abs() < 1.0, "select then goto, same_tick={same_tick}: {}", scroll_y(&h));
+            // goto to the top, then select: the annotation wins.
+            let (mut h, inbox) = open_for_select();
+            goto_top(&h);
+            if !same_tick {
+                h.run_steps(6);
+            }
+            select_low(&inbox);
+            h.run_steps(8);
+            assert!((scroll_y(&h) - low).abs() < 6.0, "goto then select, same_tick={same_tick}: {} vs {low}", scroll_y(&h));
+        }
+    }
+
+    /// The selection goes by `/NM`, never by position: with two annotations on a page, the one named is the one selected.
+    #[test]
+    fn select_picks_the_annotation_by_its_name_among_several_on_a_page() {
+        let (mut h, inbox) = open_for_select();
+        for name in ["low2", "low", "low2"] {
+            inbox.lock().unwrap().push(AnnotCommand::Select { annot_id: name.into(), scroll: true, seq: Default::default() });
+            h.run_steps(4);
+            let (page, index) = h.state().views[0].comments.selected.unwrap();
+            assert_eq!(h.state().annot_name(h.state().views[0].id, page, index).as_deref(), Some(name));
+        }
+    }
+
     #[test]
     fn select_reads_the_scroll_option_strictly() {
         let parse = |v: serde_json::Value| AnnotCommand::from_json("select", &v);
-        assert_eq!(parse(json!({"annotId": "a", "scroll": false})).unwrap(), AnnotCommand::Select { annot_id: "a".into(), scroll: false });
-        assert_eq!(parse(json!({"annotId": "a", "scroll": true})).unwrap(), AnnotCommand::Select { annot_id: "a".into(), scroll: true });
-        assert_eq!(parse(json!({"annotId": "a", "scroll": null})).unwrap(), AnnotCommand::Select { annot_id: "a".into(), scroll: true });
+        assert_eq!(parse(json!({"annotId": "a", "scroll": false})).unwrap(), AnnotCommand::Select { annot_id: "a".into(), scroll: false, seq: Default::default() });
+        assert_eq!(parse(json!({"annotId": "a", "scroll": true})).unwrap(), AnnotCommand::Select { annot_id: "a".into(), scroll: true, seq: Default::default() });
+        assert_eq!(parse(json!({"annotId": "a", "scroll": null})).unwrap(), AnnotCommand::Select { annot_id: "a".into(), scroll: true, seq: Default::default() });
         for bad in [json!("no"), json!(0), json!(1), json!([]), json!({})] {
             assert!(parse(json!({"annotId": "a", "scroll": bad})).is_err());
         }
@@ -1350,7 +1408,7 @@ mod tests {
         h.run_steps(4);
         assert!(h.query_by_label("Open comments").is_none(), "nothing selected: no bar");
 
-        inbox.lock().unwrap().push(AnnotCommand::Select { scroll: true, annot_id: "note".into() });
+        inbox.lock().unwrap().push(AnnotCommand::Select { scroll: true, seq: Default::default(), annot_id: "note".into() });
         h.run_steps(4);
         assert!(h.query_by_label("Open comments").is_some() && h.query_by_label("Locate").is_some(), "the bar of the selected annotation");
 
@@ -1377,12 +1435,12 @@ mod tests {
         assert_eq!(json[0].1["rect"]["width"], 100.0);
 
         // A sign box has no bar.
-        inbox.lock().unwrap().push(AnnotCommand::Select { scroll: true, annot_id: "box".into() });
+        inbox.lock().unwrap().push(AnnotCommand::Select { scroll: true, seq: Default::default(), annot_id: "box".into() });
         h.run_steps(4);
         assert!(h.query_by_label("Go there").is_none(), "no bar on a sign box");
 
         // Taking the list away takes the bar away.
-        inbox.lock().unwrap().push(AnnotCommand::Select { scroll: true, annot_id: "note".into() });
+        inbox.lock().unwrap().push(AnnotCommand::Select { scroll: true, seq: Default::default(), annot_id: "note".into() });
         h.run_steps(3);
         assert!(h.query_by_label("Go there").is_some());
         stamps.lock().unwrap().push(crate::StampCommand::AnnotationPopupActions { actions: Vec::new() });
@@ -1415,7 +1473,7 @@ mod tests {
         inbox.lock().unwrap().push(AnnotCommand::Reset { seq: 0, items: vec![item("named", "square", r#" subject="Rectangle""#), item("bare", "circle", "")] });
         h.run_steps(3);
         let click = |h: &mut egui_kittest::Harness<'_, PdfCraftApp>, name: &str, close: bool| {
-            inbox.lock().unwrap().push(AnnotCommand::Select { scroll: true, annot_id: name.into() });
+            inbox.lock().unwrap().push(AnnotCommand::Select { scroll: true, seq: Default::default(), annot_id: name.into() });
             h.run_steps(3);
             h.state_mut().views[0].host_popup_click = Some(crate::host_popup::PopupClick { id: "go".into(), name: name.into(), close });
             h.run_steps(4);
@@ -1454,7 +1512,7 @@ mod tests {
         inbox.lock().unwrap().push(AnnotCommand::Reset { seq: 0, items: vec![item("a", "square"), item("b", "circle")] });
         h.run_steps(3);
         // The click was on "a", but "b" is the selected one by the time it is handled.
-        inbox.lock().unwrap().push(AnnotCommand::Select { scroll: true, annot_id: "b".into() });
+        inbox.lock().unwrap().push(AnnotCommand::Select { scroll: true, seq: Default::default(), annot_id: "b".into() });
         h.run_steps(3);
         let selected = h.state().views[0].comments.selected;
         assert!(selected.is_some());
@@ -1493,10 +1551,10 @@ mod tests {
         inbox.lock().unwrap().push(AnnotCommand::Reset { seq: 0, items: vec![square("parent"), reply] });
         stamps.lock().unwrap().push(popup_actions(&[("go", "Go there", "navigation")]));
         h.run_steps(4);
-        inbox.lock().unwrap().push(AnnotCommand::Select { scroll: true, annot_id: "re".into() });
+        inbox.lock().unwrap().push(AnnotCommand::Select { scroll: true, seq: Default::default(), annot_id: "re".into() });
         h.run_steps(4);
         assert!(h.query_by_label("Go there").is_none(), "no bar on a reply");
-        inbox.lock().unwrap().push(AnnotCommand::Select { scroll: true, annot_id: "parent".into() });
+        inbox.lock().unwrap().push(AnnotCommand::Select { scroll: true, seq: Default::default(), annot_id: "parent".into() });
         h.run_steps(4);
         assert!(h.query_by_label("Go there").is_some(), "the bar on its comment (a document that can be edited too)");
     }
@@ -1539,7 +1597,7 @@ mod tests {
         h.run_steps(3);
         let name = h.state().session.get(id).unwrap().annot_name_at(0, 0).expect("the stamp is named");
         stamps.lock().unwrap().push(popup_actions(&[("go", "Go there", "navigation")]));
-        inbox.lock().unwrap().push(AnnotCommand::Select { scroll: true, annot_id: name });
+        inbox.lock().unwrap().push(AnnotCommand::Select { scroll: true, seq: Default::default(), annot_id: name });
         h.run_steps(4);
         assert!(h.query_by_label("Go there").is_some(), "the bar on a signature stamp");
     }

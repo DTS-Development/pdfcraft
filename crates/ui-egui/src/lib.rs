@@ -681,6 +681,8 @@ pub struct PdfCraftApp {
     pub(crate) opened_wait: Option<Vec<pdfcraft_engine::DocId>>,
     /// The document and page last reported with `page-changed` (`None`: nothing reported yet).
     pub(crate) page_sent: Option<(pdfcraft_engine::DocId, usize)>,
+    /// The newest `goto` heard so far (its [`host_view::Seq`]).
+    pub(crate) goto_seq: u64,
     /// What the host set with `pdfcraft:annots-visible`: (hidden, keep signatures, how many times it was set). Each
     /// document is brought to it once per setting (`comments_applied`), so the menu's own toggle still works after.
     pub(crate) comments_host: Option<(bool, bool, u64)>,
@@ -1087,6 +1089,7 @@ impl PdfCraftApp {
             host_view: None,
             opened_wait: None,
             page_sent: None,
+            goto_seq: 0,
             comments_host: None,
             popup_actions: std::sync::Arc::new(Vec::new()),
             comments_applied: Default::default(),

@@ -22,11 +22,31 @@ fn default_color() -> Color32 {
     Color32::from_rgba_unmultiplied(255, 214, 0, 110)
 }
 
+/// The order a host message arrived in, across the view and annotation messages (one counter), so a
+/// `goto` and an `annots-select` that are heard in one frame can be told apart by which came last.
+/// Every `Seq` is equal to every other, so a command still compares by what it asks.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Seq(pub u64);
+
+impl PartialEq for Seq {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Seq {
+    /// The next number (the first is 1; the default, 0, is older than any).
+    pub fn next() -> Self {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self(COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
 /// What the host asks for. A rectangle is `[x, y, width, height]`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ViewCommand {
     /// Show the page, or the place on it (the rectangle's centre goes to the middle of the window).
-    Goto { id: String, page: usize, rect: Option<[f64; 4]> },
+    Goto { id: String, page: usize, rect: Option<[f64; 4]>, seq: Seq },
     /// Mark places on a page. `transient` must be true: a highlight that is kept would be an annotation.
     Highlight { id: String, page: usize, rects: Vec<[f64; 4]>, color: Option<String>, transient: bool },
     /// Take the transient highlight away.
@@ -100,7 +120,7 @@ impl ViewCommand {
                     None | Some(serde_json::Value::Null) => None,
                     Some(r) => Some(rect(r)?),
                 };
-                Ok(Self::Goto { id: id()?, page: page()?, rect })
+                Ok(Self::Goto { id: id()?, page: page()?, rect, seq: Seq::next() })
             }
             "highlight" => {
                 let rects = v.get("rects").and_then(|x| x.as_array()).ok_or("rects must be an array")?;
@@ -265,7 +285,8 @@ impl PdfCraftApp {
         let commands: Vec<ViewCommand> = self.view_inbox.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
         for command in commands {
             let changed = match command {
-                ViewCommand::Goto { id, page, rect } => {
+                ViewCommand::Goto { id, page, rect, seq } => {
+                    self.goto_seq = self.goto_seq.max(seq.0);
                     let result = check_id(&id).and_then(|()| self.goto_page(page, rect));
                     self.emit_view(match result {
                         Ok(()) => ViewEvent::GotoDone { id },
@@ -362,9 +383,9 @@ mod json_tests {
     fn reads_every_message_shape() {
         let goto =
             ViewCommand::from_json("goto", &serde_json::json!({"id": "g", "page": 2, "rect": {"x": 1, "y": 2, "width": 3, "height": 4}})).unwrap();
-        assert_eq!(goto, ViewCommand::Goto { id: "g".into(), page: 2, rect: Some([1.0, 2.0, 3.0, 4.0]) });
+        assert_eq!(goto, ViewCommand::Goto { id: "g".into(), page: 2, rect: Some([1.0, 2.0, 3.0, 4.0]), seq: Seq::default() });
         let bare = ViewCommand::from_json("goto", &serde_json::json!({"id": "g", "page": 0})).unwrap();
-        assert_eq!(bare, ViewCommand::Goto { id: "g".into(), page: 0, rect: None });
+        assert_eq!(bare, ViewCommand::Goto { id: "g".into(), page: 0, rect: None, seq: Seq::default() });
         let h = ViewCommand::from_json(
             "highlight",
             &serde_json::json!({"id": "h", "page": 1, "rects": [{"x": 0, "y": 0, "width": 5, "height": 5}], "color": "#ff0", "transient": true}),
@@ -468,7 +489,7 @@ mod flow_tests {
     }
 
     fn goto(id: &str, page: usize, rect: Option<[f64; 4]>) -> ViewCommand {
-        ViewCommand::Goto { id: id.into(), page, rect }
+        ViewCommand::Goto { id: id.into(), page, rect, seq: Seq::default() }
     }
 
     fn highlight(id: &str, page: usize, transient: bool) -> ViewCommand {
