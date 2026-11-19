@@ -221,8 +221,12 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   none. All three skip undo and the dirty flag, and are not echoed in `annots-changed`. They
 ///   may come right behind `pdfcraft:open`: they wait for the document, are dropped when the open
 ///   fails, and a new `pdfcraft:open` drops those still waiting.
-/// - `pdfcraft:annots-select` (from the parent): `{ annotId }` goes to the annotation's page and
-///   selects it (nothing is selected when the id is unknown).
+/// - `pdfcraft:annots-select` (from the parent): `{ annotId, scroll? }` selects the annotation (nothing is
+///   selected when the id is unknown) and brings it into view: left where it is when wholly shown, else
+///   its centre goes to the window's centre, as `goto` with a `rect` does. `scroll: false` selects and
+///   leaves the view alone; `scroll: null` is the same as leaving it out, and any other non-boolean is refused.
+///   The view is moved only when it must be: an annotation already wholly shown changes neither the page
+///   being read nor the view history. Of a `goto` and an `annots-select` the one sent last decides the view.
 /// - `pdfcraft:annots-changed` (to the parent): `{ seq, upserts: [{ annotId, page, type, xfdf }], deletes: [annotId] }`
 ///   after the user applies, undoes or redoes an edit: the difference, by `/NM`, of the annotations
 ///   the `actor` owns (`seq` counts the messages from 1 for each document opened; `page` counts from 1 like the server's, `type` is the annotation's subject or XFDF tag, at most 100 characters). Stamps count too.
