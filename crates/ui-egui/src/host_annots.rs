@@ -196,6 +196,11 @@ impl PdfCraftApp {
         self.active_ids().and_then(|(_, id)| self.session.get(id)).is_some_and(|d| d.ownership().hide_comments_panel)
     }
 
+    /// The active document's host asked to hide the "Menu" button of the top bar.
+    pub(crate) fn menu_button_hidden(&self) -> bool {
+        self.active_ids().and_then(|(_, id)| self.session.get(id)).is_some_and(|d| d.ownership().hide_menu_button)
+    }
+
     /// The active document is kept in the page's database (`annotSync`).
     pub(crate) fn active_shares_annotations(&self) -> bool {
         self.active_ids().and_then(|(_, id)| self.session.get(id)).is_some_and(|d| d.annot_sync())
@@ -820,6 +825,24 @@ mod tests {
         assert_ne!(plain, shared);
         let d = app.session.get(plain).unwrap();
         assert!(!d.annot_sync() && !d.ownership().hide_comments_panel);
+    }
+
+    /// `menuButton: false` takes the top bar's "Menu" button away and keeps the command search
+    /// box; a document opened without it has the button.
+    #[test]
+    fn the_menu_button_goes_when_the_host_asks() {
+        use egui_kittest::kittest::Queryable;
+        let shown = |hide: bool| {
+            let app = PdfCraftApp::new();
+            app.ownership_inbox.lock().unwrap().push(pdfcraft_engine::Ownership { hide_menu_button: hide, ..Default::default() });
+            app.startup_inbox.lock().unwrap().push(("a.pdf".into(), pdf()));
+            let mut h = egui_kittest::Harness::builder().build_eframe(move |_| app);
+            h.run_steps(4);
+            assert_eq!(h.state_mut().menu_button_hidden(), hide);
+            (h.query_by_label("Menu").is_some(), h.query_by_label("Find tools and commands").is_some())
+        };
+        assert_eq!(shown(false), (true, true));
+        assert_eq!(shown(true), (false, true));
     }
 
     /// Waiting for a shared open that produced no shared document ends: its messages are dropped

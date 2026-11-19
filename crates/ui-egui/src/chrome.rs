@@ -520,10 +520,13 @@ pub fn mode_bar(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                main_menu(app, ui);
-                ui.add_space(6.0);
-                ui.painter().vline(ui.cursor().left(), ui.max_rect().y_range().shrink(12.0), Stroke::new(1.0, t.divider));
-                ui.add_space(10.0);
+                // The host may take the button (`menuButton: false`); the divider goes with it.
+                if !app.menu_button_hidden() {
+                    main_menu(app, ui);
+                    ui.add_space(6.0);
+                    ui.painter().vline(ui.cursor().left(), ui.max_rect().y_range().shrink(12.0), Stroke::new(1.0, t.divider));
+                    ui.add_space(10.0);
+                }
                 // A viewer has no workspaces to switch between: the tools of Edit, Convert and E-Sign
                 // are not its to use.
                 {
