@@ -661,6 +661,20 @@ impl PdfCraftApp {
         !self.host_lock || BUILDER.iter().chain(BUILDER_ONLY).any(|id| self.host_allows(id))
     }
 
+    /// Whether the host's policy turned off, by name, at least one command of `group` and every
+    /// other command is either turned off by name too or locked by its grade (a locked command
+    /// never runs, so it needs no name). Only the policy's own words count: with no command named
+    /// off, as under the default policy, no group is turned off and every group is listed as before.
+    pub(crate) fn host_group_turned_off(&self, group: &pdfcraft_engine::catalog::ToolGroup) -> bool {
+        if !self.host_lock {
+            return false;
+        }
+        let scope = self.host_rules().0;
+        let items = || group.sections.iter().flat_map(|s| s.items);
+        items().any(|i| self.host_policy_turned_off(i.command))
+            && items().all(|i| self.host_policy_turned_off(i.command) || grade(i.command, scope) == Grade::Locked)
+    }
+
     /// Whether a tool group has a command that may run, so it is worth a row in the Tools panel.
     pub(crate) fn host_group_shown(&self, group: &pdfcraft_engine::catalog::ToolGroup) -> bool {
         group.sections.iter().flat_map(|s| s.items).any(|i| self.host_allows(i.command))
@@ -1767,6 +1781,47 @@ mod tests {
         off.extend([("comment.list", false), ("comment.flatten", false)]);
         off.sort();
         assert!(!shown(false, &off), "every command of the group off");
+    }
+
+    /// The palette lists a tool group unless the policy turned off, by name, every command of it
+    /// that the grade does not lock anyway.
+    #[test]
+    fn the_palette_hides_a_group_the_policy_turned_off() {
+        use egui_kittest::kittest::Queryable;
+        let commands = |id: &str| -> Vec<&'static str> {
+            pdfcraft_engine::catalog::group(id).unwrap().sections.iter().flat_map(|s| s.items).map(|i| i.command).collect()
+        };
+        let shown = |read_only: bool, policy: &[(&str, bool)], label: &str| {
+            let mut app = with_policy_app(true, read_only, policy);
+            app.palette_open = true;
+            app.palette_query = label.into();
+            let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_| app);
+            h.run_steps(4);
+            h.query_by_label(label).is_some()
+        };
+        let off = |ids: Vec<&'static str>| -> Vec<(&'static str, bool)> {
+            let mut v: Vec<_> = ids.into_iter().map(|c| (c, false)).collect();
+            v.sort();
+            v
+        };
+        let label = "Prepare for accessibility";
+        let a11y = commands("accessibility");
+        // Every name off, in the read-only preview the report came from.
+        assert!(shown(true, &[], label), "default policy: listed");
+        assert!(!shown(true, &off(a11y.clone()), label), "every command named off: gone");
+        // Only the five a viewer's grade leaves off are named: the rest are locked, so it is gone too.
+        let five: Vec<_> = a11y.iter().copied().filter(|c| grade(c, EditScope::Viewer) != Grade::Locked).collect();
+        assert_eq!(five.len(), 5);
+        assert!(!shown(true, &off(five.clone()), label), "named off or locked: gone");
+        let mut one_left = off(five);
+        one_left.retain(|(c, _)| *c != "a11y.check");
+        assert!(shown(true, &one_left, label), "one command not named off: listed");
+        assert!(shown(false, &off(a11y), "Scan & OCR"), "another group is not touched");
+        // A group whose commands the grade locks all lists by default and goes once one is named off.
+        let compress = commands("compress");
+        assert!(compress.iter().all(|c| grade(c, EditScope::Viewer) == Grade::Locked));
+        assert!(shown(true, &[], "Compress a PDF"), "locked group: listed by default");
+        assert!(!shown(true, &off(compress[..1].to_vec()), "Compress a PDF"), "locked group with a name off: gone");
     }
 
     /// The menu of a selected comment: a host build on a read-only document leaves out the edits,
