@@ -145,6 +145,12 @@ impl WheelPager {
             return None;
         }
         let forward = dy < 0.0;
+        // A pause ends the gesture, notch or not: a notch that turned a page must not keep the
+        // pager owning the vertical axis (`gesture_turned`) until a smooth event came, which a
+        // wheel never sends, or the next page could not be scrolled at all.
+        if self.touch.is_none() && idle > BURST_GAP_SECS {
+            self.new_gesture();
+        }
         let smooth_stream = self.touch.is_some() || now - self.last_smooth <= BURST_GAP_SECS;
         let notch = !smooth_stream
             && match unit {
@@ -166,9 +172,6 @@ impl WheelPager {
             self.accum = 0.0;
             self.turned = Some(forward);
             return Some(forward);
-        }
-        if self.touch.is_none() && idle > BURST_GAP_SECS {
-            self.new_gesture();
         }
         self.last_smooth = now;
         if self.touch.is_none() {
@@ -276,6 +279,17 @@ mod tests {
         // Momentum alone, however long, never turns twice.
         let mut p = WheelPager::default();
         assert_eq!(turns(&mut p, &bare_swipe(1.0, -400.0)), [true]);
+    }
+
+    #[test]
+    fn a_notch_that_turned_ends_its_gesture_after_a_pause() {
+        let mut p = WheelPager::default();
+        assert_eq!(p.feed_edge(Point, -100.0, Move, 1.0, true), Some(true));
+        assert!(p.gesture_turned());
+        // The next notch, after a pause, starts a new gesture: it pans (cannot turn) and the
+        // pager no longer owns the vertical axis.
+        assert_eq!(p.feed_edge(Point, -100.0, Move, 2.0, false), None);
+        assert!(!p.gesture_turned());
     }
 
     #[test]

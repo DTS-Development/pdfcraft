@@ -138,3 +138,73 @@ fn quick_successive_swipes_each_turn_a_page_in_fit_one_page() {
         }
     }
 }
+
+/// Chrome on a Mac with a mouse: a Point delta of ~100 a notch, notches 30-80 ms apart, phase Move.
+fn chrome_spin(h: &mut Harness<'static, PdfCraftApp>, notches: usize, gap_frames: usize) -> (f32, usize) {
+    let i = h.state().active.unwrap();
+    let cur = h.state().views[i].current;
+    let y = |h: &Harness<'static, PdfCraftApp>| { let v = &h.state().views[i]; v.current as f32 * 100000.0 - v.page_screen_rect(v.current).map_or(0.0, |r| r.min.y) };
+    let before = y(h);
+    for _ in 0..notches {
+        h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -100.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE });
+        h.run_steps(gap_frames);
+    }
+    h.run_steps(30);
+    (y(h) - before, h.state().views[i].current.abs_diff(cur))
+}
+
+#[test]
+fn survey_chrome_mouse() {
+    for (id, _) in CASES {
+        for (gap, pointer_dx) in [(3usize, 0.0f32), (5, 0.0), (3, 300.0)] {
+            let mut h = Harness::builder().with_size(egui::vec2(1920.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(|_cc| {
+                let mut app = PdfCraftApp::new();
+                app.set_option("language", "en").unwrap();
+                app.open_bytes("a.pdf", None, fixture(6)).unwrap();
+                app.set_option("zoom", "206").unwrap();
+                app
+            });
+            for _ in 0..3000 { h.run_steps(2); if !h.state().render_pending() { break; } std::thread::sleep(std::time::Duration::from_millis(5)); }
+            h.run_steps(20);
+            let i = h.state().active.unwrap();
+            h.state_mut().execute(id);
+            h.state_mut().execute("view.continuous");
+            h.state_mut().execute("view.continuous");
+            h.run_steps(20);
+            let c = h.state().views[i].viewport_rect().center() + egui::vec2(pointer_dx, 0.0);
+            h.hover_at(c);
+            h.run_steps(3);
+            let a = chrome_spin(&mut h, 12, gap_frames_to(gap));
+            let b = chrome_spin(&mut h, 12, gap_frames_to(gap));
+            let v = &h.state().views[i];
+            println!("SURVEY12 {id:26} gap={gap} dx={pointer_dx} {a:?} {b:?} cont={} fit={:?} z={:.2}", v.continuous, v.fit, v.zoom);
+        }
+    }
+}
+fn gap_frames_to(g: usize) -> usize { g }
+
+/// Chrome on a Mac with a mouse sends Point notches of ~100 with phase Move. On a page taller than
+/// the window (one page at a time, zoomed in) the wheel pans it, and past its end turns the page;
+/// the new page has to pan again, however soon the notches come.
+#[test]
+fn mouse_wheel_keeps_panning_after_it_turned_a_page() {
+    for gap in [4usize, 30] {
+        let mut h = harness_dt(1.0 / 60.0);
+        h.state_mut().set_option("zoom", "206").unwrap();
+        h.state_mut().execute("view.continuous");
+        h.run_steps(20);
+        let i = h.state().active.unwrap();
+        h.hover_at(h.state().views[i].viewport_rect().center());
+        h.run_steps(3);
+        let mut moved = vec![];
+        for _ in 0..8 {
+            let v = &h.state().views[i];
+            let before = (v.current, v.page_screen_rect(v.current).map(|r| r.min.y));
+            h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -100.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE });
+            h.run_steps(gap + 20);
+            let v = &h.state().views[i];
+            moved.push(before != (v.current, v.page_screen_rect(v.current).map(|r| r.min.y)));
+        }
+        assert!(moved.iter().all(|m| *m), "gap {gap}: every notch moves the view {moved:?}");
+    }
+}
