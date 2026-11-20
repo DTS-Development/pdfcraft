@@ -696,6 +696,13 @@ impl PdfCraftApp {
         enabled(id, scope, overrides)
     }
 
+    /// Whether the host's policy turned `id` off by name. Unlike [`Self::host_allows`] this ignores
+    /// the grade: a command a viewer does not start with is not "turned off" until the host says so.
+    pub(crate) fn host_policy_turned_off(&self, id: &str) -> bool {
+        let overrides = self.host_rules().1;
+        self.host_lock && overrides.binary_search_by(|(k, _)| k.as_str().cmp(id)).is_ok_and(|i| !overrides[i].1)
+    }
+
     /// Whether any of `ids` is on: the platform functions behind a whole kind of command (writing
     /// files, opening links) work when one of its commands is.
     pub(crate) fn host_any(&self, ids: &[&str]) -> bool {
@@ -1612,6 +1619,235 @@ mod tests {
         app.choose_right_panel(Some(crate::RightPanel::Bookmarks));
         app.open_bytes("1.pdf", None, pdf_with_outline()).unwrap();
         assert!(matches!(app.right, Some(crate::RightPanel::Bookmarks)));
+    }
+
+    /// A viewer's document opened with the host's per-command `policy`; `lock` is the host lock.
+    fn with_policy_app(lock: bool, read_only: bool, policy: &[(&str, bool)]) -> PdfCraftApp {
+        let mut app = PdfCraftApp::new();
+        app.host_lock = lock;
+        app.host_save = Some(Box::new(|_, _, _, _| Ok(())));
+        app.set_option("language", "en").unwrap();
+        let own = Ownership { scope: EditScope::Viewer, read_only, ..Default::default() };
+        app.session.set_open_ownership(with_policy(own, policy.iter().map(|(k, v)| (k.to_string(), *v)).collect()));
+        app.open_bytes("a.pdf", None, pdf()).unwrap();
+        app
+    }
+
+    /// A panel whose command the policy turned off opens no way: not by choosing it, not by
+    /// writing it, not by picking a comment tool that opens the Comments panel.
+    #[test]
+    fn a_panel_whose_command_is_off_stays_shut() {
+        use crate::RightPanel;
+        let off = [("comment.list", false), ("form.fields", false), ("sign.panel", false)];
+        let mut app = with_policy_app(true, false, &off);
+        for p in [RightPanel::Comments, RightPanel::Fields, RightPanel::Signatures] {
+            app.choose_right_panel(Some(p));
+            assert_eq!(app.right, None, "{p:?}");
+        }
+        // Another panel and a comment tool: the tool does not bring the panel back.
+        app.choose_right_panel(Some(RightPanel::Pages));
+        assert_eq!(app.right, Some(RightPanel::Pages));
+        app.right = None;
+        assert!(app.execute("comment.note"));
+        assert_eq!(app.right, None);
+        // A direct write is taken back on the next frame.
+        app.right = Some(RightPanel::Comments);
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_| app);
+        h.run_steps(3);
+        assert_eq!(h.state().right, None);
+    }
+
+    /// With the policy untouched (and without the lock at all) the panels open as they did.
+    #[test]
+    fn the_default_policy_opens_the_panels_as_before() {
+        use crate::RightPanel;
+        let mut app = with_policy_app(true, false, &[]);
+        app.choose_right_panel(Some(RightPanel::Comments));
+        assert_eq!(app.right, Some(RightPanel::Comments));
+        let mut tool = with_policy_app(true, false, &[]);
+        assert!(tool.execute("comment.note"));
+        assert_eq!(tool.right, Some(RightPanel::Comments), "a comment tool opens the panel");
+        let mut plain = with_policy_app(false, false, &[("comment.list", false)]);
+        plain.choose_right_panel(Some(RightPanel::Comments));
+        assert_eq!(plain.right, Some(RightPanel::Comments), "no lock: the policy is not asked");
+    }
+
+    /// What the page menus keep: a host build drops what the policy or a read-only document rules
+    /// out; a plain build keeps every item (grey when the document refuses it).
+    #[test]
+    fn the_menu_policy_follows_the_host_policy_and_read_only() {
+        use crate::comments::{CommentTool, MenuPolicy};
+        let keep = [("comment.list", false), ("comment.note", false), ("edit.copy", false)];
+        let p = MenuPolicy::of(&with_policy_app(true, true, &keep));
+        assert!(p.host && !p.panel && !p.copy && !p.tool(CommentTool::Note));
+        assert!(p.tool(CommentTool::Highlight), "a tool the policy left on");
+        assert!(!p.makes_comments(CommentTool::Highlight, false), "read-only: no comment items");
+        assert!(p.makes_comments(CommentTool::Highlight, true));
+        assert!(!p.page_tail(true, true), "note and panel both off: nothing below the picture items");
+        // Defaults: a viewer has the sticky note and the panel; read-only drops only the note.
+        let d = MenuPolicy::of(&with_policy_app(true, true, &[]));
+        assert!(d.panel && d.copy && d.page_tail(true, false));
+        assert!(!d.makes_comments(CommentTool::Note, false));
+        // No lock: everything stays, whatever the policy says.
+        let plain = MenuPolicy::of(&with_policy_app(false, true, &keep));
+        assert!(!plain.host && plain.panel && plain.copy && plain.makes_comments(CommentTool::Note, false));
+    }
+
+    /// The page's right-click menu: a host build leaves out the sticky note of a read-only document
+    /// and the Comments panel when `comment.list` is off; a plain build keeps both (the note grey).
+    #[test]
+    fn the_page_menu_follows_the_policy_and_read_only() {
+        use egui_kittest::kittest::Queryable;
+        let menu = |lock: bool, read_only: bool, policy: &[(&str, bool)]| {
+            let mut app = with_policy_app(lock, read_only, policy);
+            app.choose_right_panel(None);
+            let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_| app);
+            h.run_steps(4);
+            let at = egui::pos2(700.0, 450.0);
+            h.event(egui::Event::PointerMoved(at));
+            for pressed in [true, false] {
+                h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() });
+            }
+            h.run_steps(4);
+            (
+                h.query_by_label_contains("Copy").is_some(),
+                h.query_by_label("Add a sticky note here").is_some(),
+                h.query_by_label("Comments panel").is_some(),
+            )
+        };
+        assert_eq!(menu(true, false, &[]), (true, true, true), "default policy: as before");
+        assert_eq!(menu(true, true, &[]), (true, false, true), "read-only: no sticky note");
+        assert_eq!(menu(true, false, &[("comment.list", false), ("comment.note", false)]), (true, false, false));
+        assert_eq!(menu(true, false, &[("edit.copy", false)]), (false, true, true));
+        assert_eq!(menu(false, true, &[("comment.list", false)]), (true, true, true), "no lock: every item stays");
+    }
+
+    /// The accessibility panels are not on for a viewer by grade, yet they open from the side-panel
+    /// list as they always did; only a policy that names their command off shuts them.
+    #[test]
+    fn the_accessibility_panels_open_unless_the_policy_turns_them_off() {
+        use crate::RightPanel;
+        for p in [RightPanel::Accessibility, RightPanel::Tags] {
+            let mut app = with_policy_app(true, false, &[]);
+            app.choose_right_panel(Some(p));
+            assert_eq!(app.right, Some(p), "default policy: {p:?} opens as before");
+        }
+        let mut app = with_policy_app(true, false, &[("a11y.report", false), ("a11y.tags", false)]);
+        for p in [RightPanel::Accessibility, RightPanel::Tags] {
+            app.choose_right_panel(Some(p));
+            assert_eq!(app.right, None, "{p:?}");
+        }
+    }
+
+    /// The palette lists the comment tool group only where comments can be made.
+    #[test]
+    fn the_palette_hides_the_comment_group_when_comments_are_off() {
+        use egui_kittest::kittest::Queryable;
+        let shown = |read_only: bool, policy: &[(&str, bool)]| {
+            let mut app = with_policy_app(true, read_only, policy);
+            app.palette_open = true;
+            app.palette_query = "Add comments".into();
+            let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_| app);
+            h.run_steps(4);
+            h.query_by_label("Add comments").is_some()
+        };
+        // Other groups stay in the palette under the default policy, viewer or not.
+        let other = |label: &str| {
+            let mut app = with_policy_app(true, false, &[]);
+            app.palette_open = true;
+            app.palette_query = label.into();
+            let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_| app);
+            h.run_steps(4);
+            h.query_by_label(label).is_some()
+        };
+        assert!(other("Scan & OCR"), "a group other than comments is still listed");
+        assert!(shown(false, &[]), "default: listed");
+        assert!(!shown(true, &[]), "read-only: nothing to add");
+        let mut off: Vec<_> = crate::comments::ALL.iter().map(|t| (t.command(), false)).collect();
+        off.extend([("comment.list", false), ("comment.flatten", false)]);
+        off.sort();
+        assert!(!shown(false, &off), "every command of the group off");
+    }
+
+    /// The menu of a selected comment: a host build on a read-only document leaves out the edits,
+    /// the reply and the delete (the text copy stays while `edit.copy` is on, and goes with it);
+    /// a plain build keeps every item.
+    #[test]
+    fn the_selected_comment_menu_follows_the_policy_and_read_only() {
+        use egui_kittest::kittest::Queryable;
+        use pdfcraft_engine::{Edit, NewAnnotation, NoteIcon, Shape, Style};
+        // Returns the labels asked about that show, and whether the menu has an item for the comment.
+        let menu = |lock: bool, read_only: bool, policy: &[(&str, bool)]| {
+            let mut app = with_policy_app(lock, false, &[]);
+            // A note written while the document takes edits, then the rules the case wants.
+            app.session.set_ownership(Ownership { scope: EditScope::Viewer, ..Default::default() });
+            let id = app.active_ids().unwrap().1;
+            let style = Style { color: [1.0, 0.8, 0.0], opacity: 1.0, width: 1.0, fill: None };
+            let note = NewAnnotation { page: 0, shape: Shape::Note { at: [50.0, 50.0], icon: NoteIcon::Comment }, style, contents: "n".into(), author: "A".into() };
+            app.session.apply(id, Edit::AddAnnotation(note)).expect("note");
+            let own = Ownership { scope: EditScope::Viewer, read_only, ..Default::default() };
+            app.session.set_ownership(with_policy(own, policy.iter().map(|(k, v)| (k.to_string(), *v)).collect()));
+            let index = app.session.get(id).unwrap().info.annotations[0].index;
+            app.views[0].comments.selected = Some((0, index));
+            let has_items = {
+                let policy = crate::comments::MenuPolicy::of(&app);
+                let allowed = app.session.get(id).unwrap().allows_annotation();
+                policy.comment_menu_has_items(&app.views[0], &app.session.get(id).unwrap().info, false, allowed)
+            };
+            let mut h = egui_kittest::Harness::new_ui_state(
+                move |ui, app: &mut PdfCraftApp| {
+                    let policy = crate::comments::MenuPolicy::of(app);
+                    let doc = app.session.get(id).unwrap();
+                    let allowed = doc.allows_annotation();
+                    crate::comments::context_menu(ui, &mut app.views[0], &doc.info, doc, &app.comment_prefs, allowed, &policy, false);
+                },
+                app,
+            );
+            h.run();
+            let shown = ["Edit text…", "Reply", "Set status", "Delete", "Properties…", "Copy text"].map(|l| h.query_by_label(l).is_some());
+            (shown, has_items)
+        };
+        // Edit, Reply, Set status, Delete, Properties, Copy text.
+        assert_eq!(menu(true, false, &[]).0, [true, true, true, true, true, true], "default policy: as before");
+        assert_eq!(menu(true, true, &[]), ([false, false, false, false, false, true], true), "read-only: the text copy stays");
+        assert_eq!(menu(true, true, &[("edit.copy", false)]), ([false; 6], false), "nothing left: no empty box");
+        assert_eq!(menu(true, false, &[("comment.list", false)]).0[1], false, "no Comments panel, no Reply");
+        assert_eq!(menu(false, true, &[("edit.copy", false)]).0, [true, true, true, true, true, true], "no lock: every item stays");
+    }
+
+    /// `edit.copy` off: the copy of the selected text (⌘C, the menus, the bar) copies nothing.
+    #[test]
+    fn copying_selected_text_follows_edit_copy() {
+        let glyph = pdfcraft_render::TextGlyph { text: "x".into(), rect: [0.0, 0.0, 10.0, 10.0], quad: [[0.0, 0.0]; 4], direction: [1.0, 0.0] };
+        let text = pdfcraft_render::PageText { glyphs: vec![glyph], line_of: vec![0], space_before: vec![false] };
+        // With a real selection: on by default, nothing copied once `edit.copy` is off.
+        let copies = |policy: &[(&str, bool)]| {
+            let mut app = with_policy_app(true, false, policy);
+            app.views[0].texts.insert(0, std::sync::Arc::new(text.clone()));
+            app.views[0].select_text(0, 0, 0);
+            app.copy_selected_text(0, &egui::Context::default())
+        };
+        assert!(copies(&[]));
+        assert!(!copies(&[("edit.copy", false)]));
+    }
+
+    /// `panelTabs: false` takes the tab strip ("Inspector") off the side panel; by default it shows.
+    #[test]
+    fn the_panel_tab_goes_when_the_host_asks() {
+        use egui_kittest::kittest::Queryable;
+        let shown = |hide: bool| {
+            let mut app = with_policy_app(true, false, &[]);
+            app.session.set_open_ownership(Ownership { hide_panel_tabs: hide, ..Default::default() });
+            app.open_bytes("b.pdf", None, pdf()).unwrap();
+            app.choose_right_panel(Some(crate::RightPanel::Pages));
+            let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_| app);
+            h.run_steps(4);
+            assert_eq!(h.state_mut().panel_tabs_hidden(), hide);
+            assert_eq!(h.state().right, Some(crate::RightPanel::Pages), "the panel itself stays");
+            h.query_by_label("Inspector").is_some()
+        };
+        assert!(shown(false), "default: the tab shows as it did");
+        assert!(!shown(true));
     }
 
     /// `parse_mode`, whatever the build: the document gets what the host said.

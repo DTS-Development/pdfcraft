@@ -400,12 +400,15 @@ pub fn show(app: &mut crate::PdfCraftApp, ui: &mut egui::Ui) {
     if app.host_viewer() && rendered.contains(&Panel::Tools) {
         let _ = rendered.apply(Action::Close { panel: Panel::Tools });
     }
+    // `panelTabs: false`: the side panel is drawn bare (no tab strip, nothing to drag, float or close
+    // from it), as the document view is. Its own header has the close button.
+    let bare_inspector = app.panel_tabs_hidden();
     let output = DockArea::new(egui::Id::new("pdfcraft-docking")).show_with_limits(
         ui,
         &rendered,
         &style,
         |panel| crate::i18n::t(panel.label()).into(),
-        permissions,
+        |panel| if bare_inspector && *panel == Panel::Inspector { Permissions::PROTECTED } else { permissions(panel) },
         panel_limits,
         |ui, panel| match panel {
             Panel::Canvas => {

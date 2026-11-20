@@ -516,6 +516,7 @@ impl PdfCraftApp {
                     if let Some(own) = self.session.get(new).map(|d| d.ownership().clone()) {
                         self.session.set_open_ownership(pdfcraft_engine::Ownership {
                             hide_menu_button: own.hide_menu_button,
+                            hide_panel_tabs: own.hide_panel_tabs,
                             show_zoom_controls: own.show_zoom_controls,
                             ..previous.clone()
                         });

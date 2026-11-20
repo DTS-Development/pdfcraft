@@ -2438,6 +2438,28 @@ impl PdfCraftApp {
         }
     }
 
+    /// Whether the host lets `panel` open: the command that opens it is on (the rail uses the same
+    /// ids) and, for Comments, the host did not hide the panel (`commentsPanel: false`). Always
+    /// true without the host lock; panels with no command of their own are always allowed.
+    pub(crate) fn right_panel_allowed(&self, panel: RightPanel) -> bool {
+        let command = match panel {
+            RightPanel::Comments => {
+                if self.comments_panel_hidden() {
+                    return false;
+                }
+                "comment.list"
+            }
+            RightPanel::Fields => "form.fields",
+            RightPanel::Signatures => "sign.panel",
+            // These two are not on for a viewer by grade, yet the side-panel list always opened
+            // them; only a policy that names them off shuts them (default policy stays as before).
+            RightPanel::Accessibility => return !self.host_policy_turned_off("a11y.report"),
+            RightPanel::Tags => return !self.host_policy_turned_off("a11y.tags"),
+            _ => return true,
+        };
+        self.host_allows(command)
+    }
+
     /// Opens a right panel, or closes it with `None`, because the user chose to. Closing Comments
     /// keeps comment tools from reopening it; opening it again lets them (#225). A choice made in
     /// Read mode replaces the pane saved on the way in, so leaving Read mode doesn't undo it.
@@ -2445,7 +2467,7 @@ impl PdfCraftApp {
         if self.mode == Mode::Read {
             self.right_before_read = None;
         }
-        if panel == Some(RightPanel::Comments) && self.comments_panel_hidden() {
+        if panel.is_some_and(|p| !self.right_panel_allowed(p)) {
             return;
         }
         // The host kept the list of differences away (`changeList: false`).
@@ -3139,7 +3161,8 @@ impl PdfCraftApp {
         let Some((id, text)) = self.views.get(i).and_then(|v| Some((v.id, v.selected_text()?))).filter(|(_, text)| !text.is_empty()) else {
             return false;
         };
-        if !self.may_copy(id) {
+        // `edit.copy` off: the key, the menus and the selection bar all copy nothing.
+        if !self.host_allows("edit.copy") || !self.may_copy(id) {
             return false;
         }
         ctx.copy_text(text);
@@ -3389,8 +3412,9 @@ impl eframe::App for PdfCraftApp {
         self.host_view_tick(ctx);
         self.host_compare_tick();
         self.host_bytes_tick();
-        // The host hid this interface's comments panel: nothing opens it again.
-        if self.right == Some(RightPanel::Comments) && self.comments_panel_hidden() {
+        // The host hid this interface's comments panel, or turned off the command that opens a
+        // panel: whatever way it was opened (a menu, a direct write), it closes again.
+        if self.right.is_some_and(|p| !self.right_panel_allowed(p)) {
             self.right = None;
         }
         self.guard_quit(ctx);

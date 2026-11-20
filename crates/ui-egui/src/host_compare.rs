@@ -312,12 +312,13 @@ impl PdfCraftApp {
         // The rules come from this request alone, never from an open that came before it.
         // Both files are only looked at: read-only, so nothing here is ever saved back to the parent.
         // Only the look of the top bar carries over from the document the host opened: the rules are the request's own.
-        let (hide_menu_button, show_zoom_controls) = (self.menu_button_hidden(), self.zoom_controls_shown());
+        let (hide_menu_button, show_zoom_controls, hide_panel_tabs) = (self.menu_button_hidden(), self.zoom_controls_shown(), self.panel_tabs_hidden());
         self.session.set_open_ownership(pdfcraft_engine::Ownership {
             read_only: true,
             annot_sync: false,
             hide_comments_panel: false,
             hide_menu_button,
+            hide_panel_tabs,
             show_zoom_controls,
             ..ownership
         });
@@ -634,7 +635,7 @@ mod tests {
     fn compare_open_keeps_the_top_bar_look_of_the_hosts_document() {
         use pdfcraft_engine::Ownership;
         let (mut h, events) = app(true);
-        h.state_mut().session.set_open_ownership(Ownership { hide_menu_button: true, show_zoom_controls: true, ..Default::default() });
+        h.state_mut().session.set_open_ownership(Ownership { hide_menu_button: true, show_zoom_controls: true, hide_panel_tabs: true, ..Default::default() });
         h.state_mut().open_bytes_with_focus("a.pdf", None, text_pdf("x"), true).unwrap();
         send(&mut h, command("c1"));
         assert!(matches!(events.borrow().as_slice(), [CompareEvent::Done { .. }]), "{:?}", events.borrow());
@@ -642,7 +643,7 @@ mod tests {
         let s = state.compare.as_ref().unwrap();
         for id in [s.old, s.new] {
             let own = state.session.get(id).unwrap().ownership();
-            assert!(own.hide_menu_button && own.show_zoom_controls, "{own:?}");
+            assert!(own.hide_menu_button && own.show_zoom_controls && own.hide_panel_tabs, "{own:?}");
         }
         assert!(state.menu_button_hidden() && state.zoom_controls_shown());
     }
@@ -653,7 +654,7 @@ mod tests {
     fn report_tab_keeps_the_top_bar_look() {
         use pdfcraft_engine::Ownership;
         let (mut h, events) = app(true);
-        h.state_mut().session.set_open_ownership(Ownership { hide_menu_button: true, show_zoom_controls: true, ..Default::default() });
+        h.state_mut().session.set_open_ownership(Ownership { hide_menu_button: true, show_zoom_controls: true, hide_panel_tabs: true, ..Default::default() });
         h.state_mut().open_bytes_with_focus("a.pdf", None, text_pdf("x"), true).unwrap();
         send(&mut h, command("c1"));
         assert!(matches!(events.borrow().as_slice(), [CompareEvent::Done { .. }]), "{:?}", events.borrow());
@@ -664,7 +665,7 @@ mod tests {
         assert_eq!(h.state().views.len(), before + 1, "the report opened a tab");
         let id = h.state().views.last().unwrap().id;
         let own = h.state().session.get(id).unwrap().ownership();
-        assert!(own.hide_menu_button && own.show_zoom_controls, "{own:?}");
+        assert!(own.hide_menu_button && own.show_zoom_controls && own.hide_panel_tabs, "{own:?}");
         assert_eq!(*h.state().session.open_ownership(), rules, "later opens keep the rules they had");
     }
 

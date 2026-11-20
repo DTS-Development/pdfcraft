@@ -2497,6 +2497,8 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         }
         return;
     }
+    // What the host's policy leaves of the page menus, read before the document is borrowed.
+    let menu_policy = comments::MenuPolicy::of(app);
     let Some(doc) = app.session.get(app.views[index].id) else { return };
     let info = &doc.info;
     if info.pages.is_empty() {
@@ -2536,7 +2538,11 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
             }
         }
         Some(Notice::Close) => {}
-        Some(Notice::Signatures) => app.right = Some(RightPanel::Signatures),
+        Some(Notice::Signatures) => {
+            if app.right_panel_allowed(RightPanel::Signatures) {
+                app.right = Some(RightPanel::Signatures);
+            }
+        }
         Some(Notice::FieldHighlights(on)) => app.view_defaults.highlight_fields = on,
         Some(Notice::Console) if app.host_allows("tools.js_console") => app.dialog = Some(crate::Dialog::JsConsole),
         Some(Notice::Console) => {}
@@ -3881,18 +3887,23 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                 }
                 return;
             }
-            if view.comments.selected.is_none() {
+            // Items shown so far, so a separator goes only between groups that have items.
+            let mut shown = false;
+            if view.comments.selected.is_none() && menu_policy.copy && (can_copy || !menu_policy.host) {
                 let selected = view.selected_text().is_some_and(|t| !t.is_empty());
                 let key = crate::commands::shortcut_label(ui.ctx(), crate::commands::COPY);
                 if ui.add_enabled(can_copy && selected, egui::Button::new(tl!("Copy")).shortcut_text(key)).clicked() {
                     copy_selected = true;
                     ui.close();
                 }
-                ui.separator();
+                shown = true;
             }
-            // Over a picture (and no comment): Copy Image, as in Acrobat's page menu.
+            // Over a picture (and no comment): Copy Image, as in Acrobat's page menu. A host build
+            // follows `edit.copy`, and leaves them out where the document's security refuses copying.
             let mut copy_image = None;
             if view.comments.selected.is_none()
+                && menu_policy.copy
+                && (can_copy || !menu_policy.host)
                 && let Some((page, at)) = view.comments.context_at
             {
                 // The page's content is parsed once per right-click, not on every frame the menu is open.
@@ -3907,6 +3918,10 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                     }
                 };
                 if let Some(image) = hit {
+                    if shown {
+                        ui.separator();
+                    }
+                    shown = true;
                     if ui.button(tl!("Copy Image")).clicked() {
                         copy_image = Some(comments::CanvasAction::CopyImage(page, image));
                         ui.close();
@@ -3915,10 +3930,14 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                         copy_image = Some(comments::CanvasAction::CopyImageFile(page, image));
                         ui.close();
                     }
-                    ui.separator();
                 }
             }
-            canvas_action = comments::context_menu(ui, view, info, doc, prefs, allowed).or(copy_image);
+            let tail = menu_policy.comment_menu_has_items(view, info, view.comments.context_at.is_some(), allowed);
+            canvas_action = comments::context_menu(ui, view, info, doc, prefs, allowed, &menu_policy, shown).or(copy_image);
+            // Nothing to offer here (a host build with every item off): no empty box.
+            if !shown && !tail {
+                ui.close();
+            }
         });
         (wanted, visible_now)
     });
@@ -3933,7 +3952,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
     view.viewport_screen = out.inner_rect;
     view.auto_scroll.paint(ui, avail);
     if unobstructed && matches!(tool, QuickTool::Select | QuickTool::ColumnSelect) {
-        copy_selected |= selection_actions(ui, avail, view, info, prefs, allowed && !comments_hidden, can_copy);
+        copy_selected |= selection_actions(ui, avail, view, info, prefs, allowed && !comments_hidden, can_copy, &menu_policy, allowed);
     }
     // The host's own buttons next to the selected annotation (viewer and read-only documents too).
     if unobstructed && matches!(tool, QuickTool::Select | QuickTool::Fill(_)) {
@@ -4142,8 +4161,10 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         Some(comments::CanvasAction::Edit(e)) => view.pending_edit = Some(*e),
         // `choose_right_panel` would borrow all of `app` while `view` is held; same effect.
         Some(comments::CanvasAction::OpenComments) => {
-            app.right = Some(RightPanel::Comments);
-            app.comments_panel_closed = false;
+            if menu_policy.panel {
+                app.right = Some(RightPanel::Comments);
+                app.comments_panel_closed = false;
+            }
         }
         Some(comments::CanvasAction::Properties(p, i)) => open_props = Some((p, i)),
         Some(comments::CanvasAction::CopyImage(p, i)) => image_action = Some(crate::edit_text_ui::ImageAction::Copy(p, i)),
@@ -4174,7 +4195,9 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
     if let Some(field) = app.views[index].sign.field.take() {
         let signed = app.session.get(app.views[index].id).is_some_and(|d| d.signatures.iter().any(|s| s.field == field && s.signed));
         if signed {
-            app.right = Some(RightPanel::Signatures);
+            if app.right_panel_allowed(RightPanel::Signatures) {
+                app.right = Some(RightPanel::Signatures);
+            }
             if !app.sig_expanded.contains(&field) {
                 app.sig_expanded.push(field);
             }
@@ -4294,6 +4317,8 @@ fn selection_actions(
     prefs: &comments::CommentPrefs,
     can_comment: bool,
     can_copy: bool,
+    policy: &comments::MenuPolicy,
+    allowed: bool,
 ) -> bool {
     if ui.input(|input| input.pointer.is_decidedly_dragging()) {
         return false;
@@ -4318,22 +4343,31 @@ fn selection_actions(
     }
     let x = rect.left().clamp(viewport.left() + 8.0, (viewport.right() - 520.0).max(viewport.left() + 8.0));
     let y = if rect.bottom() + 48.0 < viewport.bottom() { rect.bottom() + 6.0 } else { (rect.top() - 44.0).max(viewport.top() + 6.0) };
+    // A host build leaves out what its policy turns off, and the comment buttons of a read-only document.
+    let buttons: Vec<_> = [
+        (tl!("Add comment"), SelectionAction::Note, comments::CommentTool::Note),
+        (tl!("Highlight"), SelectionAction::Markup(comments::CommentTool::Highlight), comments::CommentTool::Highlight),
+        (tl!("Underline"), SelectionAction::Markup(comments::CommentTool::Underline), comments::CommentTool::Underline),
+        (tl!("Strikethrough"), SelectionAction::Markup(comments::CommentTool::StrikeOut), comments::CommentTool::StrikeOut),
+        (tl!("Replace text"), SelectionAction::Replace, comments::CommentTool::ReplaceText),
+    ]
+    .into_iter()
+    .filter(|(_, _, tool)| policy.makes_comments(*tool, allowed))
+    .collect();
+    let copy_button = policy.copy && (can_copy || !policy.host);
+    if buttons.is_empty() && !copy_button {
+        return false;
+    }
     let mut chosen = None;
     egui::Area::new(egui::Id::new(("text-selection-actions", view.id.0))).order(egui::Order::Foreground).fixed_pos(pos2(x, y)).show(ui.ctx(), |ui| {
         egui::Frame::popup(ui.style()).show(ui, |ui| {
             ui.horizontal(|ui| {
-                for (label, action) in [
-                    (tl!("Add comment"), SelectionAction::Note),
-                    (tl!("Highlight"), SelectionAction::Markup(comments::CommentTool::Highlight)),
-                    (tl!("Underline"), SelectionAction::Markup(comments::CommentTool::Underline)),
-                    (tl!("Strikethrough"), SelectionAction::Markup(comments::CommentTool::StrikeOut)),
-                    (tl!("Replace text"), SelectionAction::Replace),
-                ] {
-                    if ui.add_enabled(can_comment, egui::Button::new(label)).clicked() {
-                        chosen = Some(action);
+                for (label, action, _) in &buttons {
+                    if ui.add_enabled(can_comment, egui::Button::new(*label)).clicked() {
+                        chosen = Some(*action);
                     }
                 }
-                if ui.add_enabled(can_copy, egui::Button::new(tl!("Copy"))).clicked() {
+                if copy_button && ui.add_enabled(can_copy, egui::Button::new(tl!("Copy"))).clicked() {
                     chosen = Some(SelectionAction::Copy);
                 }
             });

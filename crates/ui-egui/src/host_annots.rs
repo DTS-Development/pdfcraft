@@ -201,6 +201,11 @@ impl PdfCraftApp {
         self.active_ids().and_then(|(_, id)| self.session.get(id)).is_some_and(|d| d.ownership().hide_menu_button)
     }
 
+    /// The active document's host asked to hide the tab strip over the side panel.
+    pub(crate) fn panel_tabs_hidden(&self) -> bool {
+        self.active_ids().and_then(|(_, id)| self.session.get(id)).is_some_and(|d| d.ownership().hide_panel_tabs)
+    }
+
     /// The active document's host asked for the zoom controls in the top bar.
     pub(crate) fn zoom_controls_shown(&self) -> bool {
         self.active_ids().and_then(|(_, id)| self.session.get(id)).is_some_and(|d| d.ownership().show_zoom_controls)

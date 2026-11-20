@@ -75,7 +75,13 @@ pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
             ));
         }
     }
+    // A host build drops the comment group when none of its commands may run or the active
+    // document takes no comments (read-only); other groups are listed as before.
+    let takes_comments = app.active_ids().and_then(|(_, id)| app.session.get(id)).is_none_or(|d| d.allows_annotation());
     for g in TOOL_GROUPS {
+        if app.host_locked() && g.id == "comment" && (!app.host_group_shown(g) || !takes_comments) {
+            continue;
+        }
         if let Some(s) = score(tl!(g.label), &q).or_else(|| score(g.label, &q)) {
             hits.push((
                 s,
