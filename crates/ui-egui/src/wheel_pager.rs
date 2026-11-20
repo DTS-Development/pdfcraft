@@ -5,7 +5,7 @@
 //! `MouseWheel` events: egui's smoothed scroll delta spreads one notch over several frames, so
 //! notches in quick succession blur together. Smooth input (trackpads, high-resolution wheels)
 //! turns one page per gesture and direction once it has moved as far as a notch scrolls. A
-//! gesture is a touch from [`TouchPhase::Start`] to `End`, together with the momentum phase
+//! notch is a gesture of its own. A smooth gesture is a touch from [`TouchPhase::Start`] to `End`, together with the momentum phase
 //! the OS sends after it (macOS and Wayland report touch phases), or, without phases, a burst
 //! of input with no pause longer than `BURST_GAP_SECS`.
 
@@ -134,9 +134,10 @@ impl WheelPager {
             return None;
         }
         let forward = dy < 0.0;
-        // A pause ends the gesture, notch or not: a notch that turned a page must not keep the
-        // pager owning the vertical axis (`gesture_turned`) until a smooth event came, which a
-        // wheel never sends, or the next page could not be scrolled at all.
+        // A pause ends the gesture (a notch is a gesture of its own, see below): a notch that
+        // turned a page must not keep the pager owning the vertical axis (`gesture_turned`)
+        // until a smooth event came, which a wheel never sends, or the next page could not be
+        // scrolled at all.
         if self.touch.is_none() && idle > BURST_GAP_SECS {
             self.new_gesture();
         }
@@ -149,10 +150,10 @@ impl WheelPager {
                 MouseWheelUnit::Line => cfg!(target_os = "macos") || dy.abs() >= 1.0,
                 MouseWheelUnit::Page => true,
                 // Events of one frame carry the same time, so a second notch in the frame has no
-                // gap to its predecessor; it is a notch if the one before it was and is about as large (a
-                // wheel repeats its step, a trackpad swipe ramps up).
+                // gap to its predecessor; it is a notch if the one before it was and is the same size, give
+                // or take 1% (a wheel repeats its step exactly, a trackpad swipe never does).
                 MouseWheelUnit::Point => {
-                    let repeat = idle == 0.0 && self.last_notch > 0.0 && dy.abs() <= 1.5 * self.last_notch && dy.abs() * 1.5 >= self.last_notch;
+                    let repeat = idle == 0.0 && self.last_notch > 0.0 && (dy.abs() - self.last_notch).abs() <= 0.01 * self.last_notch;
                     dy.abs() >= MIN_NOTCH_POINTS && (idle >= DENSE_GAP_SECS || repeat)
                 }
             };
@@ -263,6 +264,15 @@ mod tests {
             assert_eq!(p.feed_edge(Point, -100.0, Move, 1.0 + f64::from(k) * 0.05, false), None);
             assert!(!p.gesture_turned(), "notch {k} still held by the turn");
         }
+    }
+
+    #[test]
+    fn a_phaseless_swipe_start_in_one_frame_turns_once() {
+        let mut p = WheelPager::default();
+        // Two unequal events with the same frame time: the first looks like a notch, the second
+        // is the swipe's own ramp-up and must not count as another notch.
+        assert_eq!(p.feed_edge(Point, -10.0, Move, 1.0, true), Some(true));
+        assert_eq!(p.feed_edge(Point, -12.0, Move, 1.0, true), None);
     }
 
     #[test]
