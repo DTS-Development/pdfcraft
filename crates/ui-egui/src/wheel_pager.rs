@@ -5,7 +5,7 @@
 //! `MouseWheel` events: egui's smoothed scroll delta spreads one notch over several frames, so
 //! notches in quick succession blur together. Smooth input (trackpads, high-resolution wheels)
 //! turns one page per gesture and direction once it has moved as far as a notch scrolls. A
-//! gesture is a touch from [`TouchPhase::Start`] to `End`, together with the momentum phase
+//! notch is a gesture of its own. A smooth gesture is a touch from [`TouchPhase::Start`] to `End`, together with the momentum phase
 //! the OS sends after it (macOS and Wayland report touch phases), or, without phases, a burst
 //! of input with no pause longer than `BURST_GAP_SECS`.
 
@@ -53,6 +53,8 @@ pub(crate) struct WheelPager {
     last_event: f64,
     /// egui time of the last smooth (non-notch) motion.
     last_smooth: f64,
+    /// Size of the last event if it was taken for a notch, else 0.
+    last_notch: f32,
     /// The current smooth gesture already panned the page (edge paging only): it must end
     /// before it can turn, so momentum that carries the view to the page's edge doesn't go on
     /// to turn the page.
@@ -62,7 +64,7 @@ pub(crate) struct WheelPager {
 impl Default for WheelPager {
     fn default() -> Self {
         // Infinitely long ago, so the first event never looks like part of a stream.
-        Self { accum: 0.0, turned: None, touch: None, finger_up: None, last_event: f64::NEG_INFINITY, last_smooth: f64::NEG_INFINITY, panned: false }
+        Self { accum: 0.0, turned: None, touch: None, finger_up: None, last_event: f64::NEG_INFINITY, last_smooth: f64::NEG_INFINITY, last_notch: 0.0, panned: false }
     }
 }
 
@@ -132,6 +134,13 @@ impl WheelPager {
             return None;
         }
         let forward = dy < 0.0;
+        // A pause ends the gesture (a notch is a gesture of its own, see below): a notch that
+        // turned a page must not keep the pager owning the vertical axis (`gesture_turned`)
+        // until a smooth event came, which a wheel never sends, or the next page could not be
+        // scrolled at all.
+        if self.touch.is_none() && idle > BURST_GAP_SECS {
+            self.new_gesture();
+        }
         let smooth_stream = self.touch.is_some() || now - self.last_smooth <= BURST_GAP_SECS;
         let notch = !smooth_stream
             && match unit {
@@ -140,19 +149,26 @@ impl WheelPager {
                 // touchpad motion.
                 MouseWheelUnit::Line => cfg!(target_os = "macos") || dy.abs() >= 1.0,
                 MouseWheelUnit::Page => true,
-                MouseWheelUnit::Point => dy.abs() >= MIN_NOTCH_POINTS && idle >= DENSE_GAP_SECS,
+                // Events of one frame carry the same time, so a second notch in the frame has no
+                // gap to its predecessor; it is a notch if the one before it was and is the same size, give
+                // or take 1% (a wheel repeats its step exactly, a trackpad swipe never does).
+                MouseWheelUnit::Point => {
+                    let repeat = idle == 0.0 && self.last_notch > 0.0 && (dy.abs() - self.last_notch).abs() <= 0.01 * self.last_notch;
+                    dy.abs() >= MIN_NOTCH_POINTS && (idle >= DENSE_GAP_SECS || repeat)
+                }
             };
+        self.last_notch = if notch { dy.abs() } else { 0.0 };
         if notch {
+            // A notch is an input of its own, not a part of the gesture before it: without this a
+            // wheel kept spinning after a turn would leave `turned` set and the page it turned to
+            // could not scroll until the user paused.
+            self.new_gesture();
             if !can_turn {
                 return None;
             }
             // Every notch turns a page; a smooth tail of the same gesture won't add another.
-            self.accum = 0.0;
             self.turned = Some(forward);
             return Some(forward);
-        }
-        if self.touch.is_none() && idle > BURST_GAP_SECS {
-            self.new_gesture();
         }
         self.last_smooth = now;
         if !can_turn {
@@ -210,6 +226,53 @@ mod tests {
         }
         events.push((Point, 0.0, End, at));
         events
+    }
+
+    #[test]
+    fn a_notch_that_turned_ends_its_gesture_after_a_pause() {
+        let mut p = WheelPager::default();
+        assert_eq!(p.feed_edge(Point, -100.0, Move, 1.0, true), Some(true));
+        assert!(p.gesture_turned());
+        // The next notch, after a pause, starts a new gesture: it pans (cannot turn) and the
+        // pager no longer owns the vertical axis.
+        assert_eq!(p.feed_edge(Point, -100.0, Move, 2.0, false), None);
+        assert!(!p.gesture_turned());
+    }
+
+    #[test]
+    fn notches_in_quick_succession_each_start_their_own_gesture() {
+        let mut p = WheelPager::default();
+        assert_eq!(p.feed_edge(Point, -100.0, Move, 1.0, true), Some(true));
+        assert!(p.gesture_turned());
+        // The next notch, 50 ms later, finds the new page not at its end: it pans, and the pager
+        // lets go of the vertical axis at once instead of waiting for a pause.
+        assert_eq!(p.feed_edge(Point, -100.0, Move, 1.05, false), None);
+        assert!(!p.gesture_turned());
+        assert_eq!(p.feed_edge(Point, -100.0, Move, 1.10, false), None);
+        // At the page's end the next notch turns again.
+        assert_eq!(p.feed_edge(Point, -100.0, Move, 1.15, true), Some(true));
+    }
+
+    #[test]
+    fn two_notches_in_one_frame_do_not_stall_the_wheel() {
+        let mut p = WheelPager::default();
+        // The frame time stamps both events alike, so the second looks like a smooth event.
+        assert_eq!(p.feed_edge(Point, -100.0, Move, 1.0, true), Some(true));
+        assert_eq!(p.feed_edge(Point, -100.0, Move, 1.0, false), None);
+        // The spin goes on 50 ms apart: the page must be pannable, not held by the turn.
+        for k in 1..=6 {
+            assert_eq!(p.feed_edge(Point, -100.0, Move, 1.0 + f64::from(k) * 0.05, false), None);
+            assert!(!p.gesture_turned(), "notch {k} still held by the turn");
+        }
+    }
+
+    #[test]
+    fn a_phaseless_swipe_start_in_one_frame_turns_once() {
+        let mut p = WheelPager::default();
+        // Two unequal events with the same frame time: the first looks like a notch, the second
+        // is the swipe's own ramp-up and must not count as another notch.
+        assert_eq!(p.feed_edge(Point, -10.0, Move, 1.0, true), Some(true));
+        assert_eq!(p.feed_edge(Point, -12.0, Move, 1.0, true), None);
     }
 
     #[test]
