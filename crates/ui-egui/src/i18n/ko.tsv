@@ -14,7 +14,7 @@
 	Help	도움말
 	Zoom	확대/축소
 	Actual size	실제 크기
-	Zoom to page level	페이지 수준으로 확대/축소
+	Zoom to page level	페이지에 맞춤
 	Zoom — type a percentage and press Enter	확대/축소 — 비율을 입력하고 Enter 키를 누르세요
 	Fit to width	너비에 맞춤
 	Display theme	화면 테마
@@ -1194,7 +1194,6 @@ theme	Appearance	화면 모양
 	To change locked fields, also set Locked to No.	잠긴 필드를 변경하려면 잠금도 아니요로 설정하세요.
 	To:	끝:
 	Today: {date}	오늘: {date}
-	Toggle fit page / fit width	페이지 맞춤 / 너비 맞춤 전환
 	Tool	도구
 	Tools panel side	도구 패널 위치
 	Tooltip:	도구 설명:

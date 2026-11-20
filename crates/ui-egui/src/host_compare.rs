@@ -311,7 +311,16 @@ impl PdfCraftApp {
         self.disarm_stamp();
         // The rules come from this request alone, never from an open that came before it.
         // Both files are only looked at: read-only, so nothing here is ever saved back to the parent.
-        self.session.set_open_ownership(pdfcraft_engine::Ownership { read_only: true, annot_sync: false, hide_comments_panel: false, ..ownership });
+        // Only the look of the top bar carries over from the document the host opened: the rules are the request's own.
+        let (hide_menu_button, show_zoom_controls) = (self.menu_button_hidden(), self.zoom_controls_shown());
+        self.session.set_open_ownership(pdfcraft_engine::Ownership {
+            read_only: true,
+            annot_sync: false,
+            hide_comments_panel: false,
+            hide_menu_button,
+            show_zoom_controls,
+            ..ownership
+        });
         let before = self.views.len();
         let opened = [(old, false), (new, true)].into_iter().try_for_each(|((name, bytes), activate)| {
             let name = if name.trim().is_empty() { "document.pdf".to_string() } else { name };
@@ -617,6 +626,25 @@ mod tests {
             assert!(own.allow.has(pdfcraft_engine::EditClass::Page));
             assert!(own.read_only, "a compared file is only looked at, never saved back");
         }
+    }
+
+    /// The top bar's look (`menuButton`, `zoomControls`) of the document the host opened carries to
+    /// the compared files, so the tab that becomes active does not bring the menu button back.
+    #[test]
+    fn compare_open_keeps_the_top_bar_look_of_the_hosts_document() {
+        use pdfcraft_engine::Ownership;
+        let (mut h, events) = app(true);
+        h.state_mut().session.set_open_ownership(Ownership { hide_menu_button: true, show_zoom_controls: true, ..Default::default() });
+        h.state_mut().open_bytes_with_focus("a.pdf", None, text_pdf("x"), true).unwrap();
+        send(&mut h, command("c1"));
+        assert!(matches!(events.borrow().as_slice(), [CompareEvent::Done { .. }]), "{:?}", events.borrow());
+        let state = h.state();
+        let s = state.compare.as_ref().unwrap();
+        for id in [s.old, s.new] {
+            let own = state.session.get(id).unwrap().ownership();
+            assert!(own.hide_menu_button && own.show_zoom_controls, "{own:?}");
+        }
+        assert!(state.menu_button_hidden() && state.zoom_controls_shown());
     }
 
     /// The compared files are only looked at: read-only and never in the host's annotation database,

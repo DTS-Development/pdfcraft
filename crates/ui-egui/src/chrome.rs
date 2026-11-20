@@ -699,15 +699,15 @@ fn zoom_controls(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     if icons::button(ui, "zoom-in", 32.0, false, &tip).clicked() {
         view.zoom_step(true);
     }
-    let label = format!("{:.0}%", view.zoom * 100.0);
-    let text = egui::RichText::new(label.clone()).font(theme::medium(12.0)).color(t.text_muted);
+    let current = (view.zoom * 100.0).round() as i32;
+    let text = egui::RichText::new(format!("{current}%")).font(theme::medium(12.0)).color(t.text_muted);
     let resp = ui.add_sized([56.0, 32.0], egui::Button::new(text).frame(false)).on_hover_text(tl!("Zoom"));
     if let Some(z) = egui::Popup::menu(&resp)
         .show(|ui| {
             ui.set_min_width(80.0);
             let mut picked = None;
             for percent in [50, 75, 100, 125, 150, 200] {
-                if ui.add(egui::Button::new(format!("{percent}%")).selected(label == format!("{percent}%"))).clicked() {
+                if ui.add(egui::Button::new(format!("{percent}%")).selected(current == percent)).clicked() {
                     picked = Some(percent as f32 / 100.0);
                 }
             }

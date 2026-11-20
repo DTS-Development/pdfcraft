@@ -878,6 +878,14 @@ mod tests {
         h.run_steps(3);
         h.get_by_label("50%").click();
         h.run_steps(3);
+        // [fit] works like the rail's button: from a page fit it goes to fit width.
+        h.state_mut().views[0].fit = crate::canvas::Fit::Page;
+        h.run_steps(3);
+        h.query_all_by_label_contains("Fit to width").next().expect("fit button").click();
+        h.run_steps(3);
+        assert_eq!(h.state_mut().views[0].fit, crate::canvas::Fit::Width);
+        h.state_mut().views[0].set_zoom(0.5);
+        h.run_steps(3);
         let v = &h.state_mut().views[0];
         assert!((v.zoom - 0.5).abs() < 1e-3 && v.fit == crate::canvas::Fit::None, "zoom {} fit {:?}", v.zoom, v.fit);
         h.run_steps(3);
