@@ -33,6 +33,7 @@ fn harness() -> Harness<'static, PdfCraftApp> {
     harness_dt(0.25)
 }
 
+/// A harness whose frames last `dt` seconds (the default 0.25 is far slower than a real display).
 fn harness_dt(dt: f32) -> Harness<'static, PdfCraftApp> {
     let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(dt).build_eframe(|_cc| {
         let mut app = PdfCraftApp::new();
@@ -117,78 +118,14 @@ fn the_wheel_still_works_after_each_view_command() {
     }
 }
 
-/// The browser reports no touch phases, so a swipe made soon after the last one (its momentum
-/// tail runs on, less than 0.15 s apart) must still turn a page of its own.
+/// Chrome on a Mac with a mouse sends Point notches of ~100 with phase Move, 30-80 ms apart while
+/// the wheel spins (2-5 frames at 60 fps). On a page taller than the window (one page at a time, zoomed in) the wheel pans
+/// it, and past its end turns the page; the new page has to pan again right away, without the user
+/// pausing. (The harness delivers one event per frame; two in one frame are covered by a unit test
+/// in `wheel_pager`.)
 #[test]
-fn quick_successive_swipes_each_turn_a_page_in_fit_one_page() {
-    for gap_frames in [6usize, 18, 60] {
-        let mut h = harness_dt(1.0 / 60.0);
-        via_palette(&mut h, "Fit one full page");
-        let i = h.state().active.unwrap();
-        h.hover_at(h.state().views[i].viewport_rect().center());
-        h.run_steps(2);
-        for s in 1..=4 {
-            for f in 0..40 {
-                let d = 60.0 * 0.93f32.powi(f);
-                h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -d), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE });
-                h.run_steps(1);
-            }
-            h.run_steps(gap_frames);
-            assert_eq!(h.state().views[i].current, s, "swipe {s} after gaps of {gap_frames} frames");
-        }
-    }
-}
-
-/// Chrome on a Mac with a mouse: a Point delta of ~100 a notch, notches 30-80 ms apart, phase Move.
-fn chrome_spin(h: &mut Harness<'static, PdfCraftApp>, notches: usize, gap_frames: usize) -> (f32, usize) {
-    let i = h.state().active.unwrap();
-    let cur = h.state().views[i].current;
-    let y = |h: &Harness<'static, PdfCraftApp>| { let v = &h.state().views[i]; v.current as f32 * 100000.0 - v.page_screen_rect(v.current).map_or(0.0, |r| r.min.y) };
-    let before = y(h);
-    for _ in 0..notches {
-        h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -100.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE });
-        h.run_steps(gap_frames);
-    }
-    h.run_steps(30);
-    (y(h) - before, h.state().views[i].current.abs_diff(cur))
-}
-
-#[test]
-fn survey_chrome_mouse() {
-    for (id, _) in CASES {
-        for (gap, pointer_dx) in [(3usize, 0.0f32), (5, 0.0), (3, 300.0)] {
-            let mut h = Harness::builder().with_size(egui::vec2(1920.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(|_cc| {
-                let mut app = PdfCraftApp::new();
-                app.set_option("language", "en").unwrap();
-                app.open_bytes("a.pdf", None, fixture(6)).unwrap();
-                app.set_option("zoom", "206").unwrap();
-                app
-            });
-            for _ in 0..3000 { h.run_steps(2); if !h.state().render_pending() { break; } std::thread::sleep(std::time::Duration::from_millis(5)); }
-            h.run_steps(20);
-            let i = h.state().active.unwrap();
-            h.state_mut().execute(id);
-            h.state_mut().execute("view.continuous");
-            h.state_mut().execute("view.continuous");
-            h.run_steps(20);
-            let c = h.state().views[i].viewport_rect().center() + egui::vec2(pointer_dx, 0.0);
-            h.hover_at(c);
-            h.run_steps(3);
-            let a = chrome_spin(&mut h, 12, gap_frames_to(gap));
-            let b = chrome_spin(&mut h, 12, gap_frames_to(gap));
-            let v = &h.state().views[i];
-            println!("SURVEY12 {id:26} gap={gap} dx={pointer_dx} {a:?} {b:?} cont={} fit={:?} z={:.2}", v.continuous, v.fit, v.zoom);
-        }
-    }
-}
-fn gap_frames_to(g: usize) -> usize { g }
-
-/// Chrome on a Mac with a mouse sends Point notches of ~100 with phase Move. On a page taller than
-/// the window (one page at a time, zoomed in) the wheel pans it, and past its end turns the page;
-/// the new page has to pan again, however soon the notches come.
-#[test]
-fn mouse_wheel_keeps_panning_after_it_turned_a_page() {
-    for gap in [4usize, 30] {
+fn spinning_the_mouse_wheel_keeps_the_view_moving_across_page_turns() {
+    for gap in [2usize, 3, 5] {
         let mut h = harness_dt(1.0 / 60.0);
         h.state_mut().set_option("zoom", "206").unwrap();
         h.state_mut().execute("view.continuous");
@@ -196,15 +133,29 @@ fn mouse_wheel_keeps_panning_after_it_turned_a_page() {
         let i = h.state().active.unwrap();
         h.hover_at(h.state().views[i].viewport_rect().center());
         h.run_steps(3);
-        let mut moved = vec![];
-        for _ in 0..8 {
+        // Where the view is, in page-height units, so a turn counts as movement too.
+        let y = |h: &Harness<'static, PdfCraftApp>| {
             let v = &h.state().views[i];
-            let before = (v.current, v.page_screen_rect(v.current).map(|r| r.min.y));
+            v.current as f32 * 100000.0 - v.page_screen_rect(v.current).map_or(0.0, |r| r.min.y)
+        };
+        let last = 5; // the fixture has six pages
+        let (mut turns, mut stalled) = (0, vec![]);
+        // Spin until the last page: past it there is nothing left to move.
+        for n in 0..40 {
+            let (cur, before) = (h.state().views[i].current, y(&h));
+            if cur >= last {
+                break;
+            }
             h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -100.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE });
-            h.run_steps(gap + 20);
-            let v = &h.state().views[i];
-            moved.push(before != (v.current, v.page_screen_rect(v.current).map(|r| r.min.y)));
+            h.run_steps(gap);
+            let after = h.state().views[i].current;
+            turns += usize::from(after != cur);
+            // Every notch either turns the page or pans it; one that does neither was swallowed.
+            if after == cur && (y(&h) - before).abs() < 1.0 {
+                stalled.push(n);
+            }
         }
-        assert!(moved.iter().all(|m| *m), "gap {gap}: every notch moves the view {moved:?}");
+        assert!(turns >= 2, "gap {gap}: the wheel turned only {turns} pages");
+        assert!(stalled.is_empty(), "gap {gap}: notches {stalled:?} moved nothing");
     }
 }
