@@ -661,6 +661,19 @@ impl PdfCraftApp {
         !self.host_lock || BUILDER.iter().chain(BUILDER_ONLY).any(|id| self.host_allows(id))
     }
 
+    /// Whether the host's policy turned off, by name, every command of `group` that could run at
+    /// all (a command locked by its grade never runs, so it does not count). A group with nothing
+    /// that could run is not "turned off": it stays as it was. Only the policy's own words count,
+    /// so the default policy lists every group as before.
+    pub(crate) fn host_group_turned_off(&self, group: &pdfcraft_engine::catalog::ToolGroup) -> bool {
+        if !self.host_lock {
+            return false;
+        }
+        let scope = self.host_rules().0;
+        let mut runnable = group.sections.iter().flat_map(|s| s.items).filter(|i| grade(i.command, scope) != Grade::Locked).peekable();
+        runnable.peek().is_some() && runnable.all(|i| self.host_policy_turned_off(i.command))
+    }
+
     /// Whether a tool group has a command that may run, so it is worth a row in the Tools panel.
     pub(crate) fn host_group_shown(&self, group: &pdfcraft_engine::catalog::ToolGroup) -> bool {
         group.sections.iter().flat_map(|s| s.items).any(|i| self.host_allows(i.command))
@@ -1767,6 +1780,30 @@ mod tests {
         off.extend([("comment.list", false), ("comment.flatten", false)]);
         off.sort();
         assert!(!shown(false, &off), "every command of the group off");
+    }
+
+    /// The palette lists a tool group unless the policy turned off every command of it by name.
+    #[test]
+    fn the_palette_hides_a_group_the_policy_turned_off() {
+        use egui_kittest::kittest::Queryable;
+        let a11y: Vec<&str> = pdfcraft_engine::catalog::group("accessibility").unwrap().sections.iter().flat_map(|s| s.items).map(|i| i.command).filter(|c| *c != "a11y.reading_order").collect();
+        let shown = |policy: &[(&str, bool)], label: &str| {
+            let mut app = with_policy_app(true, false, policy);
+            app.palette_open = true;
+            app.palette_query = label.into();
+            let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_| app);
+            h.run_steps(4);
+            h.query_by_label(label).is_some()
+        };
+        let mut all_off: Vec<(&str, bool)> = a11y.iter().map(|c| (*c, false)).collect();
+        all_off.sort();
+        let mut one_left = all_off.clone();
+        one_left.retain(|(c, _)| *c != "a11y.check");
+        let label = "Prepare for accessibility";
+        assert!(shown(&[], label), "default policy: listed");
+        assert!(!shown(&all_off, label), "every command named off: gone");
+        assert!(shown(&one_left, label), "one command not named off: listed");
+        assert!(shown(&all_off, "Scan & OCR"), "another group is not touched");
     }
 
     /// The menu of a selected comment: a host build on a read-only document leaves out the edits,
