@@ -30,6 +30,12 @@ const DENSE_GAP_SECS: f64 = 0.02;
 const MOMENTUM_GAP_SECS: f64 = 0.1;
 /// A touch with no events for this long (seconds) has ended unseen: its `End` went elsewhere.
 const TOUCH_STALE_SECS: f64 = 1.0;
+/// Without touch phases (the browser reports none), a swipe made while the last one's momentum
+/// still runs is told by its motion picking up again: a smooth delta of at least this many
+/// points that is `RESWIPE_RATIO` times the one before, after the stream had died down to half
+/// its peak. Momentum only ever decays, and one swipe's own ramp-up comes before its peak.
+const RESWIPE_MIN_POINTS: f32 = 20.0;
+const RESWIPE_RATIO: f32 = 2.0;
 
 /// The touch in progress.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,12 +63,17 @@ pub(crate) struct WheelPager {
     /// before it can turn, so momentum that carries the view to the page's edge doesn't go on
     /// to turn the page.
     panned: bool,
+    /// Phase-less streams: the biggest smooth delta (points) of the gesture so far, the last
+    /// one, and whether the stream has since died down to half the peak (see `RESWIPE_*`).
+    peak: f32,
+    last_mag: f32,
+    decayed: bool,
 }
 
 impl Default for WheelPager {
     fn default() -> Self {
         // Infinitely long ago, so the first event never looks like part of a stream.
-        Self { accum: 0.0, turned: None, touch: None, finger_up: None, last_event: f64::NEG_INFINITY, last_smooth: f64::NEG_INFINITY, panned: false }
+        Self { accum: 0.0, turned: None, touch: None, finger_up: None, last_event: f64::NEG_INFINITY, last_smooth: f64::NEG_INFINITY, panned: false, peak: 0.0, last_mag: 0.0, decayed: false }
     }
 }
 
@@ -125,6 +136,8 @@ impl WheelPager {
         self.accum = 0.0;
         self.turned = None;
         self.panned = false;
+        self.peak = 0.0;
+        self.decayed = false;
     }
 
     fn motion(&mut self, unit: MouseWheelUnit, dy: f32, now: f64, idle: f64, can_turn: bool, edge: bool) -> Option<bool> {
@@ -147,6 +160,9 @@ impl WheelPager {
                 return None;
             }
             // Every notch turns a page; a smooth tail of the same gesture won't add another.
+            // It is also where a swipe's stream starts, so what follows is measured from it.
+            let mag = if unit == MouseWheelUnit::Point { dy.abs() } else { dy.abs() * NOTCH_POINTS };
+            (self.peak, self.last_mag, self.decayed) = (mag, mag, false);
             self.accum = 0.0;
             self.turned = Some(forward);
             return Some(forward);
@@ -155,6 +171,16 @@ impl WheelPager {
             self.new_gesture();
         }
         self.last_smooth = now;
+        if self.touch.is_none() {
+            // No phases to end the last swipe: motion picking up again after dying down is the next one.
+            let mag = if unit == MouseWheelUnit::Point { dy.abs() } else { dy.abs() * NOTCH_POINTS };
+            if self.decayed && mag >= RESWIPE_MIN_POINTS && mag >= RESWIPE_RATIO * self.last_mag {
+                self.new_gesture();
+            }
+            self.peak = self.peak.max(mag);
+            self.decayed = self.decayed || mag * 2.0 <= self.peak;
+            self.last_mag = mag;
+        }
         if !can_turn {
             // Panning a page that doesn't fit: that motion must not count toward a turn later.
             self.accum = 0.0;
@@ -210,6 +236,46 @@ mod tests {
         }
         events.push((Point, 0.0, End, at));
         events
+    }
+
+    /// A browser swipe: no phases, a ramp up to `dy`, then momentum decaying 8 % a frame.
+    fn bare_swipe(t: f64, dy: f32) -> Vec<(MouseWheelUnit, f32, TouchPhase, f64)> {
+        let frame = 1.0 / 60.0;
+        let mut at = t;
+        let mut events = Vec::new();
+        for k in [0.1, 0.25, 0.5, 1.0] {
+            at += frame;
+            events.push((Point, dy * k, Move, at));
+        }
+        let mut d = dy;
+        while d.abs() > 0.5 {
+            at += frame;
+            events.push((Point, d, Move, at));
+            d *= 0.92;
+        }
+        events
+    }
+
+    #[test]
+    fn a_phaseless_swipe_turns_once_however_it_ramps_up() {
+        let mut p = WheelPager::default();
+        assert_eq!(turns(&mut p, &bare_swipe(1.0, -60.0)), [true]);
+    }
+
+    #[test]
+    fn a_phaseless_swipe_during_momentum_turns_again() {
+        let mut p = WheelPager::default();
+        let mut events = bare_swipe(1.0, -60.0);
+        // The next swipe starts while the first one's momentum still runs (the tail is under
+        // 0.15 s apart, so it is one burst) and picks the motion up again.
+        let cut = events.iter().position(|e| e.3 > 1.6).unwrap();
+        events.truncate(cut);
+        let t = events.last().unwrap().3;
+        events.extend(bare_swipe(t, -60.0));
+        assert_eq!(turns(&mut p, &events), [true, true]);
+        // Momentum alone, however long, never turns twice.
+        let mut p = WheelPager::default();
+        assert_eq!(turns(&mut p, &bare_swipe(1.0, -400.0)), [true]);
     }
 
     #[test]

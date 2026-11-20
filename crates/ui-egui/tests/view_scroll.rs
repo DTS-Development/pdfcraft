@@ -30,7 +30,11 @@ fn fixture(n: usize) -> Vec<u8> {
 }
 
 fn harness() -> Harness<'static, PdfCraftApp> {
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_cc| {
+    harness_dt(0.25)
+}
+
+fn harness_dt(dt: f32) -> Harness<'static, PdfCraftApp> {
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(dt).build_eframe(|_cc| {
         let mut app = PdfCraftApp::new();
         app.set_option("language", "en").unwrap();
         app.open_bytes("a.pdf", None, fixture(6)).unwrap();
@@ -109,6 +113,28 @@ fn the_wheel_still_works_after_each_view_command() {
             }
             let (moved, turned) = web_notch(&mut h, how == 3);
             assert!(turned || moved.abs() > 1.0, "{id} (variant {how}): the wheel did nothing ({moved}, turned {turned})");
+        }
+    }
+}
+
+/// The browser reports no touch phases, so a swipe made soon after the last one (its momentum
+/// tail runs on, less than 0.15 s apart) must still turn a page of its own.
+#[test]
+fn quick_successive_swipes_each_turn_a_page_in_fit_one_page() {
+    for gap_frames in [6usize, 18, 60] {
+        let mut h = harness_dt(1.0 / 60.0);
+        via_palette(&mut h, "Fit one full page");
+        let i = h.state().active.unwrap();
+        h.hover_at(h.state().views[i].viewport_rect().center());
+        h.run_steps(2);
+        for s in 1..=4 {
+            for f in 0..40 {
+                let d = 60.0 * 0.93f32.powi(f);
+                h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -d), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE });
+                h.run_steps(1);
+            }
+            h.run_steps(gap_frames);
+            assert_eq!(h.state().views[i].current, s, "swipe {s} after gaps of {gap_frames} frames");
         }
     }
 }
