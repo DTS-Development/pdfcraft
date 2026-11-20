@@ -647,6 +647,27 @@ mod tests {
         assert!(state.menu_button_hidden() && state.zoom_controls_shown());
     }
 
+    /// The report tab opened from the compare panel keeps the top bar's look too, and the rules
+    /// for later opens are put back.
+    #[test]
+    fn report_tab_keeps_the_top_bar_look() {
+        use pdfcraft_engine::Ownership;
+        let (mut h, events) = app(true);
+        h.state_mut().session.set_open_ownership(Ownership { hide_menu_button: true, show_zoom_controls: true, ..Default::default() });
+        h.state_mut().open_bytes_with_focus("a.pdf", None, text_pdf("x"), true).unwrap();
+        send(&mut h, command("c1"));
+        assert!(matches!(events.borrow().as_slice(), [CompareEvent::Done { .. }]), "{:?}", events.borrow());
+        let rules = h.state().session.open_ownership().clone();
+        let before = h.state().views.len();
+        let index = h.state().views.len() - 1;
+        h.state_mut().compare_action(index, crate::compare_ui::PanelAction::Report);
+        assert_eq!(h.state().views.len(), before + 1, "the report opened a tab");
+        let id = h.state().views.last().unwrap().id;
+        let own = h.state().session.get(id).unwrap().ownership();
+        assert!(own.hide_menu_button && own.show_zoom_controls, "{own:?}");
+        assert_eq!(*h.state().session.open_ownership(), rules, "later opens keep the rules they had");
+    }
+
     /// The compared files are only looked at: read-only and never in the host's annotation database,
     /// with the request's actor, and later opens start from the build's own rules again.
     #[test]
