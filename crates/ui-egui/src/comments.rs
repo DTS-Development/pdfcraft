@@ -1608,7 +1608,8 @@ pub(crate) fn keys(ctx: &egui::Context, view: &mut DocView, doc: &pdfcraft_engin
 /// Save attachment… and, for a PDF, Open in a new tab, first in a file attachment comment's
 /// menus as in the Attachments panel: the comment is where the reader finds its file. Reading
 /// the file changes nothing, so a read-only document offers them too.
-pub(crate) fn attachment_items(ui: &mut egui::Ui, view: &mut DocView, info: &DocInfo, a: &Annotation) {
+/// `more`: items follow, so a separator closes the group.
+pub(crate) fn attachment_items(ui: &mut egui::Ui, view: &mut DocView, info: &DocInfo, a: &Annotation, more: bool) {
     let source = pdfcraft_render::AttachmentSource::Annotation { page: a.page, index: a.index };
     let Some(file) = info.attachments.iter().find(|f| f.source == source) else { return };
     if ui.button(tl!("Save attachment…")).clicked() {
@@ -1619,7 +1620,9 @@ pub(crate) fn attachment_items(ui: &mut egui::Ui, view: &mut DocView, info: &Doc
         view.comments.attachment_request = Some((a.page, a.index, true));
         ui.close();
     }
-    ui.separator();
+    if more {
+        ui.separator();
+    }
 }
 
 /// What the host's policy leaves of the canvas menus, read from the app before the document is
@@ -1658,6 +1661,19 @@ impl MenuPolicy {
         !self.host || (self.tool(tool) && allowed)
     }
 
+    /// Whether the menu of the selected comment (or, with none found, the page menu's tail) has
+    /// an item of its own: an attachment to save, an edit the document takes, or the text to copy.
+    pub(crate) fn comment_menu_has_items(&self, view: &DocView, info: &DocInfo, at_page: bool, allowed: bool) -> bool {
+        let selected = view.comments.selected.and_then(|(p, i)| info.annotations.iter().find(|a| a.page == p && a.index == i && !a.is_reply()));
+        match selected {
+            Some(a) => {
+                let source = pdfcraft_render::AttachmentSource::Annotation { page: a.page, index: a.index };
+                !self.host || allowed || self.copy || info.attachments.iter().any(|f| f.source == source)
+            }
+            None => self.page_tail(at_page, allowed),
+        }
+    }
+
     /// The items below the picture items of the page menu (no comment selected).
     pub(crate) fn page_tail(&self, at_page: bool, allowed: bool) -> bool {
         (at_page && self.makes_comments(CommentTool::Note, allowed)) || self.panel
@@ -1685,9 +1701,9 @@ pub(crate) fn context_menu(
             let mine = allowed && doc.can_edit_comment(page, index);
             // A sign box or a signature takes no replies, statuses or marks (the server refuses them too).
             let sign_box = doc.takes_no_reply(page, index);
-            attachment_items(ui, view, info, a);
             // A host build leaves out what a read-only document can't do, and what needs the panel.
             let edits = !policy.host || allowed;
+            attachment_items(ui, view, info, a, edits || policy.copy);
             if edits && ui.add_enabled(mine, egui::Button::new(tl!("Edit text…"))).clicked() {
                 view.comments.composer = Some(Composer {
                     page,

@@ -2538,7 +2538,11 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
             }
         }
         Some(Notice::Close) => {}
-        Some(Notice::Signatures) => app.right = Some(RightPanel::Signatures),
+        Some(Notice::Signatures) => {
+            if app.right_panel_allowed(RightPanel::Signatures) {
+                app.right = Some(RightPanel::Signatures);
+            }
+        }
         Some(Notice::FieldHighlights(on)) => app.view_defaults.highlight_fields = on,
         Some(Notice::Console) if app.host_allows("tools.js_console") => app.dialog = Some(crate::Dialog::JsConsole),
         Some(Notice::Console) => {}
@@ -3885,7 +3889,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
             }
             // Items shown so far, so a separator goes only between groups that have items.
             let mut shown = false;
-            if view.comments.selected.is_none() && menu_policy.copy {
+            if view.comments.selected.is_none() && menu_policy.copy && (can_copy || !menu_policy.host) {
                 let selected = view.selected_text().is_some_and(|t| !t.is_empty());
                 let key = crate::commands::shortcut_label(ui.ctx(), crate::commands::COPY);
                 if ui.add_enabled(can_copy && selected, egui::Button::new(tl!("Copy")).shortcut_text(key)).clicked() {
@@ -3928,7 +3932,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                     }
                 }
             }
-            let tail = view.comments.selected.is_some() || menu_policy.page_tail(view.comments.context_at.is_some(), allowed);
+            let tail = menu_policy.comment_menu_has_items(view, info, view.comments.context_at.is_some(), allowed);
             canvas_action = comments::context_menu(ui, view, info, doc, prefs, allowed, &menu_policy, shown).or(copy_image);
             // Nothing to offer here (a host build with every item off): no empty box.
             if !shown && !tail {
@@ -4157,8 +4161,10 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         Some(comments::CanvasAction::Edit(e)) => view.pending_edit = Some(*e),
         // `choose_right_panel` would borrow all of `app` while `view` is held; same effect.
         Some(comments::CanvasAction::OpenComments) => {
-            app.right = Some(RightPanel::Comments);
-            app.comments_panel_closed = false;
+            if menu_policy.panel {
+                app.right = Some(RightPanel::Comments);
+                app.comments_panel_closed = false;
+            }
         }
         Some(comments::CanvasAction::Properties(p, i)) => open_props = Some((p, i)),
         Some(comments::CanvasAction::CopyImage(p, i)) => image_action = Some(crate::edit_text_ui::ImageAction::Copy(p, i)),
@@ -4189,7 +4195,9 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
     if let Some(field) = app.views[index].sign.field.take() {
         let signed = app.session.get(app.views[index].id).is_some_and(|d| d.signatures.iter().any(|s| s.field == field && s.signed));
         if signed {
-            app.right = Some(RightPanel::Signatures);
+            if app.right_panel_allowed(RightPanel::Signatures) {
+                app.right = Some(RightPanel::Signatures);
+            }
             if !app.sig_expanded.contains(&field) {
                 app.sig_expanded.push(field);
             }
@@ -4346,7 +4354,7 @@ fn selection_actions(
     .into_iter()
     .filter(|(_, _, tool)| policy.makes_comments(*tool, allowed))
     .collect();
-    let copy_button = policy.copy;
+    let copy_button = policy.copy && (can_copy || !policy.host);
     if buttons.is_empty() && !copy_button {
         return false;
     }

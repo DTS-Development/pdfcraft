@@ -2451,8 +2451,10 @@ impl PdfCraftApp {
             }
             RightPanel::Fields => "form.fields",
             RightPanel::Signatures => "sign.panel",
-            RightPanel::Accessibility => "a11y.report",
-            RightPanel::Tags => "a11y.tags",
+            // These two are not on for a viewer by grade, yet the side-panel list always opened
+            // them; only a policy that names them off shuts them (default policy stays as before).
+            RightPanel::Accessibility => return !self.host_policy_turned_off("a11y.report"),
+            RightPanel::Tags => return !self.host_policy_turned_off("a11y.tags"),
             _ => return true,
         };
         self.host_allows(command)

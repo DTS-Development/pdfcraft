@@ -210,7 +210,7 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   `pdfcraft:annots-changed` instead of `pdfcraft:save`. `commentsPanel: false` hides this
 ///   interface's own comments panel and the buttons that open it. `menuButton: false` hides the "Menu" button of
 ///   the top bar (the command search box stays). `zoomControls: true` adds [fit] [−] [zoom %] [+] left of that box.
-///   `panelTabs: false` hides the tab strip ("Details") over the side panel; the panel itself stays.
+///   `panelTabs: false` hides the tab strip ("Inspector"; "세부 정보" in Korean) over the side panel; the panel itself stays.
 /// - `pdfcraft:annots-reset` (from the parent): `{ items, seq }`, the server's whole list, item =
 ///   `{ annotId, authorId, xfdf }` (one annotation as XFDF, `name` = `/NM`). It makes the document
 ///   match the list; `seq` is the last `annots-changed` number the page had received when it

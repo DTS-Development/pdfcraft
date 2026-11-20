@@ -356,7 +356,10 @@ impl PdfCraftApp {
         self.a11y.previous = None;
         self.a11y.options = Some(options);
         self.a11y.report = Some((id, report));
-        self.right = Some(RightPanel::Accessibility);
+        // A host that turned the report off keeps the panel shut (the notice below still says the result).
+        if self.right_panel_allowed(RightPanel::Accessibility) {
+            self.right = Some(RightPanel::Accessibility);
+        }
         self.notify(if failed == 0 {
             tl!("No untagged content was found.").to_string()
         } else {
@@ -400,7 +403,10 @@ impl PdfCraftApp {
             if self.a11y.options.as_ref() == Some(&options) { self.a11y.report.take().filter(|(prior_id, _)| *prior_id == id) } else { None };
         self.a11y.options = Some(options);
         self.a11y.report = Some((id, report));
-        self.right = Some(RightPanel::Accessibility);
+        // A host that turned the report off keeps the panel shut (the notice below still says the result).
+        if self.right_panel_allowed(RightPanel::Accessibility) {
+            self.right = Some(RightPanel::Accessibility);
+        }
         self.notify(if failed == 0 && manual == 0 && skipped == 0 {
             tl!("The checker found no problems in this document.").to_string()
         } else if failed == 1 {
@@ -464,7 +470,9 @@ impl PdfCraftApp {
                     return;
                 }
                 if self.tags_state.select(id, &tags, object) {
-                    self.right = Some(RightPanel::Tags);
+                    if self.right_panel_allowed(RightPanel::Tags) {
+                        self.right = Some(RightPanel::Tags);
+                    }
                     if let Some(page) = page {
                         self.a11y_show_on_page(index, page, bbox);
                     }

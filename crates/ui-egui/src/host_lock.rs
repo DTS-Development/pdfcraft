@@ -696,6 +696,13 @@ impl PdfCraftApp {
         enabled(id, scope, overrides)
     }
 
+    /// Whether the host's policy turned `id` off by name. Unlike [`Self::host_allows`] this ignores
+    /// the grade: a command a viewer does not start with is not "turned off" until the host says so.
+    pub(crate) fn host_policy_turned_off(&self, id: &str) -> bool {
+        let overrides = self.host_rules().1;
+        self.host_lock && overrides.binary_search_by(|(k, _)| k.as_str().cmp(id)).is_ok_and(|i| !overrides[i].1)
+    }
+
     /// Whether any of `ids` is on: the platform functions behind a whole kind of command (writing
     /// files, opening links) work when one of its commands is.
     pub(crate) fn host_any(&self, ids: &[&str]) -> bool {
@@ -1715,14 +1722,103 @@ mod tests {
         assert_eq!(menu(false, true, &[("comment.list", false)]), (true, true, true), "no lock: every item stays");
     }
 
+    /// The accessibility panels are not on for a viewer by grade, yet they open from the side-panel
+    /// list as they always did; only a policy that names their command off shuts them.
+    #[test]
+    fn the_accessibility_panels_open_unless_the_policy_turns_them_off() {
+        use crate::RightPanel;
+        for p in [RightPanel::Accessibility, RightPanel::Tags] {
+            let mut app = with_policy_app(true, false, &[]);
+            app.choose_right_panel(Some(p));
+            assert_eq!(app.right, Some(p), "default policy: {p:?} opens as before");
+        }
+        let mut app = with_policy_app(true, false, &[("a11y.report", false), ("a11y.tags", false)]);
+        for p in [RightPanel::Accessibility, RightPanel::Tags] {
+            app.choose_right_panel(Some(p));
+            assert_eq!(app.right, None, "{p:?}");
+        }
+    }
+
+    /// The palette lists the comment tool group only where comments can be made.
+    #[test]
+    fn the_palette_hides_the_comment_group_when_comments_are_off() {
+        use egui_kittest::kittest::Queryable;
+        let shown = |read_only: bool, policy: &[(&str, bool)]| {
+            let mut app = with_policy_app(true, read_only, policy);
+            app.palette_open = true;
+            app.palette_query = "Add comments".into();
+            let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_| app);
+            h.run_steps(4);
+            h.query_by_label("Add comments").is_some()
+        };
+        assert!(shown(false, &[]), "default: listed");
+        assert!(!shown(true, &[]), "read-only: nothing to add");
+        let mut off: Vec<_> = crate::comments::ALL.iter().map(|t| (t.command(), false)).collect();
+        off.extend([("comment.list", false), ("comment.flatten", false)]);
+        off.sort();
+        assert!(!shown(false, &off), "every command of the group off");
+    }
+
+    /// The menu of a selected comment: a host build on a read-only document leaves out the edits,
+    /// the reply and the delete (the text copy stays while `edit.copy` is on, and goes with it);
+    /// a plain build keeps every item.
+    #[test]
+    fn the_selected_comment_menu_follows_the_policy_and_read_only() {
+        use egui_kittest::kittest::Queryable;
+        use pdfcraft_engine::{Edit, NewAnnotation, NoteIcon, Shape, Style};
+        // Returns the labels asked about that show, and whether the menu has an item for the comment.
+        let menu = |lock: bool, read_only: bool, policy: &[(&str, bool)]| {
+            let mut app = with_policy_app(lock, false, &[]);
+            // A note written while the document takes edits, then the rules the case wants.
+            app.session.set_ownership(Ownership { scope: EditScope::Viewer, ..Default::default() });
+            let id = app.active_ids().unwrap().1;
+            let style = Style { color: [1.0, 0.8, 0.0], opacity: 1.0, width: 1.0, fill: None };
+            let note = NewAnnotation { page: 0, shape: Shape::Note { at: [50.0, 50.0], icon: NoteIcon::Comment }, style, contents: "n".into(), author: "A".into() };
+            app.session.apply(id, Edit::AddAnnotation(note)).expect("note");
+            let own = Ownership { scope: EditScope::Viewer, read_only, ..Default::default() };
+            app.session.set_ownership(with_policy(own, policy.iter().map(|(k, v)| (k.to_string(), *v)).collect()));
+            let index = app.session.get(id).unwrap().info.annotations[0].index;
+            app.views[0].comments.selected = Some((0, index));
+            let has_items = {
+                let policy = crate::comments::MenuPolicy::of(&app);
+                let allowed = app.session.get(id).unwrap().allows_annotation();
+                policy.comment_menu_has_items(&app.views[0], &app.session.get(id).unwrap().info, false, allowed)
+            };
+            let mut h = egui_kittest::Harness::new_ui_state(
+                move |ui, app: &mut PdfCraftApp| {
+                    let policy = crate::comments::MenuPolicy::of(app);
+                    let doc = app.session.get(id).unwrap();
+                    let allowed = doc.allows_annotation();
+                    crate::comments::context_menu(ui, &mut app.views[0], &doc.info, doc, &app.comment_prefs, allowed, &policy, false);
+                },
+                app,
+            );
+            h.run();
+            let shown = ["Edit text…", "Reply", "Set status", "Delete", "Properties…", "Copy text"].map(|l| h.query_by_label(l).is_some());
+            (shown, has_items)
+        };
+        // Edit, Reply, Set status, Delete, Properties, Copy text.
+        assert_eq!(menu(true, false, &[]).0, [true, true, true, true, true, true], "default policy: as before");
+        assert_eq!(menu(true, true, &[]), ([false, false, false, false, false, true], true), "read-only: the text copy stays");
+        assert_eq!(menu(true, true, &[("edit.copy", false)]), ([false; 6], false), "nothing left: no empty box");
+        assert_eq!(menu(true, false, &[("comment.list", false)]).0[1], false, "no Comments panel, no Reply");
+        assert_eq!(menu(false, true, &[("edit.copy", false)]).0, [true, true, true, true, true, true], "no lock: every item stays");
+    }
+
     /// `edit.copy` off: the copy of the selected text (⌘C, the menus, the bar) copies nothing.
     #[test]
     fn copying_selected_text_follows_edit_copy() {
-        let mut app = with_policy_app(true, false, &[("edit.copy", false)]);
-        let ctx = egui::Context::default();
-        assert!(!app.copy_selected_text(0, &ctx));
-        assert!(!app.host_allows("edit.copy"));
-        assert!(with_policy_app(true, false, &[]).host_allows("edit.copy"));
+        let glyph = pdfcraft_render::TextGlyph { text: "x".into(), rect: [0.0, 0.0, 10.0, 10.0], quad: [[0.0, 0.0]; 4], direction: [1.0, 0.0] };
+        let text = pdfcraft_render::PageText { glyphs: vec![glyph], line_of: vec![0], space_before: vec![false] };
+        // With a real selection: on by default, nothing copied once `edit.copy` is off.
+        let copies = |policy: &[(&str, bool)]| {
+            let mut app = with_policy_app(true, false, policy);
+            app.views[0].texts.insert(0, std::sync::Arc::new(text.clone()));
+            app.views[0].select_text(0, 0, 0);
+            app.copy_selected_text(0, &egui::Context::default())
+        };
+        assert!(copies(&[]));
+        assert!(!copies(&[("edit.copy", false)]));
     }
 
     /// `panelTabs: false` takes the tab strip ("Inspector") off the side panel; by default it shows.

@@ -230,7 +230,7 @@ pub struct Ownership {
     pub hide_comments_panel: bool,
     /// `menuButton: false`: the interface hides the "Menu" button of its top bar (the search box stays).
     pub hide_menu_button: bool,
-    /// `panelTabs: false`: the interface hides the tab strip over its side panel (the one tab, "Details").
+    /// `panelTabs: false`: the interface hides the tab strip over its side panel (the one tab, "Inspector"; "세부 정보" in Korean).
     pub hide_panel_tabs: bool,
     /// `zoomControls: true`: the interface adds [fit] [−] [zoom %] [+] to its top bar, left of the search box.
     pub show_zoom_controls: bool,
