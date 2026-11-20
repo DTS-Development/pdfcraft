@@ -228,6 +228,10 @@ pub struct Ownership {
     pub annot_sync: bool,
     /// `commentsPanel: false`: the interface hides its own comments panel (the page has its own).
     pub hide_comments_panel: bool,
+    /// `menuButton: false`: the interface hides the "Menu" button of its top bar (the search box stays).
+    pub hide_menu_button: bool,
+    /// `zoomControls: true`: the interface adds [fit] [−] [zoom %] [+] to its top bar, left of the search box.
+    pub show_zoom_controls: bool,
     /// `pdfcraft:open` `replace`: this file takes the place of every document open (they close
     /// without asking) and is shown. Read when the file arrives; it is no rule of the document.
     pub replace: bool,

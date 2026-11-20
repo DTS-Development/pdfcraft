@@ -1119,7 +1119,6 @@
 	Zoom out ({key})	Намали мащаба ({key})
 	Zoom in ({key})	Увеличи мащаба ({key})
 	Rotate view clockwise ({key})	Завърти изгледа по часовниковата стрелка ({key})
-	Toggle fit page / fit width	Превключи между „побери страницата“ и „побери по ширина“
 	Next page	Следваща страница
 	Previous page	Предишна страница
 	Current page — type a page number or label (such as iv) and press Enter	Текуща страница — въведете номер или етикет на страница (например iv) и натиснете Enter

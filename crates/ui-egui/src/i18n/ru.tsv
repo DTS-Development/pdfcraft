@@ -151,7 +151,6 @@
 	Zoom out ({key})	Уменьшить ({key})
 	Zoom in ({key})	Увеличить ({key})
 	Rotate view clockwise ({key})	Повернуть вид по часовой стрелке ({key})
-	Toggle fit page / fit width	Переключить по странице / по ширине
 	Next page	Следующая страница
 	Previous page	Предыдущая страница
 	Current page — type a page number or label (such as iv) and press Enter	Текущая страница — введите номер или метку страницы (например, iv) и нажмите Enter

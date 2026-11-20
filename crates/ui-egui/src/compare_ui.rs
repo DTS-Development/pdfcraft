@@ -511,7 +511,18 @@ impl PdfCraftApp {
             },
             PanelAction::Report => match self.session.compare_report(old, new) {
                 Ok(bytes) => {
-                    if let Err(e) = self.open_bytes("Compare Report.pdf", None, bytes.to_vec()) {
+                    // Only the top bar's look carries over from the compared file; the rules stay as they are.
+                    let previous = self.session.open_ownership().clone();
+                    if let Some(own) = self.session.get(new).map(|d| d.ownership().clone()) {
+                        self.session.set_open_ownership(pdfcraft_engine::Ownership {
+                            hide_menu_button: own.hide_menu_button,
+                            show_zoom_controls: own.show_zoom_controls,
+                            ..previous.clone()
+                        });
+                    }
+                    let opened = self.open_bytes("Compare Report.pdf", None, bytes.to_vec());
+                    self.session.set_open_ownership(previous);
+                    if let Err(e) = opened {
                         self.notify_error(e);
                     }
                 }

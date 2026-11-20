@@ -520,10 +520,13 @@ pub fn mode_bar(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                main_menu(app, ui);
-                ui.add_space(6.0);
-                ui.painter().vline(ui.cursor().left(), ui.max_rect().y_range().shrink(12.0), Stroke::new(1.0, t.divider));
-                ui.add_space(10.0);
+                // The host may take the button (`menuButton: false`); the divider goes with it.
+                if !app.menu_button_hidden() {
+                    main_menu(app, ui);
+                    ui.add_space(6.0);
+                    ui.painter().vline(ui.cursor().left(), ui.max_rect().y_range().shrink(12.0), Stroke::new(1.0, t.divider));
+                    ui.add_space(10.0);
+                }
                 // A viewer has no workspaces to switch between: the tools of Edit, Convert and E-Sign
                 // are not its to use.
                 {
@@ -563,8 +566,14 @@ pub fn mode_bar(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                         }
                     });
                     ui.add_space(8.0);
+                    // The zoom group sits right of nothing but the search box; it is left out when the bar is
+                    // too narrow for it, so the search box and the mode tabs shrink no sooner than before.
+                    let room = ui.available_width() >= 260.0 + ZOOM_CONTROLS_WIDTH + 8.0;
                     if widgets::search_box(ui, tl!("Find tools and commands"), 260.0).clicked() {
                         app.palette_open = true;
+                    }
+                    if room && app.zoom_controls_shown() {
+                        zoom_controls(app, ui);
                     }
                 });
             });
@@ -662,6 +671,59 @@ fn main_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     });
 }
 
+/// The room [`zoom_controls`] takes: three icon buttons, the percentage and the gaps between.
+const ZOOM_CONTROLS_WIDTH: f32 = 3.0 * 32.0 + 56.0 + 4.0 * 4.0 + 8.0;
+
+/// Fit page / fit width toggle. The tooltip names what a click does now, with its shortcut.
+fn fit_toggle_button(ui: &mut egui::Ui, view: &mut DocView) {
+    // Not `columns-2` while fitting the page: that is the two-page view's icon.
+    let width = view.fit == Fit::Width;
+    let icon = if width { "maximize" } else { "maximize-2" };
+    // The labels are the View menu's, which every language already has.
+    let (label, key) = if width { (tl!("Zoom to page level"), crate::commands::PAGE_LEVEL) } else { (tl!("Fit to width"), crate::commands::FIT_WIDTH) };
+    let tip = format!("{label} ({})", crate::commands::shortcut_label(ui.ctx(), key));
+    if icons::button(ui, icon, 32.0, false, &tip).clicked() {
+        view.fit = if width { Fit::Page } else { Fit::Width };
+        view.goto = Some((view.current, 0.0));
+    }
+}
+
+/// Top bar zoom group (`zoomControls`), laid out right to left: [+] [zoom %] [−] [fit], so on screen
+/// [fit] [−] [zoom %] [+]. The percentage follows the view whatever changed it and opens a list of
+/// fixed zooms, which leave fit mode like any zoom.
+fn zoom_controls(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
+    let Some(i) = app.active else { return };
+    let t = Tokens::get(ui.ctx());
+    let view = &mut app.views[i];
+    let tip = crate::commands::key_tip(ui.ctx(), tl!("Zoom in ({key})"), crate::commands::ZOOM_IN);
+    if icons::button(ui, "zoom-in", 32.0, false, &tip).clicked() {
+        view.zoom_step(true);
+    }
+    let current = (view.zoom * 100.0).round() as i32;
+    let text = egui::RichText::new(format!("{current}%")).font(theme::medium(12.0)).color(t.text_muted);
+    let resp = ui.add_sized([56.0, 32.0], egui::Button::new(text).frame(false)).on_hover_text(tl!("Zoom"));
+    if let Some(z) = egui::Popup::menu(&resp)
+        .show(|ui| {
+            ui.set_min_width(80.0);
+            let mut picked = None;
+            for percent in [50, 75, 100, 125, 150, 200] {
+                if ui.add(egui::Button::new(format!("{percent}%")).selected(current == percent)).clicked() {
+                    picked = Some(percent as f32 / 100.0);
+                }
+            }
+            picked
+        })
+        .and_then(|r| r.inner)
+    {
+        view.set_zoom(z);
+    }
+    let tip = crate::commands::key_tip(ui.ctx(), tl!("Zoom out ({key})"), crate::commands::ZOOM_OUT);
+    if icons::button(ui, "zoom-out", 32.0, false, &tip).clicked() {
+        view.zoom_step(false);
+    }
+    fit_toggle_button(ui, view);
+}
+
 pub fn right_rail(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let Some((index, id)) = app.active_ids() else { return };
@@ -754,12 +816,7 @@ pub fn right_rail(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                 if icons::button(ui, "rotate-cw", 32.0, false, &tip).clicked() {
                     view.rotate_view(true);
                 }
-                // Not `columns-2` while fitting the page: that is the two-page view's icon.
-                let fit_icon = if view.fit == Fit::Width { "maximize" } else { "maximize-2" };
-                if icons::button(ui, fit_icon, 32.0, false, tl!("Toggle fit page / fit width")).clicked() {
-                    view.fit = if view.fit == Fit::Width { Fit::Page } else { Fit::Width };
-                    view.goto = Some((view.current, 0.0));
-                }
+                fit_toggle_button(ui, view);
                 let id = egui::Id::new("zoom-input");
                 let draft = id.with("draft");
                 let mut typed = ui.data(|d| d.get_temp::<String>(draft)).unwrap_or_else(|| format!("{:.0}%", view.zoom * 100.0));
