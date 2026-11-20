@@ -1751,6 +1751,16 @@ mod tests {
             h.run_steps(4);
             h.query_by_label("Add comments").is_some()
         };
+        // Other groups stay in the palette under the default policy, viewer or not.
+        let other = |label: &str| {
+            let mut app = with_policy_app(true, false, &[]);
+            app.palette_open = true;
+            app.palette_query = label.into();
+            let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_| app);
+            h.run_steps(4);
+            h.query_by_label(label).is_some()
+        };
+        assert!(other("Scan & OCR"), "a group other than comments is still listed");
         assert!(shown(false, &[]), "default: listed");
         assert!(!shown(true, &[]), "read-only: nothing to add");
         let mut off: Vec<_> = crate::comments::ALL.iter().map(|t| (t.command(), false)).collect();
