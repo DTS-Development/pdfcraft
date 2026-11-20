@@ -312,12 +312,13 @@ impl PdfCraftApp {
         // The rules come from this request alone, never from an open that came before it.
         // Both files are only looked at: read-only, so nothing here is ever saved back to the parent.
         // Only the look of the top bar carries over from the document the host opened: the rules are the request's own.
-        let (hide_menu_button, show_zoom_controls) = (self.menu_button_hidden(), self.zoom_controls_shown());
+        let (hide_menu_button, show_zoom_controls, hide_panel_tabs) = (self.menu_button_hidden(), self.zoom_controls_shown(), self.panel_tabs_hidden());
         self.session.set_open_ownership(pdfcraft_engine::Ownership {
             read_only: true,
             annot_sync: false,
             hide_comments_panel: false,
             hide_menu_button,
+            hide_panel_tabs,
             show_zoom_controls,
             ..ownership
         });

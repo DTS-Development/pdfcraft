@@ -655,7 +655,7 @@ fn main_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                     (RightPanel::Search, tl!("Search")),
                     (RightPanel::Compare, tl!("Compare")),
                 ] {
-                    if p == RightPanel::Comments && app.comments_panel_hidden() {
+                    if !app.right_panel_allowed(p) {
                         continue;
                     }
                     if p == RightPanel::Compare && app.compare.as_ref().is_some_and(|c| !c.change_list) {

@@ -210,6 +210,7 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   `pdfcraft:annots-changed` instead of `pdfcraft:save`. `commentsPanel: false` hides this
 ///   interface's own comments panel and the buttons that open it. `menuButton: false` hides the "Menu" button of
 ///   the top bar (the command search box stays). `zoomControls: true` adds [fit] [−] [zoom %] [+] left of that box.
+///   `panelTabs: false` hides the tab strip ("Details") over the side panel; the panel itself stays.
 /// - `pdfcraft:annots-reset` (from the parent): `{ items, seq }`, the server's whole list, item =
 ///   `{ annotId, authorId, xfdf }` (one annotation as XFDF, `name` = `/NM`). It makes the document
 ///   match the list; `seq` is the last `annots-changed` number the page had received when it
@@ -1216,6 +1217,13 @@ mod host {
         } else {
             !get_menu.as_bool().ok_or_else(|| "menuButton must be a boolean".to_string())?
         };
+        // `panelTabs: false` hides the tab strip over the side panel; absent means shown.
+        let get_tabs = get("panelTabs");
+        let hide_panel_tabs = if get_tabs.is_undefined() || get_tabs.is_null() {
+            false
+        } else {
+            !get_tabs.as_bool().ok_or_else(|| "panelTabs must be a boolean".to_string())?
+        };
         // `zoomControls: true` adds the zoom group to the top bar; absent means no.
         let show_zoom_controls = flag("zoomControls")?;
         // `maxAnnotationXfdfLength`: a whole number of UTF-16 units from the default up to the ceiling; anything else refuses the open.
@@ -1227,7 +1235,7 @@ mod host {
             let n = max.as_f64().filter(|n| n.fract() == 0.0 && *n >= lo as f64 && *n <= hi as f64);
             n.ok_or_else(|| format!("maxAnnotationXfdfLength must be a whole number from {lo} to {hi}"))? as usize
         };
-        let own = pdfcraft_ui_egui::Ownership { actor, read_only, scope, annot_sync, hide_comments_panel, hide_menu_button, show_zoom_controls, replace, max_xfdf_len, ..Default::default() };
+        let own = pdfcraft_ui_egui::Ownership { actor, read_only, scope, annot_sync, hide_comments_panel, hide_menu_button, hide_panel_tabs, show_zoom_controls, replace, max_xfdf_len, ..Default::default() };
         Ok(pdfcraft_ui_egui::with_policy(own, policy_overrides(data)))
     }
 

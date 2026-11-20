@@ -1622,7 +1622,50 @@ pub(crate) fn attachment_items(ui: &mut egui::Ui, view: &mut DocView, info: &Doc
     ui.separator();
 }
 
-/// Items of the canvas context menu for the selected comment (or the page).
+/// What the host's policy leaves of the canvas menus, read from the app before the document is
+/// borrowed. Without the host lock nothing is taken away and the menus are as they always were
+/// (an item the document can't use is grey).
+#[derive(Clone, Debug)]
+pub(crate) struct MenuPolicy {
+    /// A host build: items the policy or the document rules out are left out, not greyed.
+    pub host: bool,
+    /// The Comments panel may open (`comment.list`, `commentsPanel`).
+    pub panel: bool,
+    /// `edit.copy`: copying text and pictures.
+    pub copy: bool,
+    /// The comment tools whose command is on.
+    tools: Vec<CommentTool>,
+}
+
+impl MenuPolicy {
+    pub(crate) fn of(app: &crate::PdfCraftApp) -> Self {
+        Self {
+            host: app.host_locked(),
+            panel: app.right_panel_allowed(crate::RightPanel::Comments),
+            copy: app.host_allows("edit.copy"),
+            tools: ALL.into_iter().filter(|t| app.host_allows(t.command())).collect(),
+        }
+    }
+
+    /// The comment tool's command is on (always, without the host lock).
+    pub(crate) fn tool(&self, tool: CommentTool) -> bool {
+        !self.host || self.tools.contains(&tool)
+    }
+
+    /// An item that makes a comment: gone when the tool is off or the document takes no comments
+    /// (a read-only one); grey instead where there is no host lock.
+    pub(crate) fn makes_comments(&self, tool: CommentTool, allowed: bool) -> bool {
+        !self.host || (self.tool(tool) && allowed)
+    }
+
+    /// The items below the picture items of the page menu (no comment selected).
+    pub(crate) fn page_tail(&self, at_page: bool, allowed: bool) -> bool {
+        (at_page && self.makes_comments(CommentTool::Note, allowed)) || self.panel
+    }
+}
+
+/// Items of the canvas context menu for the selected comment (or the page). `lead` is whether the
+/// menu already has items above, so a separator goes before the first of these.
 pub(crate) fn context_menu(
     ui: &mut egui::Ui,
     view: &mut DocView,
@@ -1630,6 +1673,8 @@ pub(crate) fn context_menu(
     doc: &pdfcraft_engine::Document,
     prefs: &CommentPrefs,
     allowed: bool,
+    policy: &MenuPolicy,
+    lead: bool,
 ) -> Option<CanvasAction> {
     let mut action = None;
     let selected = view.comments.selected.and_then(|(p, i)| info.annotations.iter().find(|a| a.page == p && a.index == i && !a.is_reply()));
@@ -1641,7 +1686,9 @@ pub(crate) fn context_menu(
             // A sign box or a signature takes no replies, statuses or marks (the server refuses them too).
             let sign_box = doc.takes_no_reply(page, index);
             attachment_items(ui, view, info, a);
-            if ui.add_enabled(mine, egui::Button::new(tl!("Edit text…"))).clicked() {
+            // A host build leaves out what a read-only document can't do, and what needs the panel.
+            let edits = !policy.host || allowed;
+            if edits && ui.add_enabled(mine, egui::Button::new(tl!("Edit text…"))).clicked() {
                 view.comments.composer = Some(Composer {
                     page,
                     at: [a.rect[2] as f64, a.rect[3] as f64],
@@ -1651,12 +1698,15 @@ pub(crate) fn context_menu(
                 });
                 ui.close();
             }
-            if !sign_box && ui.add_enabled(allowed, egui::Button::new(tl!("Reply"))).clicked() {
+            if !sign_box && edits && (!policy.host || policy.panel) && ui.add_enabled(allowed, egui::Button::new(tl!("Reply"))).clicked() {
                 view.comments.reveal = true;
                 action = Some(CanvasAction::OpenComments);
                 ui.close();
             }
             ui.add_enabled_ui(mine, |ui| {
+                if !edits {
+                    return;
+                }
                 if !sign_box {
                     ui.menu_button(tl!("Set status"), |ui| {
                         for s in [ReviewState::None, ReviewState::Accepted, ReviewState::Cancelled, ReviewState::Completed, ReviewState::Rejected] {
@@ -1688,13 +1738,16 @@ pub(crate) fn context_menu(
             });
             let thread: Vec<&pdfcraft_render::Annotation> = info.annotations.iter().filter(|r| r.replies_to(a)).collect();
             let marked = crate::comments_panel::is_marked(&thread);
-            if !sign_box && ui.add_enabled(mine, egui::Button::new(tl!(if marked { "Remove checkmark" } else { "Mark with checkmark" }))).clicked() {
+            if !sign_box && edits && ui.add_enabled(mine, egui::Button::new(tl!(if marked { "Remove checkmark" } else { "Mark with checkmark" }))).clicked() {
                 action = Some(CanvasAction::Edit(Box::new(Edit::MarkAnnotation { page, index, marked: !marked, author: prefs.author.clone() })));
                 ui.close();
             }
-            if ui.button(tl!("Copy text")).clicked() {
+            if policy.copy && ui.button(tl!("Copy text")).clicked() {
                 ui.ctx().copy_text(a.contents.clone().unwrap_or_default());
                 ui.close();
+            }
+            if !edits {
+                return action;
             }
             ui.separator();
             if ui.add_enabled(allowed && !a.locked && doc.can_delete_comment(page, index), egui::Button::new(tl!("Delete"))).clicked() {
@@ -1706,19 +1759,26 @@ pub(crate) fn context_menu(
                 action = Some(CanvasAction::Properties(page, index));
                 ui.close();
             }
-            if ui.add_enabled(tool_for(a).is_some(), egui::Button::new(tl!("Make Current Properties Default"))).clicked() {
+            let default_tool = tool_for(a);
+            if default_tool.is_none_or(|t| policy.tool(t))
+                && ui.add_enabled(default_tool.is_some(), egui::Button::new(tl!("Make Current Properties Default"))).clicked()
+            {
                 view.comments.default_request = Some((page, index));
                 ui.close();
             }
         }
         None => {
+            if lead && policy.page_tail(view.comments.context_at.is_some(), allowed) {
+                ui.separator();
+            }
             if let Some((page, at)) = view.comments.context_at
+                && policy.makes_comments(CommentTool::Note, allowed)
                 && ui.add_enabled(allowed, egui::Button::new(tl!("Add a sticky note here"))).clicked()
             {
                 view.comments.composer = Some(Composer { page, at, kind: ComposerKind::Note, text: String::new(), focus: true });
                 ui.close();
             }
-            if ui.button(tl!("Comments panel")).clicked() {
+            if policy.panel && ui.button(tl!("Comments panel")).clicked() {
                 action = Some(CanvasAction::OpenComments);
                 ui.close();
             }
