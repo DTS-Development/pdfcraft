@@ -102,6 +102,7 @@ fn main() {
                         app.host_compare = Some(bridge.compare_fn());
                         app.host_save = Some(bridge.save_fn());
                         app.host_dirty = Some(bridge.dirty_fn());
+                        app.host_edited = Some(bridge.edited_fn());
                         app.host_bytes = Some(bridge.bytes_fn());
                         bridge.post_ready();
                     } else if query_param("host").as_deref() == Some("parent") {
@@ -366,12 +367,17 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 /// - `pdfcraft:opened` (to the parent): once for each `pdfcraft:open`, when a page of that document was first drawn
 ///   (`ready` only says the app listens).
 /// - `pdfcraft:dirty` (to the parent): `{ dirty }` whenever unsaved work appears or goes away.
+/// - `pdfcraft:edited` (to the parent): `{ rev }` after a pass in which the document has unsaved work and its edit generation moved; only for a file opened with `live: true`. `dirty` only flips, so this is how the page sees that editing goes on.
+/// - `pdfcraft:open` also takes `live` (send `edited`, default false) and `keepView` (also replaces the open documents, as `replace` does, and puts the page, scroll, zoom and layout of the one shown back on the new one as far as it has the places, default false). `ready` lists them in `openOptions`.
 /// - `pdfcraft:failed` (to the parent): `{ error }` when the app couldn't start.
 ///
 /// Only the parent window on the app's own origin is heard or answered. With a parent on
 /// another origin there is no bridge: the app runs as if unframed and saves download.
 #[cfg(target_arch = "wasm32")]
 mod host {
+    /// The open options added after the first release that this build understands (sent with `pdfcraft:ready`).
+    const OPEN_OPTIONS: [&str; 2] = ["live", "keepView"];
+
     use eframe::wasm_bindgen::{JsCast, JsValue, closure::Closure};
 
     #[derive(Clone)]
@@ -408,7 +414,9 @@ mod host {
         }
 
         pub fn post_ready(&self) {
-            if let Some(m) = message(&[("type", "pdfcraft:ready".into()), ("version", env!("CARGO_PKG_VERSION").into())]) {
+            // The open options added after the first release: a page that asks for one that is missing here (an older build) is turned away.
+            let options: js_sys::Array = OPEN_OPTIONS.iter().map(|f| JsValue::from_str(f)).collect();
+            if let Some(m) = message(&[("type", "pdfcraft:ready".into()), ("version", env!("CARGO_PKG_VERSION").into()), ("openOptions", options.into())]) {
                 let _ = self.post(&m, None);
             }
         }
@@ -931,6 +939,15 @@ mod host {
             })
         }
 
+        pub fn edited_fn(&self) -> pdfcraft_ui_egui::HostEditedFn {
+            let bridge = self.clone();
+            Box::new(move |rev: u64| {
+                if let Some(m) = message(&[("type", "pdfcraft:edited".into()), ("rev", (rev as f64).into())]) {
+                    let _ = bridge.post(&m, None);
+                }
+            })
+        }
+
         pub fn dirty_fn(&self) -> pdfcraft_ui_egui::HostDirtyFn {
             let bridge = self.clone();
             let mut last = false;
@@ -1199,7 +1216,9 @@ mod host {
         };
         let annot_sync = flag("annotSync")?;
         // `replace: true` closes every open document (no questions) before this one opens.
-        let replace = flag("replace")?;
+        // `live: true` makes the page hear `pdfcraft:edited`; `keepView: true` replaces the open documents (like `replace`) and keeps their view.
+        let (live, keep_view) = (flag("live")?, flag("keepView")?);
+        let replace = flag("replace")? || keep_view;
         if annot_sync && actor.is_none() {
             return Err("annotSync needs an actor".into());
         }
@@ -1235,7 +1254,7 @@ mod host {
             let n = max.as_f64().filter(|n| n.fract() == 0.0 && *n >= lo as f64 && *n <= hi as f64);
             n.ok_or_else(|| format!("maxAnnotationXfdfLength must be a whole number from {lo} to {hi}"))? as usize
         };
-        let own = pdfcraft_ui_egui::Ownership { actor, read_only, scope, annot_sync, hide_comments_panel, hide_menu_button, hide_panel_tabs, show_zoom_controls, replace, max_xfdf_len, ..Default::default() };
+        let own = pdfcraft_ui_egui::Ownership { actor, read_only, scope, annot_sync, hide_comments_panel, hide_menu_button, hide_panel_tabs, show_zoom_controls, replace, live, keep_view, max_xfdf_len, ..Default::default() };
         Ok(pdfcraft_ui_egui::with_policy(own, policy_overrides(data)))
     }
 
