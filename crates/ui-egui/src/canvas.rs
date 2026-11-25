@@ -367,6 +367,37 @@ pub(crate) fn snapshot_tab_name(title: &str, file_name: &str, snapshot: &Snapsho
     }
 }
 
+/// What a `keepView` open carries from the document it replaces to the new one: the page, scroll,
+/// zoom and how the pages are laid out. The new document may be shorter, so the page is clamped.
+pub struct KeptView {
+    zoom: f32,
+    fit: Fit,
+    layout: PageLayout,
+    continuous: bool,
+    rotation: u16,
+    current: usize,
+    scroll: Vec2,
+}
+
+impl KeptView {
+    pub fn capture(v: &DocView) -> Self {
+        KeptView { zoom: v.zoom, fit: v.fit, layout: v.layout, continuous: v.continuous, rotation: v.rotation, current: v.current, scroll: v.last_scroll }
+    }
+
+    /// Puts it on the freshly opened `v` (`pages` long); the scroll is clamped by the scroll area.
+    pub fn restore(self, v: &mut DocView, pages: usize) {
+        v.zoom = self.zoom;
+        v.fit = self.fit;
+        v.layout = self.layout;
+        v.continuous = self.continuous;
+        v.rotation = self.rotation;
+        v.current = self.current.min(pages.saturating_sub(1));
+        v.goto = None;
+        v.sync_scroll = Some(self.scroll);
+        v.reset_coarse_state();
+    }
+}
+
 pub struct DocView {
     pub id: DocId,
     pub zoom: f32,

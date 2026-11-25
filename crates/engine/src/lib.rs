@@ -248,6 +248,12 @@ pub struct Ownership {
     /// `pdfcraft:open` `replace`: this file takes the place of every document open (they close
     /// without asking) and is shown. Read when the file arrives; it is no rule of the document.
     pub replace: bool,
+    /// `pdfcraft:open` `live`: the page hears `edited` while this file has unsaved changes. Read when the
+    /// file arrives; it is no rule of the document.
+    pub live: bool,
+    /// `pdfcraft:open` `keepView`: the page, scroll, zoom and layout of the document this one replaces
+    /// (with `replace`) are put back on it. Read when the file arrives; it is no rule of the document.
+    pub keep_view: bool,
     /// `pdfcraft:open` `maxAnnotationXfdfLength`: the most UTF-16 units one annotation's XFDF may have
     /// when it goes out to the host (`annots-changed`) or is checked for export. 0 is the default
     /// (`pdfcraft_xfdf::MAX_XFDF_LEN`); the host's value is held to `MAX_XFDF_LEN..=MAX_XFDF_LEN_CEILING`.

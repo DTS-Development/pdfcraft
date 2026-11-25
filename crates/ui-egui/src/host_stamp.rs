@@ -1159,6 +1159,55 @@ mod flow_tests {
     }
 
     #[test]
+    fn keep_view_with_replace_puts_the_page_zoom_and_layout_back() {
+        let (mut h, _) = app(true);
+        h.state().startup_inbox.lock().unwrap().push(("a.pdf".into(), pdf_pages(5)));
+        h.state().ownership_inbox.lock().unwrap().push(pdfcraft_engine::Ownership { replace: true, ..Default::default() });
+        h.run_steps(3);
+        {
+            let v = &mut h.state_mut().views[0];
+            v.fit = crate::canvas::Fit::None;
+            v.zoom = 1.75;
+            v.rotation = 90;
+            v.goto = Some((3, 0.0));
+        }
+        h.run_steps(4);
+        assert_eq!(h.state().views[0].current, 3, "the view scrolled to page 4");
+        // The same file again, replacing the shown one and asking to keep the view.
+        h.state().startup_inbox.lock().unwrap().push(("a.pdf".into(), pdf_pages(3)));
+        h.state().ownership_inbox.lock().unwrap().push(pdfcraft_engine::Ownership { replace: true, keep_view: true, ..Default::default() });
+        h.run_steps(3);
+        let v = &h.state().views[0];
+        assert_eq!(h.state().views.len(), 1);
+        assert_eq!((v.zoom, v.rotation), (1.75, 90));
+        assert_eq!(v.current, 2, "the page is held to the shorter document");
+        // Without keepView the replacing document starts as a new one (no rotation carried over).
+        h.state().startup_inbox.lock().unwrap().push(("a.pdf".into(), pdf_pages(3)));
+        h.state().ownership_inbox.lock().unwrap().push(pdfcraft_engine::Ownership { replace: true, ..Default::default() });
+        h.run_steps(3);
+        assert_eq!(h.state().views[0].rotation, 0);
+    }
+
+    #[test]
+    fn edited_is_heard_only_for_a_live_file_with_unsaved_work() {
+        let (mut h, _) = app(true);
+        let heard: Rc<RefCell<Vec<u64>>> = Rc::default();
+        let sink = heard.clone();
+        h.state_mut().host_edited = Some(Box::new(move |g| sink.borrow_mut().push(g)));
+        h.state().startup_inbox.lock().unwrap().push(("b.pdf".into(), pdf_pages(2)));
+        h.state().ownership_inbox.lock().unwrap().push(pdfcraft_engine::Ownership { replace: true, live: true, ..Default::default() });
+        h.run_steps(3);
+        assert!(heard.borrow().is_empty(), "nothing unsaved yet");
+        let id = h.state().views[0].id;
+        assert!(h.state_mut().session.apply(id, pdfcraft_engine::Edit::RotatePages { pages: vec![0], degrees: 90 }).is_ok());
+        h.run_steps(3);
+        assert_eq!(heard.borrow().len(), 1, "one report for this generation");
+        h.run_steps(3);
+        assert_eq!(heard.borrow().len(), 1, "no repeat while it holds");
+        assert_eq!(heard.borrow()[0], h.state().session.get(id).unwrap().edit_generation());
+    }
+
+    #[test]
     fn huge_pixel_dimensions_are_refused_from_the_header_alone() {
         let mut out = Vec::new();
         let mut enc = png::Encoder::new(&mut out, MAX_SIDE_PX + 1, 1);

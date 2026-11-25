@@ -441,6 +441,10 @@ pub type HostSaveFn = Box<dyn Fn(&str, &[u8], bool, bool) -> Result<(), String>>
 /// Told every frame whether any tab has unsaved work, so a host page can warn before leaving.
 pub type HostDirtyFn = Box<dyn FnMut(bool)>;
 
+/// Told the edit generation of the document with unsaved work after each pass in which it moved (web,
+/// only for a file opened with `live`). `dirty` only flips, so this is how the page sees editing go on.
+pub type HostEditedFn = Box<dyn FnMut(u64)>;
+
 pub struct PasswordPrompt {
     pub name: String,
     pub path: Option<String>,
@@ -668,6 +672,11 @@ pub struct PdfCraftApp {
     host_fresh: Option<Option<RightPanel>>,
     /// Reports unsaved work to the embedding page (web, see [`HostDirtyFn`]).
     pub host_dirty: Option<HostDirtyFn>,
+    /// Reports that editing goes on to the embedding page (web, see [`HostEditedFn`]).
+    pub host_edited: Option<HostEditedFn>,
+    /// The file now shown was opened with `live`; the last generation reported for it.
+    host_live: bool,
+    host_edited_last: Option<(DocId, u64)>,
     /// The embedding page's requests for the document's bytes, and where to answer (web, see [`BytesRequest`]).
     pub bytes_inbox: BytesInbox,
     pub host_bytes: Option<HostBytesFn>,
@@ -1077,6 +1086,9 @@ impl PdfCraftApp {
             stored_author: None,
             host_fresh: None,
             host_dirty: None,
+            host_edited: None,
+            host_live: false,
+            host_edited_last: None,
             bytes_inbox: Default::default(),
             host_bytes: None,
             stamp_inbox: Default::default(),
@@ -3344,9 +3356,13 @@ impl eframe::App for PdfCraftApp {
             while let Some((name, bytes)) = queue.next() {
                 let mut shares = false;
                 let mut replace = false;
+                let mut live = false;
+                let mut keep_view = false;
                 if let Some(ownership) = rules.pop_front() {
                     shares = ownership.annot_sync;
                     replace = ownership.replace;
+                    live = ownership.live;
+                    keep_view = ownership.keep_view;
                     self.session.set_open_ownership(ownership);
                 } else if self.host_lock {
                     self.session.set_open_ownership(host_lock::viewer_ownership());
@@ -3355,6 +3371,8 @@ impl eframe::App for PdfCraftApp {
                     self.session.set_open_ownership(Default::default());
                 }
                 // `replace`: the open documents go without asking and the new one is shown.
+                // `keepView` (with `replace`): what the shown document was showing goes to the new one.
+                let kept = (replace && keep_view).then(|| self.active.and_then(|i| self.views.get(i)).map(canvas::KeptView::capture)).flatten();
                 if replace {
                     for i in (0..self.views.len()).rev() {
                         self.close_tab(i);
@@ -3363,6 +3381,16 @@ impl eframe::App for PdfCraftApp {
                 let activate = replace || !self.startup_superseded;
                 self.expect_opened();
                 let opened = self.open_bytes_with_focus(&name, None, bytes, activate);
+                if opened.is_ok()
+                    && let Some(kept) = kept
+                    && let Some(view) = self.active.and_then(|i| self.views.get_mut(i))
+                {
+                    let pages = self.session.get(view.id).map_or(0, |d| d.info.pages.len());
+                    kept.restore(view, pages);
+                }
+                // The page hears `edited` for this file only when it asked (a file opened later without `live` stops it).
+                self.host_live = live;
+                self.host_edited_last = None;
                 if shares {
                     self.annot_open_finished(opened.is_ok());
                 }
@@ -3429,6 +3457,19 @@ impl eframe::App for PdfCraftApp {
             let dirty = self.first_dirty().is_some();
             if let Some(report) = self.host_dirty.as_mut() {
                 report(dirty);
+            }
+        }
+        if self.host_live
+            && let Some(i) = self.first_dirty()
+            && let Some(view) = self.views.get(i)
+            && let Some(doc) = self.session.get(view.id)
+        {
+            let seen = (view.id, doc.edit_generation());
+            if self.host_edited_last != Some(seen) {
+                self.host_edited_last = Some(seen);
+                if let Some(report) = self.host_edited.as_mut() {
+                    report(seen.1);
+                }
             }
         }
         self.poll_updates();
