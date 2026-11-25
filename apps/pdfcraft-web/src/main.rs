@@ -368,7 +368,7 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   (`ready` only says the app listens).
 /// - `pdfcraft:dirty` (to the parent): `{ dirty }` whenever unsaved work appears or goes away.
 /// - `pdfcraft:edited` (to the parent): `{ rev }` after a pass in which the document has unsaved work and its edit generation moved; only for a file opened with `live: true`. `dirty` only flips, so this is how the page sees that editing goes on.
-/// - `pdfcraft:open` also takes `live` (send `edited`, default false) and `keepView` (with `replace`: the page, scroll, zoom and layout of the replaced document are put back on the new one as far as it has the places, default false). `ready` lists them in `openOptions`.
+/// - `pdfcraft:open` also takes `live` (send `edited`, default false) and `keepView` (also replaces the open documents, as `replace` does, and puts the page, scroll, zoom and layout of the one shown back on the new one as far as it has the places, default false). `ready` lists them in `openOptions`.
 /// - `pdfcraft:failed` (to the parent): `{ error }` when the app couldn't start.
 ///
 /// Only the parent window on the app's own origin is heard or answered. With a parent on
@@ -1216,9 +1216,9 @@ mod host {
         };
         let annot_sync = flag("annotSync")?;
         // `replace: true` closes every open document (no questions) before this one opens.
-        let replace = flag("replace")?;
-        // `live: true` makes the page hear `pdfcraft:edited`; `keepView: true` (with `replace`) keeps the view of the replaced document.
+        // `live: true` makes the page hear `pdfcraft:edited`; `keepView: true` replaces the open documents (like `replace`) and keeps their view.
         let (live, keep_view) = (flag("live")?, flag("keepView")?);
+        let replace = flag("replace")? || keep_view;
         if annot_sync && actor.is_none() {
             return Err("annotSync needs an actor".into());
         }

@@ -3371,7 +3371,7 @@ impl eframe::App for PdfCraftApp {
                     self.session.set_open_ownership(Default::default());
                 }
                 // `replace`: the open documents go without asking and the new one is shown.
-                // `keepView` (with `replace`): what the shown document was showing goes to the new one.
+                // `keepView` (the web layer sets `replace` with it): what the shown document was showing goes to the new one.
                 let kept = (replace && keep_view).then(|| self.active.and_then(|i| self.views.get(i)).map(canvas::KeptView::capture)).flatten();
                 if replace {
                     for i in (0..self.views.len()).rev() {
