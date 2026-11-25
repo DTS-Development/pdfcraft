@@ -4280,7 +4280,13 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
     }
     if let Some(n) = form_notice {
         match n {
-            crate::forms_ui::FormNotice::Security => app.notify_tr("The document's security settings don't allow filling in form fields"),
+            crate::forms_ui::FormNotice::Security => {
+                // Read-only or unreadable: say so; only the PDF's own flags keep the form wording.
+                match app.session.get(app.views[index].id).map(|d| d.change_block()) {
+                    Some(b) if b != pdfcraft_engine::ChangeBlock::Permissions => app.notify(crate::commands::change_block_text(b)),
+                    _ => app.notify_tr("The document's security settings don't allow filling in form fields"),
+                }
+            }
             crate::forms_ui::FormNotice::ReadOnly(name) => app.notify_fmt("{name} is read-only", &[("name", &name)]),
             crate::forms_ui::FormNotice::NoAction(name) => app.notify_fmt("{name} has no action", &[("name", &name)]),
         }

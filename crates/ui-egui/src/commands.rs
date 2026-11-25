@@ -79,6 +79,13 @@ pub(crate) fn command_tip(ctx: &egui::Context, template: &str, id: &str) -> Stri
 impl PdfCraftApp {
     /// Whether a registered command can run now. The engine judges the document (security,
     /// contents, undo history); view state it can't see is checked here.
+    /// The notice for a change the active document refuses (`allowed` says it doesn't), by cause;
+    /// `None` when there is no document or it allows the change.
+    pub(crate) fn change_refused_text(&self, allowed: impl Fn(&pdfcraft_engine::Document) -> bool) -> Option<String> {
+        let d = self.active_ids().and_then(|(_, id)| self.session.get(id))?;
+        (!allowed(d)).then(|| change_block_text(d.change_block()).to_string())
+    }
+
     pub(crate) fn command_enabled(&self, spec: &CommandSpec) -> bool {
         // Undo and Redo act on the Combine files list while its tab shows.
         if self.combine_showing() && matches!(spec.needs, commands::Needs::Undo | commands::Needs::Redo) {
@@ -120,6 +127,16 @@ impl PdfCraftApp {
         }
         if !self.command_enabled(spec) {
             let why = match spec.needs {
+                // These need a document that allows the change; when it doesn't, say why instead of
+                // "there is nothing to change".
+                commands::Needs::HasComments | commands::Needs::HasFields | commands::Needs::HasRedactions | commands::Needs::Marks(_)
+                    if self.change_refused_text(|d| d.allows_modification()).is_some() =>
+                {
+                    self.change_refused_text(|d| d.allows_modification()).unwrap_or_default()
+                }
+                commands::Needs::FillForms if self.change_refused_text(|d| d.allows_form_filling()).is_some() => {
+                    self.change_refused_text(|d| d.allows_form_filling()).unwrap_or_default()
+                }
                 commands::Needs::Undo => tl!("Nothing to undo").to_string(),
                 commands::Needs::Redo => tl!("Nothing to redo").to_string(),
                 commands::Needs::FillForms if self.active.is_some() => tl!("This document has no form fields you can fill in").to_string(),
@@ -825,7 +842,7 @@ pub(crate) fn registry_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui, menu: &str
 
 /// The notice for a refused content change, by what refused it: the host's read-only setting, a
 /// structure that couldn't be read for editing, or the PDF's own permission flags.
-fn change_block_text(block: pdfcraft_engine::ChangeBlock) -> &'static str {
+pub(crate) fn change_block_text(block: pdfcraft_engine::ChangeBlock) -> &'static str {
     use pdfcraft_engine::ChangeBlock as B;
     match block {
         B::HostReadOnly => tl!("This document was opened read-only, so it can't be changed"),

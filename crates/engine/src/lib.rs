@@ -836,7 +836,9 @@ impl Document {
     /// Why a content change (page, content or comment edit) is refused for this document, so the
     /// interface can say so: the host opened it read-only, its structure couldn't be read for
     /// editing ([`Self::read_only_reason`] has the detail), or the PDF's own permissions forbid it.
-    /// Only a reading of what [`Self::allows_modification`] and its siblings already decide.
+    /// Only a reading of what [`Self::allows_modification`] and its siblings already decide: ask it
+    /// after a change was refused. For a document that allows the change it still says
+    /// [`ChangeBlock::Permissions`], the last cause left.
     pub fn change_block(&self) -> ChangeBlock {
         if self.ownership.read_only {
             ChangeBlock::HostReadOnly

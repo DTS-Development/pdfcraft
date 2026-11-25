@@ -672,3 +672,17 @@ fn ctrl_tab_steps_through_the_tabs_in_order_and_wraps_around() {
         assert!(!doc.dirty, "switching tabs changes no document");
     }
 }
+
+/// A document the host opened read-only says so when a change is refused, whichever kind of change
+/// it was, rather than blaming the PDF's security settings or "nothing to change".
+#[test]
+fn a_read_only_document_says_why_a_change_is_refused() {
+    let mut app = PdfCraftApp::new();
+    app.set_option("language", "en").unwrap();
+    app.session.set_ownership(pdfcraft_engine::Ownership { read_only: true, ..Default::default() });
+    app.open_bytes("doc.pdf", None, fixture(2)).unwrap();
+    for id in ["form.detect", "page.cut", "measure.distance", "redact.apply", "form.field.properties", "form.clear"] {
+        assert!(!app.execute(id), "{id} is refused");
+        assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("This document was opened read-only, so it can't be changed"), "{id}");
+    }
+}
