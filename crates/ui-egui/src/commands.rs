@@ -77,8 +77,6 @@ pub(crate) fn command_tip(ctx: &egui::Context, template: &str, id: &str) -> Stri
 }
 
 impl PdfCraftApp {
-    /// Whether a registered command can run now. The engine judges the document (security,
-    /// contents, undo history); view state it can't see is checked here.
     /// The notice for a change the active document refuses (`allowed` says it doesn't), by cause;
     /// `None` when there is no document or it allows the change.
     pub(crate) fn change_refused_text(&self, allowed: impl Fn(&pdfcraft_engine::Document) -> bool) -> Option<String> {
@@ -86,6 +84,8 @@ impl PdfCraftApp {
         (!allowed(d)).then(|| change_block_text(d.change_block()).to_string())
     }
 
+    /// Whether a registered command can run now. The engine judges the document (security,
+    /// contents, undo history); view state it can't see is checked here.
     pub(crate) fn command_enabled(&self, spec: &CommandSpec) -> bool {
         // Undo and Redo act on the Combine files list while its tab shows.
         if self.combine_showing() && matches!(spec.needs, commands::Needs::Undo | commands::Needs::Redo) {
