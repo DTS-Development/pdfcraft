@@ -1809,6 +1809,8 @@ key	Space	Mezerník
 	This document isn't password-protected	Tento dokument není chráněný heslem
 	Only the document's owner can change its security (open it with the permissions password)	Zabezpečení může změnit jen vlastník dokumentu (otevřete ho heslem oprávnění)
 	The document's security settings don't allow this change	Nastavení zabezpečení dokumentu tuto změnu nedovoluje
+	This document was opened read-only, so it can't be changed	Dokument byl otevřen jen pro čtení, takže ho nelze změnit
+	This document's structure couldn't be read, so it can only be viewed	Strukturu dokumentu se nepodařilo přečíst, takže ho lze jen prohlížet
 	The document's security settings don't allow copying text and images	Nastavení zabezpečení dokumentu nedovoluje kopírovat text a obrázky
 	Open a document first	Nejdřív otevřete dokument
 	Security will be removed when you save	Zabezpečení se odebere při uložení

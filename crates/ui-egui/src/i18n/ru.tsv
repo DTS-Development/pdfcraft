@@ -1763,6 +1763,8 @@
 	Couldn't unlock {name}: {e}	Не удалось разблокировать «{name}»: {e}
 	This document has no restrictions to lift	У этого документа нет ограничений, которые можно снять
 	The document's security settings don't allow this change	Настройки безопасности документа не разрешают это изменение
+	This document was opened read-only, so it can't be changed	Документ открыт только для чтения, изменить его нельзя
+	This document's structure couldn't be read, so it can only be viewed	Не удалось прочитать структуру документа, поэтому его можно только просматривать
 	The document's security settings don't allow copying text and images	Настройки безопасности документа не разрешают копировать текст и изображения
 	Open a document first	Сначала откройте документ
 	Security will be removed when you save	Безопасность будет удалена при сохранении

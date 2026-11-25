@@ -1725,6 +1725,8 @@
 	Couldn't unlock {name}: {e}	{name} не може да се отключи: {e}
 	This document has no restrictions to lift	Този документ няма ограничения за премахване
 	The document's security settings don't allow this change	Настройките за защита на документа не позволяват тази промяна
+	This document was opened read-only, so it can't be changed	Документът е отворен само за четене, затова не може да се променя
+	This document's structure couldn't be read, so it can only be viewed	Структурата на документа не можа да се прочете, затова може само да се преглежда
 	The document's security settings don't allow copying text and images	Настройките за защита на документа не позволяват копиране на текст и изображения
 	Open a document first	Първо отворете документ
 	Security will be removed when you save	Защитата ще бъде премахната при записване

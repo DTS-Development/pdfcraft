@@ -1809,6 +1809,8 @@
 	The document was closed before it could be saved.	Dokument je bil zaprt, preden ga je bilo mogoče shraniti.
 	The document's security settings don't allow filling in form fields	Varnostne nastavitve dokumenta ne dovoljujejo izpolnjevanja polj obrazca
 	The document's security settings don't allow this change	Varnostne nastavitve dokumenta ne dovoljujejo te spremembe
+	This document was opened read-only, so it can't be changed	Dokument je odprt samo za branje, zato ga ni mogoče spremeniti
+	This document's structure couldn't be read, so it can only be viewed	Strukture dokumenta ni bilo mogoče prebrati, zato si ga je mogoče le ogledati
 	The form asks to be submitted to {u}; PdfCraft doesn't send form data. Save the document to keep your entries.	Obrazec želi biti oddan na {u}; PdfCraft ne pošilja podatkov obrazcev. Shranite dokument, da obdržite svoje vnose.
 	The form asks viewers to make appearances (NeedAppearances)	Obrazec zahteva, da gledalci ustvarijo videze (NeedAppearances)
 	The key is in the Windows certificate store, which may ask to allow PdfCraft to use it.	Ključ je v shrambi potrdil Windows, ki lahko zahteva dovoljenje, da ga PdfCraft uporabi.

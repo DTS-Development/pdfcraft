@@ -1659,6 +1659,8 @@
 	This document isn't password-protected	Bu belge parola korumalı değil
 	Only the document's owner can change its security (open it with the permissions password)	Yalnızca belge sahibi güvenliğini değiştirebilir (izinler parolasıyla açın)
 	The document's security settings don't allow this change	Belgenin güvenlik ayarları bu değişikliğe izin vermiyor
+	This document was opened read-only, so it can't be changed	Bu belge salt okunur açıldığı için değiştirilemez
+	This document's structure couldn't be read, so it can only be viewed	Belgenin yapısı okunamadığı için yalnızca görüntülenebilir
 	Open a document first	Önce bir belge açın
 	Security will be removed when you save	Kaydettiğinizde güvenlik kaldırılacaktır
 	Click text or an image to edit it	Düzenlemek için metne veya resme tıklayın

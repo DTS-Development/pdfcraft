@@ -146,7 +146,8 @@ impl PdfCraftApp {
                 }
                 commands::Needs::Unlock if self.active.is_some() => tl!("This document has no restrictions to lift").to_string(),
                 commands::Needs::Assembly | commands::Needs::Modification | commands::Needs::Annotate if self.active.is_some() => {
-                    tl!("The document's security settings don't allow this change").to_string()
+                    let block = self.active_ids().and_then(|(_, id)| self.session.get(id)).map(|d| d.change_block());
+                    change_block_text(block.unwrap_or(pdfcraft_engine::ChangeBlock::Permissions)).to_string()
                 }
                 commands::Needs::Copying if self.active.is_some() => crate::copy_refused().to_string(),
                 commands::Needs::TwoPageView if self.active.is_some() => tl!("Switch to two-page view first to show the cover page").to_string(),
@@ -822,10 +823,36 @@ pub(crate) fn registry_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui, menu: &str
     let _ = widgets::menu_item;
 }
 
+/// The notice for a refused content change, by what refused it: the host's read-only setting, a
+/// structure that couldn't be read for editing, or the PDF's own permission flags.
+fn change_block_text(block: pdfcraft_engine::ChangeBlock) -> &'static str {
+    use pdfcraft_engine::ChangeBlock as B;
+    match block {
+        B::HostReadOnly => tl!("This document was opened read-only, so it can't be changed"),
+        B::Unreadable => tl!("This document's structure couldn't be read, so it can only be viewed"),
+        B::Permissions => tl!("The document's security settings don't allow this change"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use egui::os::OperatingSystem;
+
+    #[test]
+    fn a_refused_change_says_what_refused_it() {
+        use pdfcraft_engine::ChangeBlock as B;
+        let previous = crate::i18n::current();
+        crate::i18n::set_current(crate::i18n::Lang::EN);
+        assert_eq!(change_block_text(B::HostReadOnly), "This document was opened read-only, so it can't be changed");
+        assert_eq!(change_block_text(B::Unreadable), "This document's structure couldn't be read, so it can only be viewed");
+        assert_eq!(change_block_text(B::Permissions), "The document's security settings don't allow this change");
+        crate::i18n::set_current(crate::i18n::Lang::from_code("ko").unwrap());
+        assert_eq!(change_block_text(B::HostReadOnly), "읽기 전용으로 열린 문서라 바꿀 수 없습니다");
+        assert_eq!(change_block_text(B::Unreadable), "문서 구조를 읽지 못해 보기만 할 수 있습니다");
+        assert_eq!(change_block_text(B::Permissions), "문서의 보안 설정에서 이 변경을 허용하지 않습니다");
+        crate::i18n::set_current(previous);
+    }
 
     #[test]
     fn localized_shortcut_labels_follow_language_and_platform() {

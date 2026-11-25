@@ -1775,6 +1775,8 @@ action wizard	Start	Iniciar
 	Couldn't unlock {name}: {e}	No se pudo desbloquear {name}: {e}
 	This document has no restrictions to lift	Este documento no tiene restricciones que quitar
 	The document's security settings don't allow this change	La configuración de seguridad del documento no permite este cambio
+	This document was opened read-only, so it can't be changed	Este documento se abrió como solo lectura y no se puede cambiar
+	This document's structure couldn't be read, so it can only be viewed	No se pudo leer la estructura del documento, así que solo se puede ver
 	The document's security settings don't allow copying text and images	La configuración de seguridad del documento no permite copiar texto ni imágenes
 	Open a document first	Abre primero un documento
 	Security will be removed when you save	La seguridad se quitará al guardar

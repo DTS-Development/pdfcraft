@@ -208,6 +208,17 @@ use pdfcraft_render::{DocInfo, Layer, LayerOp, OpenError, ReadingColors, RenderC
 pub const XFDF_LEN_MIN: usize = pdfcraft_xfdf::MAX_XFDF_LEN;
 pub const XFDF_LEN_MAX: usize = pdfcraft_xfdf::MAX_XFDF_LEN_CEILING;
 
+/// What stops a content change in a document ([`Document::change_block`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChangeBlock {
+    /// The host opened it with `readOnly`.
+    HostReadOnly,
+    /// Its structure couldn't be read for editing: it can only be viewed.
+    Unreadable,
+    /// The PDF's permission flags don't allow the change.
+    Permissions,
+}
+
 /// Who is editing, as the embedding page says (`pdfcraft:open` `actor` and `readOnly`).
 /// The default is no checking: anyone edits anything, as in a stand-alone PdfCraft.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -820,6 +831,20 @@ impl Document {
 
     pub fn editable(&self) -> bool {
         self.editor.is_some() && !self.ownership.read_only
+    }
+
+    /// Why a content change (page, content or comment edit) is refused for this document, so the
+    /// interface can say so: the host opened it read-only, its structure couldn't be read for
+    /// editing ([`Self::read_only_reason`] has the detail), or the PDF's own permissions forbid it.
+    /// Only a reading of what [`Self::allows_modification`] and its siblings already decide.
+    pub fn change_block(&self) -> ChangeBlock {
+        if self.ownership.read_only {
+            ChangeBlock::HostReadOnly
+        } else if self.editor.is_none() {
+            ChangeBlock::Unreadable
+        } else {
+            ChangeBlock::Permissions
+        }
     }
 
     /// The host's actor and read-only setting this document is edited under.

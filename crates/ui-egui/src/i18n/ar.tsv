@@ -1762,6 +1762,8 @@
 	Couldn't unlock {name}: {e}	تعذّر إلغاء قفل {name}: {e}
 	This document has no restrictions to lift	لا توجد في هذا المستند قيود لرفعها
 	The document's security settings don't allow this change	إعدادات أمان المستند لا تسمح بهذا التغيير
+	This document was opened read-only, so it can't be changed	فُتح هذا المستند للقراءة فقط، لذا لا يمكن تغييره
+	This document's structure couldn't be read, so it can only be viewed	تعذّرت قراءة بنية المستند، لذا يمكن عرضه فقط
 	The document's security settings don't allow copying text and images	إعدادات أمان المستند لا تسمح بنسخ النصوص والصور
 	Open a document first	افتح مستندًا أولًا
 	Security will be removed when you save	سيُزال الأمان عند الحفظ

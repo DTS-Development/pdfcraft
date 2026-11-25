@@ -1136,6 +1136,8 @@ theme	Appearance	화면 모양
 	The document opens without a password; this password is needed to change the restrictions. It's applied when you save.	문서는 암호 없이 열리며, 제한을 변경하려면 이 암호가 필요합니다. 저장할 때 적용됩니다.
 	The document's security settings don't allow copying text and images	문서의 보안 설정에서 텍스트와 이미지 복사를 허용하지 않습니다
 	The document's security settings don't allow this change	문서의 보안 설정에서 이 변경을 허용하지 않습니다
+	This document was opened read-only, so it can't be changed	읽기 전용으로 열린 문서라 바꿀 수 없습니다
+	This document's structure couldn't be read, so it can only be viewed	문서 구조를 읽지 못해 보기만 할 수 있습니다
 	The existing action will be preserved.	기존 동작은 유지됩니다.
 	The fonts PdfCraft writes with can't draw “{c}” ({code}), so it shows as ? in every PDF viewer. The text is saved.	PdfCraft가 쓰는 글꼴로 “{c}”({code})을(를) 그릴 수 없어 모든 PDF 뷰어에서 ?로 표시됩니다. 텍스트는 저장되었습니다.
 	The key is in the Windows certificate store, which may ask to allow PdfCraft to use it.	키가 Windows 인증서 저장소에 있으며, PdfCraft의 사용을 허용할지 묻는 창이 나타날 수 있습니다.

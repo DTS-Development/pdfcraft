@@ -1688,6 +1688,8 @@
 	This document isn't password-protected	Бұл құжат құпиясөзбен қорғалмаған
 	Only the document's owner can change its security (open it with the permissions password)	Қауіпсіздікті тек құжат иесі өзгерте алады (оны рұқсаттар құпиясөзімен ашыңыз)
 	The document's security settings don't allow this change	Құжаттың қауіпсіздік параметрлері бұл өзгерісті рұқсат етпейді
+	This document was opened read-only, so it can't be changed	Құжат тек оқуға ашылған, сондықтан оны өзгертуге болмайды
+	This document's structure couldn't be read, so it can only be viewed	Құжат құрылымын оқу мүмкін болмады, сондықтан оны тек көруге болады
 	Open a document first	Алдымен құжатты ашыңыз
 	Security will be removed when you save	Сақтаған кезде қауіпсіздік алынып тасталады
 	Click text or an image to edit it	Түзету үшін мәтінге немесе кескінге шертіңіз

@@ -1146,6 +1146,8 @@
 	The document opens without a password; this password is needed to change the restrictions. It's applied when you save.	Dokumentą galima atverti be slaptažodžio; šis slaptažodis reikalingas apribojimams keisti. Jis pritaikomas įrašant dokumentą.
 	The document's security settings don't allow copying text and images	Dokumento saugos nuostatos neleidžia kopijuoti teksto ir paveikslėlių
 	The document's security settings don't allow this change	Dokumento saugos nuostatos neleidžia atlikti šio pakeitimo
+	This document was opened read-only, so it can't be changed	Dokumentas atidarytas tik skaitymui, todėl jo pakeisti negalima
+	This document's structure couldn't be read, so it can only be viewed	Dokumento struktūros nepavyko nuskaityti, todėl jį galima tik peržiūrėti
 	The existing action will be preserved.	Esamas veiksmas bus išsaugotas.
 	The fonts PdfCraft writes with can't draw “{c}” ({code}), so it shows as ? in every PDF viewer. The text is saved.	„PdfCraft“ naudojami šriftai negali atvaizduoti simbolio „{c}“ ({code}), todėl visose PDF žiūryklėse jis rodomas kaip ?. Tekstas įrašytas.
 	The key is in the Windows certificate store, which may ask to allow PdfCraft to use it.	Raktas saugomas „Windows“ sertifikatų saugykloje; gali būti paprašyta leisti „PdfCraft“ juo naudotis.

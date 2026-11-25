@@ -1683,6 +1683,8 @@
 	Couldn't unlock {name}: {e}	{name} feloldása nem sikerült: {e}
 	This document has no restrictions to lift	Ebben a dokumentumban nincs feloldható korlátozás
 	The document's security settings don't allow this change	A dokumentum biztonsági beállításai nem engedik ezt a módosítást
+	This document was opened read-only, so it can't be changed	A dokumentum csak olvasásra lett megnyitva, ezért nem módosítható
+	This document's structure couldn't be read, so it can only be viewed	A dokumentum szerkezetét nem sikerült beolvasni, ezért csak megtekinthető
 	The document's security settings don't allow copying text and images	A dokumentum biztonsági beállításai nem engedik a szöveg és a képek másolását
 	Open a document first	Előbb nyiss meg egy dokumentumot
 	Security will be removed when you save	A védelem mentéskor megszűnik
