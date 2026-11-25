@@ -1698,6 +1698,8 @@
 	Couldn't unlock {name}: {e}	{name} konnte nicht entsperrt werden: {e}
 	This document has no restrictions to lift	Dieses Dokument hat keine Einschränkungen, die aufgehoben werden können
 	The document's security settings don't allow this change	Die Sicherheitseinstellungen des Dokuments erlauben diese Änderung nicht
+	This document was opened read-only, so it can't be changed	Dieses Dokument wurde schreibgeschützt geöffnet und kann nicht geändert werden
+	This document's structure couldn't be read, so it can only be viewed	Die Struktur des Dokuments konnte nicht gelesen werden; es kann nur angezeigt werden
 	The document's security settings don't allow copying text and images	Die Sicherheitseinstellungen des Dokuments erlauben kein Kopieren von Text und Bildern
 	Open a document first	Öffne zuerst ein Dokument
 	Security will be removed when you save	Die Sicherheit wird beim Speichern entfernt

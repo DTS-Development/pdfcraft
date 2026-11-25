@@ -1732,6 +1732,8 @@
 	Couldn't unlock {name}: {e}	无法解锁 {name}：{e}
 	This document has no restrictions to lift	此文档没有可解除的限制
 	The document's security settings don't allow this change	文档安全设置不允许此更改
+	This document was opened read-only, so it can't be changed	此文档以只读方式打开，无法更改
+	This document's structure couldn't be read, so it can only be viewed	无法读取文档结构，只能查看
 	The document's security settings don't allow copying text and images	文档安全设置不允许复制文本和图像
 	Open a document first	请先打开文档
 	Security will be removed when you save	保存时将删除安全性设置

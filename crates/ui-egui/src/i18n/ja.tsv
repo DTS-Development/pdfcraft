@@ -1774,6 +1774,8 @@
 	Couldn't unlock {name}: {e}	{name} のロックを解除できませんでした: {e}
 	This document has no restrictions to lift	この文書には解除する制限がありません
 	The document's security settings don't allow this change	文書のセキュリティ設定により、この変更は許可されていません
+	This document was opened read-only, so it can't be changed	読み取り専用で開いた文書のため、変更できません
+	This document's structure couldn't be read, so it can only be viewed	文書の構造を読み取れなかったため、表示のみ可能です
 	The document's security settings don't allow copying text and images	文書のセキュリティ設定により、テキストと画像のコピーは許可されていません
 	Open a document first	先に文書を開いてください
 	Security will be removed when you save	セキュリティは保存時に解除されます

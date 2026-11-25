@@ -6697,6 +6697,22 @@ mod ownership {
     }
 
     #[test]
+    fn the_block_reason_names_the_cause() {
+        let mut s = Session::new().with_clock(|| 1_700_000_000);
+        let id = s.open("a.pdf", None, Arc::new(fixture(1)), None).unwrap();
+        assert_eq!(s.get(id).unwrap().change_block(), ChangeBlock::Permissions, "editable: only the PDF's own flags could be left");
+        // The structure couldn't be read: no editor.
+        s.docs.iter_mut().find(|d| d.id == id).unwrap().editor = None;
+        assert_eq!(s.get(id).unwrap().change_block(), ChangeBlock::Unreadable);
+        // The host's read-only setting wins whatever else is the case.
+        act(&mut s, None, true);
+        let ro = s.open("b.pdf", None, Arc::new(fixture(1)), None).unwrap();
+        assert_eq!(s.get(ro).unwrap().change_block(), ChangeBlock::HostReadOnly);
+        s.docs.iter_mut().find(|d| d.id == ro).unwrap().editor = None;
+        assert_eq!(s.get(ro).unwrap().change_block(), ChangeBlock::HostReadOnly);
+    }
+
+    #[test]
     fn what_the_interface_asks_agrees_with_the_engine() {
         let (mut s, id) = two_owners();
         let d = s.get(id).unwrap();

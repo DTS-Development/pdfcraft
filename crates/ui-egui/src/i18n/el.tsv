@@ -2084,6 +2084,8 @@
 	This document isn't password-protected	Το έγγραφο δεν προστατεύεται με κωδικό
 	Only the document's owner can change its security (open it with the permissions password)	Μόνο ο κάτοχος μπορεί να αλλάξει την προστασία (ανοίξτε το με τον κωδικό δικαιωμάτων)
 	The document's security settings don't allow this change	Οι ρυθμίσεις ασφαλείας του εγγράφου δεν επιτρέπουν αυτή την αλλαγή
+	This document was opened read-only, so it can't be changed	Το έγγραφο άνοιξε μόνο για ανάγνωση, επομένως δεν μπορεί να αλλάξει
+	This document's structure couldn't be read, so it can only be viewed	Δεν ήταν δυνατή η ανάγνωση της δομής του εγγράφου, οπότε μπορεί μόνο να προβληθεί
 	Open a document first	Ανοίξτε πρώτα ένα έγγραφο
 	Security will be removed when you save	Η προστασία θα αφαιρεθεί κατά την αποθήκευση
 	Click text or an image to edit it	Κάντε κλικ σε κείμενο ή εικόνα για επεξεργασία

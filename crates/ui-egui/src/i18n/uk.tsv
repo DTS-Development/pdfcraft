@@ -1760,6 +1760,8 @@
 	Couldn't unlock {name}: {e}	Не вдалося розблокувати {name}: {e}
 	This document has no restrictions to lift	Цей документ не має обмежень, які можна зняти
 	The document's security settings don't allow this change	Налаштування захисту документа не дозволяють цю зміну
+	This document was opened read-only, so it can't be changed	Документ відкрито лише для читання, змінити його не можна
+	This document's structure couldn't be read, so it can only be viewed	Не вдалося прочитати структуру документа, тому його можна лише переглядати
 	The document's security settings don't allow copying text and images	Налаштування захисту документа не дозволяють копіювати текст і зображення
 	Open a document first	Спочатку відкрийте документ
 	Security will be removed when you save	Захист буде знято під час збереження

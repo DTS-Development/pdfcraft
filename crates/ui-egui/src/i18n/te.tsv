@@ -1682,6 +1682,8 @@ action wizard	Start	ప్రారంభించు
 	Couldn't unlock {name}: {e}	{name}ను అన్‌లాక్ చేయలేకపోయాము: {e}
 	This document has no restrictions to lift	ఈ పత్రంలో తొలగించాల్సిన పరిమితులు లేవు
 	The document's security settings don't allow this change	పత్రం భద్రతా సెట్టింగ్‌లు ఈ మార్పును అనుమతించవు
+	This document was opened read-only, so it can't be changed	ఈ పత్రం చదవడానికి మాత్రమే తెరవబడింది, కాబట్టి మార్చలేరు
+	This document's structure couldn't be read, so it can only be viewed	పత్రం నిర్మాణాన్ని చదవలేకపోయాం, కాబట్టి దీన్ని చూడటం మాత్రమే సాధ్యం
 	The document's security settings don't allow copying text and images	పత్రం భద్రతా సెట్టింగ్‌లు టెక్స్ట్, చిత్రాలను కాపీ చేయడాన్ని అనుమతించవు
 	Open a document first	ముందుగా ఒక పత్రాన్ని తెరవండి
 	Security will be removed when you save	మీరు సేవ్ చేసినప్పుడు భద్రత తీసివేయబడుతుంది

@@ -1597,6 +1597,8 @@
 	Couldn't unlock {name}: {e}	Não foi possível desbloquear {name}: {e}
 	This document has no restrictions to lift	Este documento não tem restrições a remover
 	The document's security settings don't allow this change	As configurações de segurança do documento não permitem esta alteração
+	This document was opened read-only, so it can't be changed	Este documento foi aberto somente para leitura e não pode ser alterado
+	This document's structure couldn't be read, so it can only be viewed	Não foi possível ler a estrutura do documento, então ele só pode ser visualizado
 	The document's security settings don't allow copying text and images	As configurações de segurança do documento não permitem copiar texto e imagens
 	Open a document first	Abra um documento primeiro
 	Security will be removed when you save	A segurança será removida ao salvar
