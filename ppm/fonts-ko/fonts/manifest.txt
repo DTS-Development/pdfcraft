@@ -2,3 +2,5 @@
 #   family | style | file (relative to the repo root) | scripts (ISO 15924, comma-separated) | licence | licence file | sha256 | source
 # Lines starting with '#' and blank lines are ignored.
 NanumGothic | Regular | fonts/nanum-gothic/NanumGothic-Regular.ttf | Kore,Latn | OFL-1.1 | fonts/nanum-gothic/OFL.txt | 76f45ef4a6bcff344c837c95a7dcc26e017e38b5846d5ae0cdcb5b86be2e2d31 | https://github.com/google/fonts/tree/133ccbee9a8b408eb71f31a36ccb9116f5c695ad/ofl/nanumgothic
+# Japanese: the interface face (?lang=ja) and Japanese text in comments. The wasm build embeds only BIZ UDPGothic Regular among Jpan faces.
+BIZ UDPGothic | Regular | fonts/biz-udpgothic/BIZUDPGothic-Regular.ttf | Jpan | OFL-1.1 | fonts/biz-udpgothic/OFL.txt | 258d7156c165f2ff774b6efee637c22c3b950de0d8a10e501137061bc8085d01 | https://github.com/google/fonts/tree/40cd5edf3831c9e0012b96345c476598595b9970/ofl/bizudpgothic
