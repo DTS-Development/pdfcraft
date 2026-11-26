@@ -22,4 +22,5 @@ rm -rf "$out"
 "$bindgen" --target nodejs --out-dir "$out" target/wasm32-unknown-unknown/release/ppm_annot_node.wasm
 # 번들 글꼴의 라이선스는 산출물과 함께 간다(OFL-1.1 §2).
 cp "$root/ppm/fonts-ko/fonts/nanum-gothic/OFL.txt" "$out/NanumGothic-OFL.txt"
+cp "$root/ppm/fonts-ko/fonts/biz-udpgothic/OFL.txt" "$out/BIZUDPGothic-OFL.txt"
 echo "built: $out"

@@ -83,6 +83,12 @@ fn main() {
                             let index = query_param("authorIdx").and_then(|i| i.parse::<usize>().ok()).unwrap_or(0);
                             pdfcraft_ui_egui::author_display::set(&sep, index);
                         }
+                        // `?lang=`: the host's interface language, a registered code such as `en` or `ja`. A host
+                        // build otherwise starts in Korean (and never restores a saved choice); a code the app
+                        // has no catalog for leaves it in Korean.
+                        if let Some(lang) = query_param("lang").filter(|l| !l.eq_ignore_ascii_case(pdfcraft_ui_egui::i18n::AUTO)) {
+                            let _ = app.set_option("language", &lang);
+                        }
                         // A host-driven frame starts clean: the previous frame's open side panel
                         // (compare, ...) and egui memory in localStorage are neither read nor saved (#26).
                         app.start_fresh_for_host(&cc.egui_ctx);
