@@ -1207,6 +1207,63 @@ mod flow_tests {
         assert_eq!(heard.borrow()[0], h.state().session.get(id).unwrap().edit_generation());
     }
 
+    fn cursor_log(h: &mut Harness<'_, PdfCraftApp>) -> Rc<RefCell<Vec<Option<(String, serde_json::Value)>>>> {
+        let sent: Rc<RefCell<Vec<Option<(String, serde_json::Value)>>>> = Rc::default();
+        let sink = sent.clone();
+        h.state_mut().host_cursor = Some(Box::new(move |place| sink.borrow_mut().push(place.map(|(r, p)| (r.to_string(), p.clone())))));
+        sent
+    }
+
+    fn others(h: &mut Harness<'_, PdfCraftApp>, name: &str) {
+        let m = serde_json::json!({"cursors": [{"conn": 7, "name": name, "color": "#ff0000", "role": "edit", "region": "page:2"}]});
+        *h.state().cursors_inbox.lock().unwrap() = Some(crate::remote_cursors::parse(&m));
+    }
+
+    #[test]
+    fn the_place_goes_out_once_and_only_for_a_cursors_file() {
+        let (mut h, _) = app(true);
+        let sent = cursor_log(&mut h);
+        h.state().startup_inbox.lock().unwrap().push(("c.pdf".into(), pdf_pages(3)));
+        h.state().ownership_inbox.lock().unwrap().push(pdfcraft_engine::Ownership { replace: true, cursors: true, ..Default::default() });
+        h.run_steps(4);
+        let (region, _) = sent.borrow().last().cloned().flatten().expect("a document is shown");
+        assert_eq!(region, "page:1");
+        let settled = sent.borrow().len();
+        h.run_steps(3);
+        assert_eq!(sent.borrow().len(), settled, "the same place isn't sent twice");
+        h.state_mut().views[0].select_text(0, 0, 0);
+        h.run_steps(3);
+        let n = sent.borrow().len();
+        h.state_mut().views[0].goto = Some((2, 0.0));
+        h.run_steps(5);
+        assert!(sent.borrow().len() > n || sent.borrow().last().and_then(|p| p.as_ref()).is_some_and(|(r, _)| r == "page:3"), "a new page is told");
+        // The same file opened without the option sends nothing more and keeps no list.
+        let before = sent.borrow().len();
+        h.state().startup_inbox.lock().unwrap().push(("c.pdf".into(), pdf_pages(3)));
+        h.state().ownership_inbox.lock().unwrap().push(pdfcraft_engine::Ownership { replace: true, ..Default::default() });
+        h.run_steps(4);
+        others(&mut h, "Kim");
+        h.run_steps(3);
+        assert_eq!(sent.borrow().len(), before, "no place goes out without cursors");
+        assert!(h.state().views[0].remote_cursors.is_empty(), "the others' places are ignored too");
+    }
+
+    #[test]
+    fn the_others_places_reach_the_tabs_and_a_new_file_drops_them() {
+        let (mut h, _) = app(true);
+        h.state().startup_inbox.lock().unwrap().push(("c.pdf".into(), pdf_pages(3)));
+        h.state().ownership_inbox.lock().unwrap().push(pdfcraft_engine::Ownership { replace: true, cursors: true, ..Default::default() });
+        h.run_steps(4);
+        others(&mut h, "Kim");
+        h.run_steps(3);
+        assert_eq!(h.state().views[0].remote_cursors.len(), 1);
+        assert_eq!(h.state().views[0].remote_cursors[0].name, "Kim");
+        h.state().startup_inbox.lock().unwrap().push(("c.pdf".into(), pdf_pages(3)));
+        h.state().ownership_inbox.lock().unwrap().push(pdfcraft_engine::Ownership { replace: true, cursors: true, ..Default::default() });
+        h.run_steps(4);
+        assert!(h.state().views[0].remote_cursors.is_empty(), "a new document starts without them");
+    }
+
     #[test]
     fn huge_pixel_dimensions_are_refused_from_the_header_alone() {
         let mut out = Vec::new();

@@ -93,6 +93,7 @@ fn main() {
                             app.ownership_inbox.clone(),
                             app.annot_inbox.clone(),
                             app.bytes_inbox.clone(),
+                            app.cursors_inbox.clone(),
                             cc.egui_ctx.clone(),
                         );
                         bridge.listen_view(app.view_inbox.clone(), cc.egui_ctx.clone());
@@ -103,6 +104,7 @@ fn main() {
                         app.host_save = Some(bridge.save_fn());
                         app.host_dirty = Some(bridge.dirty_fn());
                         app.host_edited = Some(bridge.edited_fn());
+                        app.host_cursor = Some(bridge.cursor_fn());
                         app.host_bytes = Some(bridge.bytes_fn());
                         bridge.post_ready();
                     } else if query_param("host").as_deref() == Some("parent") {
@@ -368,7 +370,8 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///   (`ready` only says the app listens).
 /// - `pdfcraft:dirty` (to the parent): `{ dirty }` whenever unsaved work appears or goes away.
 /// - `pdfcraft:edited` (to the parent): `{ rev }` after a pass in which the document has unsaved work and its edit generation moved; only for a file opened with `live: true`. `dirty` only flips, so this is how the page sees that editing goes on.
-/// - `pdfcraft:open` also takes `live` (send `edited`, default false) and `keepView` (also replaces the open documents, as `replace` does, and puts the page, scroll, zoom and layout of the one shown back on the new one as far as it has the places, default false). `ready` lists them in `openOptions`.
+/// - `pdfcraft:collab-cursor` (to the parent): `{ region, pos? }` for a file opened with `cursors: true`: `page:<n>` (n from 1, the page most in view) and `pos` `{ y?, sel? }` (`y` 0..1 the line at the top of the view, `sel.quads` the selected text or comment as user-space quads, as many as fit in 1024 characters); `region: null` when no document is shown. Sent when it changes. `pdfcraft:collab-cursors` (from the parent) `{ cursors: [{ conn, name, color, role, region, pos? }] }` replaces the list of other people drawn: their page marked in the Pages panel and a triangle, tag and shading on the page. Ignored for a file opened without `cursors`. A room holds one document, so nothing names it.
+/// - `pdfcraft:open` also takes `live` (send `edited`, default false), `cursors` (send and draw places, default false) and `keepView` (also replaces the open documents, as `replace` does, and puts the page, scroll, zoom and layout of the one shown back on the new one as far as it has the places, default false). `ready` lists them in `openOptions`.
 /// - `pdfcraft:failed` (to the parent): `{ error }` when the app couldn't start.
 ///
 /// Only the parent window on the app's own origin is heard or answered. With a parent on
@@ -376,7 +379,7 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 #[cfg(target_arch = "wasm32")]
 mod host {
     /// The open options added after the first release that this build understands (sent with `pdfcraft:ready`).
-    const OPEN_OPTIONS: [&str; 2] = ["live", "keepView"];
+    const OPEN_OPTIONS: [&str; 3] = ["live", "keepView", "cursors"];
 
     use eframe::wasm_bindgen::{JsCast, JsValue, closure::Closure};
 
@@ -437,6 +440,7 @@ mod host {
             ownership: pdfcraft_ui_egui::OwnershipInbox,
             annots: pdfcraft_ui_egui::AnnotInbox,
             bytes: pdfcraft_ui_egui::BytesInbox,
+            cursors: pdfcraft_ui_egui::CursorsInbox,
             ctx: egui::Context,
         ) {
             let bridge = self.clone();
@@ -448,10 +452,24 @@ mod host {
                 }
                 let data = event.data();
                 match string(&data, "type").as_deref() {
+                    Some("pdfcraft:collab-cursors") => {
+                        // Plain JSON by the wire contract; anything else is dropped. Only the latest list matters.
+                        let parsed = js_sys::JSON::stringify(&data).ok().and_then(|s| s.as_string()).and_then(|s| serde_json::from_str(&s).ok());
+                        if let Some(m) = parsed {
+                            if let Ok(mut q) = cursors.lock() {
+                                *q = Some(pdfcraft_ui_egui::remote_cursors::parse(&m));
+                            }
+                            ctx.request_repaint();
+                        }
+                        return;
+                    }
                     Some("pdfcraft:open") => {
                         // Messages left over from an earlier open belong to that open.
                         if let Ok(mut q) = annots.lock() {
                             q.clear();
+                        }
+                        if let Ok(mut q) = cursors.lock() {
+                            *q = None;
                         }
                     }
                     Some(kind) if pdfcraft_ui_egui::is_annot_sync_message(kind) => {
@@ -948,6 +966,27 @@ mod host {
             })
         }
 
+        /// `pdfcraft:collab-cursor` `{ region, pos? }` (`region: null` = no place), for a file opened with `cursors`.
+        pub fn cursor_fn(&self) -> pdfcraft_ui_egui::HostCursorFn {
+            let bridge = self.clone();
+            Box::new(move |place: Option<(&str, &serde_json::Value)>| {
+                let mut fields: Vec<(&str, JsValue)> = vec![("type", "pdfcraft:collab-cursor".into())];
+                match place {
+                    Some((region, pos)) => {
+                        fields.push(("region", region.into()));
+                        // `pos` is a small plain object; one that doesn't parse back is left off rather than sent half.
+                        if let Ok(pos) = js_sys::JSON::parse(&pos.to_string()) {
+                            fields.push(("pos", pos));
+                        }
+                    }
+                    None => fields.push(("region", JsValue::NULL)),
+                }
+                if let Some(m) = message(&fields) {
+                    let _ = bridge.post(&m, None);
+                }
+            })
+        }
+
         pub fn dirty_fn(&self) -> pdfcraft_ui_egui::HostDirtyFn {
             let bridge = self.clone();
             let mut last = false;
@@ -1217,7 +1256,7 @@ mod host {
         let annot_sync = flag("annotSync")?;
         // `replace: true` closes every open document (no questions) before this one opens.
         // `live: true` makes the page hear `pdfcraft:edited`; `keepView: true` replaces the open documents (like `replace`) and keeps their view.
-        let (live, keep_view) = (flag("live")?, flag("keepView")?);
+        let (live, keep_view, cursors) = (flag("live")?, flag("keepView")?, flag("cursors")?);
         let replace = flag("replace")? || keep_view;
         if annot_sync && actor.is_none() {
             return Err("annotSync needs an actor".into());
@@ -1254,7 +1293,7 @@ mod host {
             let n = max.as_f64().filter(|n| n.fract() == 0.0 && *n >= lo as f64 && *n <= hi as f64);
             n.ok_or_else(|| format!("maxAnnotationXfdfLength must be a whole number from {lo} to {hi}"))? as usize
         };
-        let own = pdfcraft_ui_egui::Ownership { actor, read_only, scope, annot_sync, hide_comments_panel, hide_menu_button, hide_panel_tabs, show_zoom_controls, replace, live, keep_view, max_xfdf_len, ..Default::default() };
+        let own = pdfcraft_ui_egui::Ownership { actor, read_only, scope, annot_sync, hide_comments_panel, hide_menu_button, hide_panel_tabs, show_zoom_controls, replace, live, keep_view, cursors, max_xfdf_len, ..Default::default() };
         Ok(pdfcraft_ui_egui::with_policy(own, policy_overrides(data)))
     }
 

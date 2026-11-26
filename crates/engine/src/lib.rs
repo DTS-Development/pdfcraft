@@ -254,6 +254,10 @@ pub struct Ownership {
     /// `pdfcraft:open` `keepView`: the page, scroll, zoom and layout of the document this one replaces
     /// (with `replace`) are put back on it. Read when the file arrives; it is no rule of the document.
     pub keep_view: bool,
+    /// `pdfcraft:open` `cursors`: this editor tells the page which page and selection it shows
+    /// (`collab-cursor`) and draws the places the page sends (`collab-cursors`). Read when the file
+    /// arrives; it is no rule of the document.
+    pub cursors: bool,
     /// `pdfcraft:open` `maxAnnotationXfdfLength`: the most UTF-16 units one annotation's XFDF may have
     /// when it goes out to the host (`annots-changed`) or is checked for export. 0 is the default
     /// (`pdfcraft_xfdf::MAX_XFDF_LEN`); the host's value is held to `MAX_XFDF_LEN..=MAX_XFDF_LEN_CEILING`.

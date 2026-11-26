@@ -1169,6 +1169,12 @@ fn pages(ui: &mut egui::Ui, t: &Tokens, info: &DocInfo, view: &mut crate::DocVie
                 Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { t.accent } else { t.border }),
                 egui::StrokeKind::Outside,
             );
+            // The other people of a shared document: a dot each in the thumbnail's corner, their names on hover.
+            let here = crate::remote_cursors::paint_on_thumb(ui.painter(), pr, &view.remote_cursors, i);
+            let resp = match here {
+                Some(names) => resp.on_hover_text(names),
+                None => resp,
+            };
             let label = ui.label(egui::RichText::new(&p.label).font(theme::medium(12.0)).color(if selected || picked {
                 t.accent_text
             } else {

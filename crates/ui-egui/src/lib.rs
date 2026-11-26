@@ -45,6 +45,7 @@ mod camera_ui;
 mod commands;
 mod comment_props;
 pub mod comments;
+pub mod remote_cursors;
 mod comments_panel;
 mod compare_ui;
 pub mod control;
@@ -445,6 +446,14 @@ pub type HostDirtyFn = Box<dyn FnMut(bool)>;
 /// only for a file opened with `live`). `dirty` only flips, so this is how the page sees editing go on.
 pub type HostEditedFn = Box<dyn FnMut(u64)>;
 
+/// Told where this editor is when that changes (web, only for a file opened with `cursors`): the
+/// region and pos of `collab-cursor`, or `None` when it shows no document.
+pub type HostCursorFn = Box<dyn FnMut(Option<(&str, &serde_json::Value)>)>;
+
+/// The page's latest list of other people's places (`collab-cursors`), waiting to be taken; a newer
+/// list replaces one still waiting.
+pub type CursorsInbox = std::sync::Arc<std::sync::Mutex<Option<Vec<remote_cursors::RemoteCursor>>>>;
+
 pub struct PasswordPrompt {
     pub name: String,
     pub path: Option<String>,
@@ -677,6 +686,16 @@ pub struct PdfCraftApp {
     /// The file now shown was opened with `live`; the last generation reported for it.
     host_live: bool,
     host_edited_last: Option<(DocId, u64)>,
+    /// Where the other people of a shared document are, as the page sends them (web, see [`CursorsInbox`]).
+    pub cursors_inbox: CursorsInbox,
+    /// Reports this editor's place to the embedding page (web, see [`HostCursorFn`]).
+    pub host_cursor: Option<HostCursorFn>,
+    /// The file now shown was opened with `cursors`: places go out and the others' are drawn.
+    host_cursors: bool,
+    /// The place last reported (`None` = nothing yet; `Some(None)` = reported as none).
+    host_cursor_last: Option<Option<remote_cursors::Place>>,
+    /// The others' places now drawn (shared with every tab's view).
+    remote_cursors: std::sync::Arc<Vec<remote_cursors::RemoteCursor>>,
     /// The embedding page's requests for the document's bytes, and where to answer (web, see [`BytesRequest`]).
     pub bytes_inbox: BytesInbox,
     pub host_bytes: Option<HostBytesFn>,
@@ -1089,6 +1108,11 @@ impl PdfCraftApp {
             host_edited: None,
             host_live: false,
             host_edited_last: None,
+            cursors_inbox: Default::default(),
+            host_cursor: None,
+            host_cursors: false,
+            host_cursor_last: None,
+            remote_cursors: Default::default(),
             bytes_inbox: Default::default(),
             host_bytes: None,
             stamp_inbox: Default::default(),
@@ -3358,11 +3382,13 @@ impl eframe::App for PdfCraftApp {
                 let mut replace = false;
                 let mut live = false;
                 let mut keep_view = false;
+                let mut cursors = false;
                 if let Some(ownership) = rules.pop_front() {
                     shares = ownership.annot_sync;
                     replace = ownership.replace;
                     live = ownership.live;
                     keep_view = ownership.keep_view;
+                    cursors = ownership.cursors;
                     self.session.set_open_ownership(ownership);
                 } else if self.host_lock {
                     self.session.set_open_ownership(host_lock::viewer_ownership());
@@ -3391,6 +3417,10 @@ impl eframe::App for PdfCraftApp {
                 // The page hears `edited` for this file only when it asked (a file opened later without `live` stops it).
                 self.host_live = live;
                 self.host_edited_last = None;
+                // A new file starts its own places: the list of the last one is dropped (the page sends a new one) and ours is told afresh.
+                self.host_cursors = cursors;
+                self.host_cursor_last = None;
+                self.remote_cursors = Default::default();
                 if shares {
                     self.annot_open_finished(opened.is_ok());
                 }
@@ -3472,6 +3502,7 @@ impl eframe::App for PdfCraftApp {
                 }
             }
         }
+        self.host_cursors_tick();
         self.poll_updates();
         self.poll_print();
         // Shortcuts deferred last frame: the text field has taken that frame's typing since.

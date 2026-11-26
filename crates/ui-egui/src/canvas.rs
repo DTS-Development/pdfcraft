@@ -639,6 +639,10 @@ pub struct DocView {
     /// in-flight ones cannot be cancelled mid-operator. Older tiles and the backdrop stay
     /// stretched meanwhile; fresh tiles go out once the pan settles.
     pub(crate) last_scroll: Vec2,
+    /// Where the other people of a shared document are (the app hands its list to every tab; empty otherwise).
+    pub(crate) remote_cursors: std::sync::Arc<Vec<crate::remote_cursors::RemoteCursor>>,
+    /// The line at the top of the view on the current page, from 0 (page top) to 1 (page bottom); `None` when that page is off screen.
+    pub(crate) view_y: Option<f32>,
     /// Side-by-side compare: scroll to here this frame, following the other half.
     pub(crate) sync_scroll: Option<Vec2>,
     /// The page widget's id, by which the Hand tool finds its drag before the pages are laid out.
@@ -863,6 +867,8 @@ impl DocView {
             last_scale: 0.0,
             sharp_hold_until: 0.0,
             last_scroll: Vec2::ZERO,
+            remote_cursors: Default::default(),
+            view_y: None,
             sync_scroll: None,
             page_widget: None,
             pan_hold_until: 0.0,
@@ -3491,6 +3497,10 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                     painter.rect_filled(to_screen(*rect), CornerRadius::same(1), h.color);
                 }
             }
+            // The other people of a shared document (draw only; they take no input).
+            if !view.remote_cursors.is_empty() {
+                crate::remote_cursors::paint_on_page(painter, visible, &xf, &info.pages[i], i, &view.remote_cursors);
+            }
             if let Some(text) = view.texts.get(&i).cloned() {
                 if let Some(f) = &view.find {
                     for (k, (mp, range)) in f.matches.iter().enumerate() {
@@ -3849,6 +3859,8 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         if view.continuous {
             view.current = current;
         }
+        // Where the view's top edge cuts the current page (the others' marker for "reading here").
+        view.view_y = view.screen_rects.iter().find(|(p, _)| *p == view.current).map(|(_, r)| ((visible.top() - r.top()) / r.height().max(1.0)).clamp(0.0, 1.0));
         resp.context_menu(|ui| {
             // Preparing a form: the selected field's menu.
             if preparing && let Some((name, wi)) = view.prepare.selected.clone() {
